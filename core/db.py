@@ -1997,7 +1997,15 @@ def _queue_email_channel(notification_id: int | None, target_uid: int | None, ro
             pass
 
 def _recent_duplicate_notification(target_uid, role, title, message, entity_type, entity_id) -> bool:
-    # Suppress same notification created repeatedly in short UI rerun windows.
+    """Suppress only true rapid double-click duplicates.
+
+    The old 10-minute window accidentally swallowed legitimate workflow
+    notifications when a gateway pass was returned, edited and resubmitted, or
+    approved shortly after the reviewer had already opened the tab. That made
+    the red-dot badge look broken. Keep protection against accidental double
+    clicks, but allow later workflow movements on the same record to notify
+    users again.
+    """
     rows = run_query(
         """
         SELECT id FROM notifications
@@ -2006,7 +2014,8 @@ def _recent_duplicate_notification(target_uid, role, title, message, entity_type
           AND title=? AND message=?
           AND COALESCE(entity_type, '')=COALESCE(?, '')
           AND COALESCE(entity_id, -1)=COALESCE(?, -1)
-          AND datetime(created_at) >= datetime('now','-10 minutes')
+          AND COALESCE(is_read,0)=0
+          AND datetime(created_at) >= datetime('now','-15 seconds')
         LIMIT 1
         """,
         (target_uid, role, title, message, entity_type, entity_id),

@@ -3856,7 +3856,7 @@ def generate_gateway_pass_document(gateway_pass_id: int) -> str | None:
         story.append(validity)
 
         doc.build(story, onFirstPage=page_frame, onLaterPages=page_frame)
-        run_query("UPDATE gateway_passes SET status='Generated', generated_at=?, generated_file_path=?, updated_at=? WHERE id=?", (now_iso(), str(path), now_iso(), gateway_pass_id))
+        run_query("UPDATE gateway_passes SET status='Generated', next_role=NULL, generated_at=?, generated_file_path=?, updated_at=? WHERE id=?", (now_iso(), str(path), now_iso(), gateway_pass_id))
         log_gateway_event(gateway_pass_id, "Gateway Pass Generated", "Generated", str(path))
         return str(path)
     except Exception as exc:
@@ -4911,7 +4911,9 @@ def _gateway_approve(gateway_pass_id: int, decision: str, note: str):
         decision_label = "Returned for Correction"; title = "Gateway Pass Returned"; msg = f"{row['pass_number']} was returned for correction. Reason: {note}"
     run_query("INSERT INTO gateway_pass_approvals (gateway_pass_id, approver_user_id, approver_role, decision, note, created_at) VALUES (?, ?, ?, ?, ?, ?)", (gateway_pass_id, user()["id"], user()["role"], decision_label, note, now_iso()))
     log_gateway_event(gateway_pass_id, f"Gateway Pass {decision_label}", decision_label, note)
-    create_notification(int(row["facility_manager_user_id"]), None, title, msg, "Gateway Pass", gateway_pass_id, "High", ["in_app", "browser_push"], action_label="Open Gateway Pass")
+    action_label = "Ready to Generate" if decision_label == "Approved" else "Open Gateway Pass"
+    create_notification(int(row["facility_manager_user_id"]), None, title, msg, "Gateway Pass", gateway_pass_id, "High", ["in_app", "browser_push"], action_label=action_label)
+    _notify_auditors(title, msg, "Gateway Pass", gateway_pass_id)
     _rerun_success(f"Gateway pass {decision_label.lower()}.")
 
 
@@ -5053,7 +5055,7 @@ def _generate_gateway_pass_pdf_core(gateway_pass_id: int) -> str | None:
         story.append(Spacer(1, 7)); story.append(Paragraph("SECURITY VERIFICATION", styles["Heading3"])); story.append(Paragraph("Security Officer Name: ______________________________ &nbsp;&nbsp; Gate Verification Time: ______________________________<br/>Exit/Entry Confirmation: ______________________________ &nbsp;&nbsp; Signature: ______________________________", normal))
         story.append(Spacer(1, 5)); story.append(Paragraph("This gateway pass is valid only for the listed items and approved movement date. System reference number: GP-%s" % gateway_pass_id, small))
         doc.build(story)
-        run_query("UPDATE gateway_passes SET status='Generated', generated_at=?, generated_file_path=?, updated_at=? WHERE id=?", (now_iso(), str(path), now_iso(), gateway_pass_id))
+        run_query("UPDATE gateway_passes SET status='Generated', next_role=NULL, generated_at=?, generated_file_path=?, updated_at=? WHERE id=?", (now_iso(), str(path), now_iso(), gateway_pass_id))
         log_gateway_event(gateway_pass_id, "Gateway Pass Generated", "Generated", str(path))
         return str(path)
     except Exception as exc:
@@ -6789,17 +6791,24 @@ def _gateway_approve(gateway_pass_id: int, decision: str, note: str):
     if decision in ["Rejected", "Returned for Correction"] and not note.strip():
         st.error("A rejection or return reason is required."); return
     if decision == "Approved":
-        run_query("UPDATE gateway_passes SET status='Approved', next_role=NULL, approved_at=?, approved_by_user_id=?, approved_by_role=?, approval_note=?, updated_at=? WHERE id=?", (now_iso(), user()["id"], role, note or "Approved.", now_iso(), gateway_pass_id))
-        decision_label = "Approved"; title = "Gateway Pass Approved"; msg = f"{row['pass_number']} has been approved. You can now preview, generate and download the final gateway pass."
+        # Approval must hand the record back to Utility Head / Facility Head for
+        # final generation. Keeping next_role explicit fixes the missing
+        # "Ready to Generate" route after Procurement Manager approval.
+        run_query("UPDATE gateway_passes SET status='Approved', next_role='facility_manager', approved_at=?, approved_by_user_id=?, approved_by_role=?, approval_note=?, updated_at=? WHERE id=?", (now_iso(), user()["id"], role, note or "Approved.", now_iso(), gateway_pass_id))
+        decision_label = "Approved"; title = "Gateway Pass Approved - Ready to Generate"; msg = f"{row['pass_number']} has been approved by {display_role(role)}. It is now ready to preview, generate and download."
     elif decision == "Rejected":
         run_query("UPDATE gateway_passes SET status='Rejected', next_role=NULL, rejected_at=?, rejected_by_user_id=?, rejection_reason=?, updated_at=? WHERE id=?", (now_iso(), user()["id"], note, now_iso(), gateway_pass_id))
         decision_label = "Rejected"; title = "Gateway Pass Rejected"; msg = f"{row['pass_number']} was rejected. Reason: {note}"
     else:
-        run_query("UPDATE gateway_passes SET status='Returned for Correction', next_role=NULL, rejection_reason=?, updated_at=? WHERE id=?", (note, now_iso(), gateway_pass_id))
+        # Returned records must appear in the Facility Head Drafts / Returned
+        # tab for correction and resubmission.
+        run_query("UPDATE gateway_passes SET status='Returned for Correction', next_role='facility_manager', rejection_reason=?, updated_at=? WHERE id=?", (note, now_iso(), gateway_pass_id))
         decision_label = "Returned for Correction"; title = "Gateway Pass Returned"; msg = f"{row['pass_number']} was returned for correction. Reason: {note}"
     run_query("INSERT INTO gateway_pass_approvals (gateway_pass_id, approver_user_id, approver_role, decision, note, created_at) VALUES (?, ?, ?, ?, ?, ?)", (gateway_pass_id, user()["id"], role, decision_label, note, now_iso()))
     log_gateway_event(gateway_pass_id, f"Gateway Pass {decision_label}", decision_label, note)
-    create_notification(int(row["facility_manager_user_id"]), None, title, msg, "Gateway Pass", gateway_pass_id, "High", ["in_app", "browser_push"], action_label="Open Gateway Pass")
+    action_label = "Ready to Generate" if decision_label == "Approved" else "Open Gateway Pass"
+    create_notification(int(row["facility_manager_user_id"]), None, title, msg, "Gateway Pass", gateway_pass_id, "High", ["in_app", "browser_push"], action_label=action_label)
+    _notify_auditors(title, msg, "Gateway Pass", gateway_pass_id)
     _rerun_success(f"Gateway pass {decision_label.lower()}.")
 
 
@@ -6832,7 +6841,7 @@ def gateway_pass_review_queue(title: str, admin_mode: bool = False):
             _rerun_success("Gateway pass marked reviewed by Procurement Manager.")
         if c3.button("Return for Correction", key=f"gp_pm_return_{gp_id}"):
             if not note.strip(): st.error("Please enter a correction reason."); return
-            run_query("UPDATE gateway_passes SET status='Returned for Correction', next_role=NULL, rejection_reason=?, updated_at=? WHERE id=?", (note, now_iso(), gp_id))
+            run_query("UPDATE gateway_passes SET status='Returned for Correction', next_role='facility_manager', rejection_reason=?, updated_at=? WHERE id=?", (note, now_iso(), gp_id))
             log_gateway_event(gp_id, "Returned for Correction", "Returned for Correction", note)
             _notify_gateway_event({**row.to_dict(), "id": gp_id}, "Gateway pass returned", f"{row['pass_number']} was returned for correction. {note}", target="facility", importance="High")
             _rerun_success("Gateway pass returned for correction.")
@@ -7008,7 +7017,7 @@ def generate_gateway_pass_document(gateway_pass_id: int) -> str | None:
         story.append(Table(sec_rows, colWidths=[35*mm, 57*mm, 35*mm, 57*mm], style=form_style))
         story.append(Spacer(1, 5)); story.append(Paragraph("This gateway pass is valid only for the listed items and approved movement date.", small))
         doc.build(story)
-        run_query("UPDATE gateway_passes SET status='Generated', generated_at=?, generated_file_path=?, updated_at=? WHERE id=?", (now_iso(), str(path), now_iso(), gateway_pass_id))
+        run_query("UPDATE gateway_passes SET status='Generated', next_role=NULL, generated_at=?, generated_file_path=?, updated_at=? WHERE id=?", (now_iso(), str(path), now_iso(), gateway_pass_id))
         log_gateway_event(gateway_pass_id, "Gateway Pass Generated", "Generated", str(path))
         log_audit("GATEWAY_PASS_GENERATED", "Gateway Pass", gateway_pass_id, str(path), user()["id"], user()["role"])
         return str(path)
@@ -7062,15 +7071,29 @@ def gateway_pass_register(where_sql: str, params: tuple | list, title: str, allo
 
 
 def facility_gateway_pass_page():
-    section = st.radio("Gateway Pass", ["Create Draft", "Drafts / Returned", "Ready to Generate", "History"], horizontal=True, key="facility_gp_sections_cmd")
+    uid = int(user()["id"])
+    ready_count = int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE facility_manager_user_id=? AND status='Approved'", (uid,)).iloc[0, 0])
+    returned_count = int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE facility_manager_user_id=? AND status IN ('Returned for Correction','Returned')", (uid,)).iloc[0, 0])
+    sections = ["Create Draft", "Drafts / Returned", "Ready to Generate", "History"]
+    # When an approval routes back to the Facility Head, land on the unlocked
+    # generation queue instead of leaving the user on Create Draft.
+    if ready_count and st.session_state.get("facility_gp_sections_cmd") in (None, "Create Draft"):
+        st.session_state["facility_gp_sections_cmd"] = "Ready to Generate"
+    section = st.radio("Gateway Pass", sections, horizontal=True, key="facility_gp_sections_cmd")
+    if ready_count:
+        st.success(f"{ready_count} gateway pass(es) are approved and ready to generate.")
+    if returned_count:
+        st.warning(f"{returned_count} gateway pass(es) were returned for correction.")
     if section == "Create Draft":
         create_gateway_pass_form()
     elif section == "Drafts / Returned":
-        gateway_pass_register("gp.facility_manager_user_id=? AND gp.status IN ('Draft','Returned for Correction','Returned')", (user()["id"],), "Drafts / Returned", allow_submit=True, key_prefix="facility_gp_drafts_cmd")
+        gateway_pass_register("gp.facility_manager_user_id=? AND gp.status IN ('Draft','Returned for Correction','Returned')", (uid,), "Drafts / Returned", allow_submit=True, key_prefix="facility_gp_drafts_cmd")
     elif section == "Ready to Generate":
-        gateway_pass_register("gp.facility_manager_user_id=? AND gp.status IN ('Approved','Generated','Downloaded')", (user()["id"],), "Approved Gateway Passes Ready to Generate", allow_generate=True, key_prefix="facility_gp_ready_cmd")
+        # Ready queue must contain only approved, not already generated/downloaded.
+        # Generated items leave this queue and remain available under History.
+        gateway_pass_register("gp.facility_manager_user_id=? AND gp.status='Approved'", (uid,), "Approved Gateway Passes Ready to Generate", allow_generate=True, key_prefix="facility_gp_ready_cmd")
     else:
-        gateway_pass_register("gp.facility_manager_user_id=?", (user()["id"],), "Gateway Pass History", allow_generate=True, key_prefix="facility_gp_history_cmd")
+        gateway_pass_register("gp.facility_manager_user_id=?", (uid,), "Gateway Pass History", allow_generate=True, key_prefix="facility_gp_history_cmd")
 
 
 def finance_ready_df() -> pd.DataFrame:

@@ -320,19 +320,11 @@ def mark_section_attention_seen(current: dict, section: str):
             """,
             (uid, role, section, ts, ts, ts),
         )
-        # If a notification was explicitly routed to this section, opening the
-        # section also marks that routed notification as read. General bell
-        # notifications remain controlled by the notification panel.
-        run_query(
-            """
-            UPDATE notifications
-            SET is_read=1
-            WHERE is_read=0
-              AND section_target=?
-              AND (user_id=? OR role=? OR role='All')
-            """,
-            (section, uid, role),
-        )
+        # Opening a section clears only the red attention badge by updating
+        # section_attention_reads. It must NOT mark notification records as read,
+        # otherwise users think the notification never arrived after they open
+        # the tab. The bell panel remains unread until the user clicks
+        # "Mark all as read".
     except Exception:
         pass
 
