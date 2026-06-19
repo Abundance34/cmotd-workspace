@@ -6457,6 +6457,8 @@ def create_request_form():
             st.error("Business justification and at least one item are required.")
             return
         _save_custom_value("department_project", dept); _save_custom_value("category", cat)
+        vendor_names = [str(v.get("name") or "").strip() for v in vendor_details if str(v.get("name") or "").strip()]
+        vendor_pref_full = ", ".join(dict.fromkeys([v for v in [vendor_pref.strip(), *vendor_names] if v]))
         path, _ = save_upload(attachment, "requests")
         req_no = make_ref("PR")
         req_id = run_insert(
