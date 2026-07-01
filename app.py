@@ -441,6 +441,169 @@ def inject_shell_css():
             .pf-topbar-user { width: 100%; flex-wrap: wrap; }
             .pf-role-pill, .pf-landing-pill { font-size: 10px; }
         }
+
+        /*
+         * Modern desktop-shell refinement
+         * Presentation only: this intentionally overrides spacing and native
+         * Streamlit chrome without changing any page routing or application data.
+         */
+        :root {
+            --pf-primary: #2563eb;
+            --pf-primary-hover: #1d4ed8;
+            --pf-canvas: #f8fafc;
+            --pf-surface: #ffffff;
+            --pf-border: #e4e7ec;
+            --pf-heading: #101828;
+            --pf-copy: #344054;
+            --pf-subtle: #667085;
+            --pf-sidebar-deep: #101828;
+            --pf-sidebar-text: #d0d5dd;
+        }
+
+        /* Remove Streamlit Cloud chrome so it cannot collide with the app bar. */
+        [data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"],
+        [data-testid="stStatusWidget"],
+        #MainMenu,
+        footer {
+            display: none !important;
+        }
+        [data-testid="stAppViewContainer"],
+        [data-testid="stApp"],
+        [data-testid="stMain"] {
+            background: var(--pf-canvas) !important;
+        }
+        [data-testid="stMainBlockContainer"],
+        .main .block-container {
+            max-width: 1600px !important;
+            padding: 18px 30px 52px !important;
+        }
+        @media (min-width: 1500px) {
+            [data-testid="stMainBlockContainer"],
+            .main .block-container { padding-left: 46px !important; padding-right: 46px !important; }
+        }
+
+        /* Compact application bar: no repeated chips or tall empty region. */
+        .pf-topbar {
+            min-height: 48px !important;
+            margin: 0 0 24px !important;
+            padding: 0 0 13px !important;
+            gap: 14px !important;
+            border-bottom: 1px solid var(--pf-border) !important;
+        }
+        .pf-breadcrumb {
+            color: var(--pf-heading) !important;
+            font-size: 14px !important;
+            font-weight: 720 !important;
+            letter-spacing: -0.015em !important;
+        }
+        .pf-breadcrumb span { color: #98a2b3 !important; padding: 0 8px !important; font-weight: 400; }
+        .pf-topbar-label,
+        .pf-role-pill,
+        .pf-landing-pill { display: none !important; }
+        .pf-topbar-user {
+            gap: 8px !important;
+            padding: 5px 10px 5px 5px;
+            border: 1px solid var(--pf-border);
+            border-radius: 12px;
+            background: var(--pf-surface);
+            box-shadow: 0 1px 2px rgba(16, 24, 40, .04);
+        }
+        .pf-avatar {
+            width: 30px !important;
+            height: 30px !important;
+            flex-basis: 30px !important;
+            border-radius: 9px !important;
+            background: #eff4ff !important;
+            border-color: #d1e0ff !important;
+            color: #175cd3 !important;
+            font-size: 11px !important;
+            box-shadow: none !important;
+        }
+        .pf-user-name { color: var(--pf-heading) !important; font-size: 12px !important; font-weight: 720 !important; }
+        .pf-user-caption { color: var(--pf-subtle) !important; font-size: 10px !important; }
+
+        /* Sidebar is intentionally narrow and dense, like a modern operational app. */
+        section[data-testid="stSidebar"],
+        section[data-testid="stSidebar"] > div:first-child {
+            width: 272px !important;
+            min-width: 272px !important;
+            max-width: 272px !important;
+            background: var(--pf-sidebar-deep) !important;
+        }
+        [data-testid="stSidebarHeader"] {
+            display: none !important;
+            height: 0 !important;
+            min-height: 0 !important;
+            padding: 0 !important;
+            margin: 0 !important;
+        }
+        section[data-testid="stSidebar"] > div:first-child {
+            padding-top: 0 !important;
+        }
+        [data-testid="stSidebarContent"] {
+            padding: 18px 12px !important;
+        }
+        [data-testid="stSidebarContent"] > div { padding: 0 !important; }
+        .pf-sidebar-brand {
+            gap: 9px !important;
+            margin: 0 0 20px !important;
+            padding: 0 6px !important;
+        }
+        .pf-sidebar-logo {
+            width: 32px !important;
+            height: 32px !important;
+            border-radius: 9px !important;
+            background: #2563eb !important;
+            box-shadow: none !important;
+        }
+        .pf-sidebar-product { font-size: 15px !important; font-weight: 760 !important; }
+        .pf-sidebar-caption { color: #98a2b3 !important; font-size: 9px !important; letter-spacing: .09em !important; }
+        .pf-sidebar-nav-label {
+            margin: 0 0 8px;
+            padding: 0 8px;
+            color: #98a2b3;
+            font-size: 10px;
+            font-weight: 760;
+            letter-spacing: .09em;
+            text-transform: uppercase;
+        }
+        /* Hide the native radio group label. The custom label above is its visual replacement. */
+        section[data-testid="stSidebar"] [data-testid="stRadio"] > label[data-testid="stWidgetLabel"],
+        section[data-testid="stSidebar"] [data-testid="stRadio"] > label:first-child {
+            display: none !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] > div { gap: 2px !important; }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label {
+            min-height: 35px !important;
+            margin: 0 0 2px !important;
+            padding: 8px 10px !important;
+            border-radius: 8px !important;
+            color: var(--pf-sidebar-text) !important;
+            font-size: 12px !important;
+            font-weight: 590 !important;
+            line-height: 1.18 !important;
+            box-shadow: none !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
+            background: rgba(255,255,255,.06) !important;
+            color: #ffffff !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {
+            background: #1d4ed8 !important;
+            border-color: #3b82f6 !important;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,.08) !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label p { overflow-wrap: anywhere; }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] { margin-bottom: 4px !important; }
+        section[data-testid="stSidebar"] [data-testid="stDivider"] { margin: 12px 0 !important; }
+
+        @media (max-width: 860px) {
+            [data-testid="stMainBlockContainer"],
+            .main .block-container { padding: 14px 16px 34px !important; }
+            .pf-topbar { margin-bottom: 18px !important; }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -462,16 +625,13 @@ def render_top_header(current: dict):
         <div class="pf-topbar">
             <div class="pf-topbar-context">
                 <div class="pf-breadcrumb">ProcureFlow <span>/</span> {landing_label}</div>
-                <div class="pf-topbar-label">Enterprise Procurement Management</div>
             </div>
-            <div class="pf-topbar-user">
+            <div class="pf-topbar-user" aria-label="Signed-in user: {full_name}, {role}">
                 <div class="pf-avatar" aria-hidden="true">{initials}</div>
                 <div class="pf-user-copy">
                     <div class="pf-user-name">{full_name}</div>
-                    <div class="pf-user-caption">Signed in workspace</div>
+                    <div class="pf-user-caption">{role}</div>
                 </div>
-                <span class="pf-role-pill">{role}</span>
-                <span class="pf-landing-pill">{landing_label}</span>
             </div>
         </div>
         """,
@@ -802,7 +962,10 @@ def render_sidebar_navigation(current: dict):
             """,
             unsafe_allow_html=True,
         )
-        st.markdown(f"### {nav_title}")
+        st.markdown(
+            f'<div class="pf-sidebar-nav-label">{nav_title}</div>',
+            unsafe_allow_html=True,
+        )
 
         # Programmatic navigation requests are stored under a separate pending
         # key because Streamlit forbids writing to a widget-backed key after
@@ -838,7 +1001,7 @@ def render_sidebar_navigation(current: dict):
             counts[preselected] = 0
 
         selected = st.radio(
-            nav_title,
+            "Navigation menu",
             sections,
             key=state_key,
             label_visibility="collapsed",

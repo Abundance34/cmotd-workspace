@@ -322,6 +322,283 @@ def inject_css():
     </style>
     """, unsafe_allow_html=True)
 
+    # Final visual layer: applied after the legacy stylesheet above so all
+    # role pages share the same compact, contemporary enterprise treatment.
+    st.markdown("""
+    <style>
+    :root {
+        --pf-blue: #2563eb;
+        --pf-blue-dark: #1d4ed8;
+        --pf-blue-soft: #eff4ff;
+        --pf-page: #f8fafc;
+        --pf-card: #ffffff;
+        --pf-line: #e4e7ec;
+        --pf-text: #101828;
+        --pf-heading: #101828;
+        --pf-copy: #344054;
+        --pf-muted: #667085;
+    }
+
+    /* Type hierarchy and page title */
+    h1, h2, h3, h4, h5, h6,
+    [data-testid="stMarkdownContainer"] h1,
+    [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stMarkdownContainer"] h3 {
+        color: var(--pf-text) !important;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+        letter-spacing: -0.028em !important;
+    }
+    h2, [data-testid="stMarkdownContainer"] h2 { font-size: 1.45rem !important; font-weight: 730 !important; }
+    h3, [data-testid="stMarkdownContainer"] h3 { font-size: 1.17rem !important; font-weight: 700 !important; }
+    /* Streamlit heading anchor icons look unfinished in an operational dashboard. */
+    [data-testid="stHeaderActionElements"],
+    [data-testid="stMarkdownContainer"] h1 a,
+    [data-testid="stMarkdownContainer"] h2 a,
+    [data-testid="stMarkdownContainer"] h3 a {
+        display: none !important;
+    }
+
+    .pf-hero {
+        margin: 0 0 26px !important;
+        padding: 0 !important;
+        border: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+    }
+    .pf-hero::before { display: none !important; }
+    .pf-hero h1 {
+        font-size: clamp(1.85rem, 2.35vw, 2.35rem) !important;
+        font-weight: 760 !important;
+        line-height: 1.14 !important;
+        color: var(--pf-text) !important;
+    }
+    .pf-hero p {
+        max-width: 900px;
+        margin-top: 8px !important;
+        color: var(--pf-muted) !important;
+        font-size: .93rem !important;
+        line-height: 1.55 !important;
+    }
+
+    /* KPI cards: flat, clean, and readable rather than heavily decorated. */
+    div[data-testid="stMetric"] {
+        min-height: 108px !important;
+        padding: 16px !important;
+        border: 1px solid var(--pf-line) !important;
+        border-radius: 12px !important;
+        background: var(--pf-card) !important;
+        box-shadow: 0 1px 2px rgba(16,24,40,.035) !important;
+    }
+    div[data-testid="stMetric"]::before { display: none !important; }
+    div[data-testid="stMetric"] label {
+        color: var(--pf-muted) !important;
+        font-size: .73rem !important;
+        font-weight: 650 !important;
+        letter-spacing: .01em !important;
+    }
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+        margin-top: 6px !important;
+        color: var(--pf-text) !important;
+        font-size: clamp(1.32rem, 1.85vw, 1.8rem) !important;
+        font-weight: 750 !important;
+        line-height: 1.35 !important;
+    }
+
+    /* Containers, expanders, forms, and tables */
+    .pf-card,
+    div[data-testid="stVerticalBlockBorderWrapper"],
+    div[data-testid="stExpander"],
+    div[data-testid="stDataFrame"] {
+        border: 1px solid var(--pf-line) !important;
+        border-radius: 12px !important;
+        background: var(--pf-card) !important;
+        box-shadow: 0 1px 2px rgba(16,24,40,.035) !important;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"] { padding: 0 !important; }
+    div[data-testid="stExpander"] { overflow: hidden !important; }
+    div[data-testid="stExpander"] details > summary {
+        min-height: 52px;
+        padding: 14px 16px !important;
+        background: #fcfcfd;
+        color: var(--pf-text) !important;
+        font-size: .9rem !important;
+        font-weight: 680 !important;
+        border-bottom: 1px solid var(--pf-line);
+    }
+    div[data-testid="stExpander"] details > div {
+        padding: 0 !important;
+        background: var(--pf-card) !important;
+    }
+    /* Avoid the visually heavy double-card effect of a form inside an expander. */
+    div[data-testid="stExpander"] [data-testid="stForm"] {
+        margin: 0 !important;
+        padding: 16px !important;
+        border: 0 !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        background: transparent !important;
+    }
+    [data-testid="stForm"] {
+        padding: 18px !important;
+        border: 1px solid var(--pf-line) !important;
+        border-radius: 12px !important;
+        background: var(--pf-card) !important;
+        box-shadow: 0 1px 2px rgba(16,24,40,.035) !important;
+    }
+    [data-testid="stDataFrame"] { overflow: hidden !important; }
+    div[data-testid="stDataFrame"] [role="columnheader"] {
+        min-height: 38px !important;
+        background: #f9fafb !important;
+        color: #475467 !important;
+        font-size: .69rem !important;
+        font-weight: 720 !important;
+        letter-spacing: .045em !important;
+    }
+    div[data-testid="stDataFrame"] [role="gridcell"] {
+        color: var(--pf-copy) !important;
+        border-color: #eaecf0 !important;
+        font-size: .82rem !important;
+    }
+    [data-testid="stMarkdownContainer"] table {
+        margin: 8px 0 18px !important;
+        border-color: var(--pf-line) !important;
+        border-radius: 12px !important;
+        box-shadow: 0 1px 2px rgba(16,24,40,.035) !important;
+    }
+    [data-testid="stMarkdownContainer"] table th {
+        padding: 11px 13px !important;
+        background: #f9fafb !important;
+        color: #475467 !important;
+        font-size: .69rem !important;
+    }
+    [data-testid="stMarkdownContainer"] table td {
+        padding: 12px 13px !important;
+        color: var(--pf-copy) !important;
+        border-color: #eaecf0 !important;
+    }
+
+    /* Controls */
+    [data-testid="stWidgetLabel"] p,
+    [data-testid="stWidgetLabel"] span {
+        color: var(--pf-copy) !important;
+        font-size: .82rem !important;
+        font-weight: 620 !important;
+    }
+    div[data-baseweb="input"] > div,
+    div[data-baseweb="select"] > div,
+    [data-testid="stNumberInput"] div[data-baseweb="input"] > div,
+    [data-testid="stDateInput"] div[data-baseweb="input"] > div,
+    [data-testid="stTextArea"] textarea {
+        min-height: 42px !important;
+        border: 1px solid #d0d5dd !important;
+        border-radius: 9px !important;
+        background: #ffffff !important;
+        color: var(--pf-heading, #101828) !important;
+        box-shadow: 0 1px 2px rgba(16,24,40,.025) !important;
+    }
+    [data-testid="stTextArea"] textarea { min-height: 96px !important; padding-top: 10px !important; }
+    div[data-baseweb="input"] > div:hover,
+    div[data-baseweb="select"] > div:hover,
+    [data-testid="stTextArea"] textarea:hover { border-color: #98a2b3 !important; }
+    div[data-baseweb="input"] > div:focus-within,
+    div[data-baseweb="select"] > div:focus-within,
+    [data-testid="stTextArea"] textarea:focus {
+        border-color: var(--pf-blue) !important;
+        box-shadow: 0 0 0 3px rgba(37,99,235,.12) !important;
+    }
+    .stButton > button,
+    .stDownloadButton > button,
+    [data-testid="stFormSubmitButton"] > button {
+        min-height: 40px !important;
+        padding: 0 14px !important;
+        border-radius: 9px !important;
+        font-size: .82rem !important;
+        font-weight: 680 !important;
+        box-shadow: none !important;
+    }
+    .stButton > button[kind="primary"],
+    .stDownloadButton > button[kind="primary"],
+    [data-testid="stFormSubmitButton"] > button,
+    button[data-testid="baseButton-primary"] {
+        background: var(--pf-blue) !important;
+        border-color: var(--pf-blue) !important;
+        color: #ffffff !important;
+        box-shadow: 0 1px 2px rgba(16,24,40,.12) !important;
+    }
+    .stButton > button[kind="primary"]:hover,
+    .stDownloadButton > button[kind="primary"]:hover,
+    [data-testid="stFormSubmitButton"] > button:hover,
+    button[data-testid="baseButton-primary"]:hover {
+        background: var(--pf-blue-dark) !important;
+        border-color: var(--pf-blue-dark) !important;
+        transform: translateY(-1px);
+    }
+    .stButton > button[kind="secondary"],
+    .stDownloadButton > button[kind="secondary"],
+    button[data-testid="baseButton-secondary"] {
+        background: #ffffff !important;
+        border-color: #d0d5dd !important;
+        color: var(--pf-copy) !important;
+    }
+    .stButton > button[kind="secondary"]:hover,
+    .stDownloadButton > button[kind="secondary"]:hover,
+    button[data-testid="baseButton-secondary"]:hover {
+        background: #f9fafb !important;
+        border-color: #98a2b3 !important;
+        color: var(--pf-text) !important;
+    }
+    [data-baseweb="checkbox"] [role="checkbox"][aria-checked="true"] {
+        background-color: var(--pf-blue) !important;
+        border-color: var(--pf-blue) !important;
+    }
+    [data-testid="stFileUploader"] {
+        border: 1px dashed #98a2b3 !important;
+        border-radius: 10px !important;
+        background: #fcfcfd !important;
+    }
+
+    /* Tabs and status chips */
+    div[data-baseweb="tab-list"] {
+        gap: 3px !important;
+        padding: 0 0 10px !important;
+        border-bottom: 1px solid var(--pf-line) !important;
+    }
+    button[data-baseweb="tab"] {
+        min-height: 34px !important;
+        padding: 7px 10px !important;
+        border-radius: 8px !important;
+        color: var(--pf-muted) !important;
+        font-size: .8rem !important;
+        font-weight: 650 !important;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        background: var(--pf-blue-soft) !important;
+        color: var(--pf-blue-dark) !important;
+    }
+    div[data-baseweb="tab-highlight"] { height: 2px !important; background: var(--pf-blue) !important; }
+    .pf-badge {
+        min-height: 24px !important;
+        padding: 4px 8px !important;
+        border-radius: 999px !important;
+        font-size: 10px !important;
+        font-weight: 720 !important;
+        letter-spacing: .01em !important;
+    }
+    [data-testid="stAlert"] {
+        border-radius: 10px !important;
+        border-color: #d0d5dd !important;
+        box-shadow: none !important;
+    }
+    [data-testid="stDivider"] { border-color: var(--pf-line) !important; }
+
+    @media (max-width: 780px) {
+        .pf-hero { margin-bottom: 20px !important; }
+        .pf-hero h1 { font-size: 1.8rem !important; }
+        div[data-testid="stMetric"] { min-height: 96px !important; padding: 13px !important; }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 
 def role_header(title: str, subtitle: str) -> None:
     """Render the shared ProcureFlow workspace header.
