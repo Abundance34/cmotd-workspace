@@ -441,7 +441,8 @@ def login_panel():
 
     Credentials, validation, demo accounts, and session behavior are unchanged.
     """
-    _left, centre, _right = st.columns([1, 1.12, 1])
+    # Wider center column: only the login presentation changes; authentication remains untouched.
+    _left, centre, _right = st.columns([0.65, 1.9, 0.65])
     with centre:
         st.markdown(
             """

@@ -456,8 +456,9 @@ def inject_shell_css():
             --pf-heading: #101828;
             --pf-copy: #344054;
             --pf-subtle: #667085;
-            --pf-sidebar-deep: #101828;
-            --pf-sidebar-text: #d0d5dd;
+            /* A brighter, modern blue shell shared by every signed-in role. */
+            --pf-sidebar-deep: #2b73d6;
+            --pf-sidebar-text: #ffffff;
         }
 
         /* Remove Streamlit Cloud chrome so it cannot collide with the app bar. */
@@ -530,7 +531,7 @@ def inject_shell_css():
             width: 272px !important;
             min-width: 272px !important;
             max-width: 272px !important;
-            background: var(--pf-sidebar-deep) !important;
+            background: linear-gradient(180deg, #3b82f6 0%, var(--pf-sidebar-deep) 100%) !important;
         }
         [data-testid="stSidebarHeader"] {
             display: none !important;
@@ -558,14 +559,23 @@ def inject_shell_css():
             background: #2563eb !important;
             box-shadow: none !important;
         }
-        .pf-sidebar-product { font-size: 15px !important; font-weight: 760 !important; }
-        .pf-sidebar-caption { color: #98a2b3 !important; font-size: 9px !important; letter-spacing: .09em !important; }
+        .pf-sidebar-product {
+            color: #ffffff !important;
+            font-size: 15px !important;
+            font-weight: 800 !important;
+        }
+        .pf-sidebar-caption {
+            color: #ffffff !important;
+            font-size: 9px !important;
+            font-weight: 750 !important;
+            letter-spacing: .09em !important;
+        }
         .pf-sidebar-nav-label {
             margin: 0 0 8px;
             padding: 0 8px;
-            color: #98a2b3;
+            color: #ffffff !important;
             font-size: 10px;
-            font-weight: 760;
+            font-weight: 800;
             letter-spacing: .09em;
             text-transform: uppercase;
         }
@@ -575,27 +585,49 @@ def inject_shell_css():
             display: none !important;
         }
         section[data-testid="stSidebar"] [data-testid="stRadio"] > div { gap: 2px !important; }
+        /* All navigation text is deliberately white and bold for immediate contrast. */
         section[data-testid="stSidebar"] [data-testid="stRadio"] label {
             min-height: 35px !important;
             margin: 0 0 2px !important;
             padding: 8px 10px !important;
             border-radius: 8px !important;
-            color: var(--pf-sidebar-text) !important;
+            color: #ffffff !important;
             font-size: 12px !important;
-            font-weight: 590 !important;
+            font-weight: 750 !important;
             line-height: 1.18 !important;
             box-shadow: none !important;
         }
         section[data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
-            background: rgba(255,255,255,.06) !important;
+            background: rgba(255,255,255,.15) !important;
             color: #ffffff !important;
         }
         section[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {
-            background: #1d4ed8 !important;
-            border-color: #3b82f6 !important;
-            box-shadow: inset 0 0 0 1px rgba(255,255,255,.08) !important;
+            background: #155ecb !important;
+            border-color: rgba(255,255,255,.40) !important;
+            color: #ffffff !important;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,.10) !important;
         }
-        section[data-testid="stSidebar"] [data-testid="stRadio"] label p { overflow-wrap: anywhere; }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label p,
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label span {
+            color: #ffffff !important;
+            font-weight: 750 !important;
+            overflow-wrap: anywhere;
+        }
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] span,
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h1,
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
+        section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3,
+        section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+        section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] span,
+        section[data-testid="stSidebar"] .stButton > button {
+            color: #ffffff !important;
+            font-weight: 750 !important;
+        }
+        section[data-testid="stSidebar"] .stButton > button {
+            background: rgba(255,255,255,.12) !important;
+            border-color: rgba(255,255,255,.30) !important;
+        }
         section[data-testid="stSidebar"] [data-testid="stRadio"] { margin-bottom: 4px !important; }
         section[data-testid="stSidebar"] [data-testid="stDivider"] { margin: 12px 0 !important; }
 
