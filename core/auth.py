@@ -437,38 +437,54 @@ def require_user() -> bool:
 
 
 def login_panel():
-    st.markdown("# ProcureFlow Procurement Workspace")
-    st.caption("ServiceNow-inspired procurement command center for requests, sourcing, POs, receiving, invoices, expenses, cash advances, budgets, and audits.")
-    with st.container(border=True):
-        st.subheader("Login")
-        username = st.text_input("Username", value="" if PRODUCTION_MODE else "admin")
-        password = st.text_input("Password", type="password", value="" if PRODUCTION_MODE else "admin123")
-        if st.button("Login", type="primary", use_container_width=True):
-            user = login_user(username, password)
-            if user:
-                st.session_state["user"] = user
-                st.session_state["last_seen_at"] = datetime.now().isoformat(timespec="seconds")
-                token = create_persistent_session(user)
-                if token:
-                    st.session_state["pf_session_token"] = token
-                    _store_browser_session_token(token)
-                log_audit("LOGIN", "User", user["id"], "User logged in", user["id"], user.get("role"))
-                st.rerun()
-            else:
-                st.error("Invalid username or password.")
-    if not PRODUCTION_MODE:
-        with st.expander("Local demo credentials"):
-            st.markdown("""
-            | Role | Username | Password |
-            |---|---|---|
-            | Admin | `admin` | `admin123` |
-            | Procurement Manager | `procurement` | `procure123` |
-            | Finance | `finance` | `finance123` |
-            | Approver/MD | `approver` | `approve123` |
-            | Auditor | `auditor` | `audit123` |
-            | Utility Head / Facility Head | `facility` | `facility123` |
-            | Logistics Officer | `logistics` | `logistics123` |
-            """)
+    """Render the existing login fields in a centered, polished visual shell.
+
+    Credentials, validation, demo accounts, and session behavior are unchanged.
+    """
+    _left, centre, _right = st.columns([1, 1.12, 1])
+    with centre:
+        st.markdown(
+            """
+            <div class="pf-login-heading">
+                <div class="pf-login-mark">PF</div>
+                <div>
+                    <h1>ProcureFlow Procurement Workspace</h1>
+                    <p>ServiceNow-inspired procurement command center for requests, sourcing, POs, receiving, invoices, expenses, cash advances, budgets, and audits.</p>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.container(border=True):
+            st.subheader("Login")
+            username = st.text_input("Username", value="" if PRODUCTION_MODE else "admin")
+            password = st.text_input("Password", type="password", value="" if PRODUCTION_MODE else "admin123")
+            if st.button("Login", type="primary", use_container_width=True):
+                user = login_user(username, password)
+                if user:
+                    st.session_state["user"] = user
+                    st.session_state["last_seen_at"] = datetime.now().isoformat(timespec="seconds")
+                    token = create_persistent_session(user)
+                    if token:
+                        st.session_state["pf_session_token"] = token
+                        _store_browser_session_token(token)
+                    log_audit("LOGIN", "User", user["id"], "User logged in", user["id"], user.get("role"))
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password.")
+        if not PRODUCTION_MODE:
+            with st.expander("Local demo credentials"):
+                st.markdown("""
+                | Role | Username | Password |
+                |---|---|---|
+                | Admin | `admin` | `admin123` |
+                | Procurement Manager | `procurement` | `procure123` |
+                | Finance | `finance` | `finance123` |
+                | Approver/MD | `approver` | `approve123` |
+                | Auditor | `auditor` | `audit123` |
+                | Utility Head / Facility Head | `facility` | `facility123` |
+                | Logistics Officer | `logistics` | `logistics123` |
+                """)
 
 
 def logout_button():

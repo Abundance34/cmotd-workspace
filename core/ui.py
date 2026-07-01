@@ -16,18 +16,309 @@ STATUS_COLORS = {
 
 
 def inject_css():
+    """Apply the shared Manage.ly-inspired workspace presentation.
+
+    This stylesheet intentionally leaves all database, workflow, forms, labels,
+    page routing, and calculations untouched. It is a presentation layer only.
+    """
     st.markdown("""
     <style>
-    .block-container {padding-top: 1.1rem; padding-bottom: 3rem;}
-    div[data-testid="stMetric"] {background: #fff; border: 1px solid #e5e7eb; padding: 12px 14px; border-radius: 16px; box-shadow: 0 1px 2px rgba(15, 23, 42, .04); min-height: 96px;}
-    div[data-testid="stMetric"] label { color: #475569 !important; font-size: .78rem !important; line-height: 1.1rem !important; white-space: normal !important;}
-    div[data-testid="stMetric"] [data-testid="stMetricValue"] {font-size: clamp(1.25rem, 2.2vw, 2rem) !important; line-height: 2rem !important; font-weight: 800 !important; letter-spacing: -0.02em;}
-    .pf-section-count {display:inline-flex; align-items:center; justify-content:center; background:#dc2626; color:#fff; min-width:20px; height:20px; padding:0 6px; border-radius:999px; font-size:12px; font-weight:800;}
-    .pf-card {background: #fff; border: 1px solid #e5e7eb; border-radius: 16px; padding: 16px; box-shadow: 0 1px 2px rgba(15, 23, 42, .04); margin-bottom: 12px;}
-    .pf-muted { color: #64748b; font-size: .92rem; }
-    .pf-hero {background: linear-gradient(135deg, #0f172a, #1e293b); color: white; border-radius: 20px; padding: 22px 24px; margin-bottom: 16px;}
-    .pf-hero p { color: #cbd5e1; margin: 0; }
-    .pf-badge {display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; border: 1px solid rgba(0,0,0,.06);}
+    :root {
+        --pf-blue: #2563eb;
+        --pf-blue-dark: #1d4ed8;
+        --pf-blue-soft: #eaf2ff;
+        --pf-page: #f6f8fc;
+        --pf-card: #ffffff;
+        --pf-line: #e6ebf2;
+        --pf-text: #162033;
+        --pf-muted: #6b7280;
+    }
+
+    /* Typography and page rhythm */
+    .block-container { padding-top: .15rem; padding-bottom: 3rem; }
+    h1, h2, h3, h4, h5, h6,
+    [data-testid="stMarkdownContainer"] h1,
+    [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stMarkdownContainer"] h3 {
+        color: var(--pf-text) !important;
+        letter-spacing: -.028em;
+    }
+    h1, [data-testid="stMarkdownContainer"] h1 { font-weight: 800 !important; }
+    h2, [data-testid="stMarkdownContainer"] h2 { font-weight: 760 !important; }
+    h3, [data-testid="stMarkdownContainer"] h3 { font-weight: 740 !important; }
+    [data-testid="stCaptionContainer"], .pf-muted { color: var(--pf-muted) !important; }
+
+    /* Page heading replaces the old large dark banner with a clean command-center title. */
+    .pf-hero {
+        position: relative;
+        margin: 0 0 19px;
+        padding: 4px 0 8px 17px;
+        background: transparent;
+        color: var(--pf-text);
+        border: 0;
+        border-radius: 0;
+        box-shadow: none;
+    }
+    .pf-hero::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 8px;
+        bottom: 12px;
+        width: 4px;
+        border-radius: 999px;
+        background: var(--pf-blue);
+    }
+    .pf-hero h1 {
+        margin: 0 !important;
+        color: var(--pf-text) !important;
+        font-size: clamp(1.72rem, 2.7vw, 2.28rem) !important;
+        font-weight: 800 !important;
+        line-height: 1.12 !important;
+    }
+    .pf-hero p {
+        max-width: 980px;
+        margin: 7px 0 0 !important;
+        color: var(--pf-muted) !important;
+        font-size: .94rem;
+        line-height: 1.5;
+    }
+
+    /* KPI cards */
+    div[data-testid="stMetric"] {
+        position: relative;
+        overflow: hidden;
+        min-height: 109px;
+        padding: 17px 17px 15px;
+        background: var(--pf-card);
+        border: 1px solid var(--pf-line);
+        border-radius: 14px;
+        box-shadow: 0 3px 12px rgba(15, 23, 42, .035);
+    }
+    div[data-testid="stMetric"]::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 4px;
+        height: 100%;
+        background: #dbeafe;
+    }
+    div[data-testid="stMetric"] label {
+        color: #677489 !important;
+        font-size: .76rem !important;
+        font-weight: 700 !important;
+        letter-spacing: .005em;
+        line-height: 1.15rem !important;
+        white-space: normal !important;
+    }
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+        margin-top: 4px;
+        color: var(--pf-text) !important;
+        font-size: clamp(1.26rem, 2.1vw, 1.9rem) !important;
+        line-height: 2rem !important;
+        font-weight: 800 !important;
+        letter-spacing: -0.035em;
+    }
+    div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: .75rem !important; }
+
+    /* White content cards, tables, and containers */
+    .pf-card,
+    div[data-testid="stVerticalBlockBorderWrapper"],
+    div[data-testid="stExpander"] {
+        background: var(--pf-card);
+        border: 1px solid var(--pf-line) !important;
+        border-radius: 14px !important;
+        box-shadow: 0 3px 12px rgba(15, 23, 42, .03);
+    }
+    .pf-card { padding: 17px; margin-bottom: 13px; }
+    div[data-testid="stVerticalBlockBorderWrapper"] { padding: 2px; }
+    div[data-testid="stExpander"] { overflow: hidden; }
+    div[data-testid="stExpander"] details summary { font-weight: 750; color: var(--pf-text); }
+
+    div[data-testid="stDataFrame"] {
+        overflow: hidden;
+        background: var(--pf-card);
+        border: 1px solid var(--pf-line);
+        border-radius: 14px;
+        box-shadow: 0 3px 12px rgba(15, 23, 42, .025);
+    }
+    div[data-testid="stDataFrame"] [role="columnheader"] {
+        background: #f8faff !important;
+        color: #64748b !important;
+        font-size: .72rem !important;
+        font-weight: 800 !important;
+        text-transform: uppercase;
+        letter-spacing: .035em;
+    }
+    div[data-testid="stDataFrame"] [role="gridcell"] {
+        color: #334155 !important;
+        border-color: #edf1f6 !important;
+    }
+    [data-testid="stMarkdownContainer"] table {
+        width: 100%;
+        margin: 8px 0 15px;
+        overflow: hidden;
+        border: 1px solid var(--pf-line);
+        border-collapse: separate;
+        border-spacing: 0;
+        border-radius: 13px;
+        background: var(--pf-card);
+        box-shadow: 0 3px 12px rgba(15, 23, 42, .02);
+    }
+    [data-testid="stMarkdownContainer"] table th {
+        padding: 11px 12px;
+        background: #f8faff;
+        color: #64748b;
+        font-size: .72rem;
+        font-weight: 800;
+        letter-spacing: .035em;
+        text-transform: uppercase;
+        border-bottom: 1px solid var(--pf-line);
+    }
+    [data-testid="stMarkdownContainer"] table td {
+        padding: 11px 12px;
+        color: #334155;
+        border-bottom: 1px solid #edf1f6;
+        vertical-align: middle;
+    }
+    [data-testid="stMarkdownContainer"] table tr:last-child td { border-bottom: 0; }
+    [data-testid="stMarkdownContainer"] table tbody tr:hover td { background: #f8fbff; }
+
+    /* Buttons and inputs */
+    .stButton > button,
+    .stDownloadButton > button {
+        min-height: 38px;
+        padding: 0 15px;
+        border-radius: 10px;
+        font-size: .86rem;
+        font-weight: 750;
+        transition: transform .13s ease, box-shadow .13s ease, border-color .13s ease;
+    }
+    .stButton > button:hover,
+    .stDownloadButton > button:hover {
+        transform: translateY(-1px);
+    }
+    .stButton > button[kind="primary"],
+    .stDownloadButton > button[kind="primary"],
+    button[data-testid="baseButton-primary"] {
+        background: var(--pf-blue) !important;
+        color: #ffffff !important;
+        border: 1px solid var(--pf-blue) !important;
+        box-shadow: 0 6px 14px rgba(37,99,235,.18);
+    }
+    .stButton > button[kind="primary"]:hover,
+    button[data-testid="baseButton-primary"]:hover {
+        background: var(--pf-blue-dark) !important;
+        border-color: var(--pf-blue-dark) !important;
+        box-shadow: 0 8px 18px rgba(37,99,235,.22);
+    }
+    .stButton > button[kind="secondary"],
+    .stDownloadButton > button[kind="secondary"],
+    button[data-testid="baseButton-secondary"] {
+        background: #ffffff !important;
+        color: #344156 !important;
+        border: 1px solid #dce4ee !important;
+        box-shadow: 0 2px 7px rgba(15, 23, 42, .025);
+    }
+    .stButton > button[kind="secondary"]:hover,
+    .stDownloadButton > button[kind="secondary"]:hover,
+    button[data-testid="baseButton-secondary"]:hover {
+        border-color: #aac7f7 !important;
+        color: var(--pf-blue-dark) !important;
+        background: #fbfdff !important;
+    }
+    div[data-baseweb="input"] > div,
+    div[data-baseweb="select"] > div,
+    [data-testid="stNumberInput"] div[data-baseweb="input"] > div,
+    [data-testid="stDateInput"] div[data-baseweb="input"] > div,
+    [data-testid="stTextArea"] textarea {
+        border-color: #dce4ee !important;
+        border-radius: 10px !important;
+        background: #ffffff !important;
+        box-shadow: none !important;
+    }
+    div[data-baseweb="input"] > div:focus-within,
+    div[data-baseweb="select"] > div:focus-within,
+    [data-testid="stTextArea"] textarea:focus {
+        border-color: #82b1f7 !important;
+        box-shadow: 0 0 0 3px rgba(37,99,235,.10) !important;
+    }
+    [data-testid="stFileUploader"] {
+        border: 1px dashed #b8c7db !important;
+        border-radius: 12px !important;
+        background: #fbfdff !important;
+    }
+
+    /* Tabs become compact workspace switches. */
+    div[data-baseweb="tab-list"] {
+        gap: 6px;
+        flex-wrap: wrap;
+        padding: 2px 0 9px;
+        border-bottom: 1px solid var(--pf-line);
+    }
+    button[data-baseweb="tab"] {
+        min-height: 34px;
+        padding: 7px 11px !important;
+        border-radius: 9px !important;
+        color: #66758a !important;
+        font-size: .82rem !important;
+        font-weight: 750 !important;
+    }
+    button[data-baseweb="tab"]:hover { color: var(--pf-blue-dark) !important; background: #f1f6ff !important; }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        color: var(--pf-blue-dark) !important;
+        background: var(--pf-blue-soft) !important;
+    }
+    div[data-baseweb="tab-highlight"] { background: var(--pf-blue) !important; height: 2px !important; }
+
+    /* Forms, messages, and small UI elements */
+    [data-testid="stAlert"] {
+        border-radius: 12px !important;
+        border: 1px solid #dce6f5 !important;
+        box-shadow: 0 2px 8px rgba(15,23,42,.02);
+    }
+    [data-testid="stForm"] {
+        padding: 17px !important;
+        background: #ffffff;
+        border: 1px solid var(--pf-line) !important;
+        border-radius: 14px !important;
+        box-shadow: 0 3px 12px rgba(15,23,42,.025);
+    }
+    [data-testid="stDivider"] { border-color: var(--pf-line) !important; }
+    .pf-section-count {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 20px;
+        height: 20px;
+        padding: 0 6px;
+        border-radius: 999px;
+        background: #ef4444;
+        color: #ffffff;
+        font-size: 11px;
+        font-weight: 800;
+        box-shadow: 0 3px 7px rgba(239,68,68,.18);
+    }
+    .pf-badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 26px;
+        padding: 4px 9px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 800;
+        line-height: 1.1;
+        border: 1px solid rgba(15,23,42,.06);
+        letter-spacing: .005em;
+        white-space: nowrap;
+    }
+
+    @media (max-width: 780px) {
+        div[data-testid="stMetric"] { min-height: 96px; padding: 13px; }
+        .pf-hero { padding-left: 14px; }
+        [data-testid="stMarkdownContainer"] table { display: block; overflow-x: auto; }
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -146,9 +437,9 @@ def workflow_progress(status: str, steps: list[str]):
             padding:7px 11px; font-size:12px; font-weight:700; border:1px solid #e5e7eb;
             line-height:1; white-space:nowrap; min-width:max-content;
         }
-        .pf-step.done { color:#047857; background:#d1fae5; border-color:#bbf7d0; }
-        .pf-step.current { color:#075985; background:#dbeafe; border-color:#bfdbfe; }
-        .pf-step.todo { color:#6b7280; background:#ffffff; border-color:#e5e7eb; }
+        .pf-step.done { color:#047857; background:#ecfdf5; border-color:#bbf7d0; }
+        .pf-step.current { color:#1d4ed8; background:#eaf2ff; border-color:#cfe0ff; }
+        .pf-step.todo { color:#6b7280; background:#ffffff; border-color:#e6ebf2; }
         .pf-step-dot {font-size:10px;}
         </style>
         <div class="pf-workflow-rail">%s</div>
