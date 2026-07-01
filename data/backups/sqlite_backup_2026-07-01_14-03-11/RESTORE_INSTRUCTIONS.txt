@@ -1,0 +1,6 @@
+1. Stop ProcureFlow.
+2. Rename the current project data folder to data_before_restore.
+3. Copy this backup's data folder into the ProcureFlow project root.
+4. Start ProcureFlow again.
+
+Do not restore only the .db file: retain the local encryption key and attachments.
