@@ -4,6 +4,7 @@ from core.db import init_db, df_query, run_query, now_iso
 from core.auth import initialize_browser_session_storage, login_panel, logout_button, require_user
 from modules.role_workspaces import render_app, render_notification_panel
 from core.permissions import display_role
+from core.branding import COMPANY_NAME, company_logo_data_uri
 
 
 @st.cache_resource(show_spinner=False)
@@ -631,6 +632,92 @@ def inject_shell_css():
         section[data-testid="stSidebar"] [data-testid="stRadio"] { margin-bottom: 4px !important; }
         section[data-testid="stSidebar"] [data-testid="stDivider"] { margin: 12px 0 !important; }
 
+        /* CMOTD company branding: shared by every role workspace. */
+        .pf-sidebar-brand {
+            display: block !important;
+            margin: 0 0 20px !important;
+            padding: 0 4px !important;
+        }
+        .pf-company-logo-card {
+            display: flex;
+            align-items: center;
+            width: 100%;
+            min-height: 62px;
+            padding: 9px 11px;
+            overflow: hidden;
+            background: rgba(255,255,255,.98);
+            border: 1px solid rgba(255,255,255,.72);
+            border-radius: 13px;
+            box-shadow: 0 8px 20px rgba(18, 78, 163, .16);
+        }
+        .pf-company-logo-card img {
+            display: block;
+            width: 100%;
+            max-width: 100%;
+            height: auto;
+            max-height: 43px;
+            object-fit: contain;
+            object-position: left center;
+        }
+        .pf-company-logo-fallback {
+            color: #123a72;
+            font-size: 13px;
+            font-weight: 850;
+            letter-spacing: .015em;
+        }
+        .pf-sidebar-app-meta {
+            display: flex;
+            align-items: baseline;
+            gap: 7px;
+            margin-top: 9px;
+            padding: 0 3px;
+        }
+        .pf-sidebar-brand .pf-sidebar-product {
+            color: #ffffff !important;
+            font-size: 15px !important;
+            font-weight: 850 !important;
+            line-height: 1.1;
+        }
+        .pf-sidebar-brand .pf-sidebar-caption {
+            color: rgba(255,255,255,.94) !important;
+            font-size: 8.5px !important;
+            font-weight: 800 !important;
+            letter-spacing: .075em !important;
+            line-height: 1.1;
+        }
+
+        .pf-login-company-brand {
+            display: flex;
+            align-items: center;
+            width: fit-content;
+            max-width: 100%;
+            min-height: 60px;
+            margin: 3.15rem 0 13px;
+            padding: 8px 12px;
+            overflow: hidden;
+            background: rgba(255,255,255,.94);
+            border: 1px solid var(--pf-border);
+            border-radius: 13px;
+            box-shadow: 0 6px 18px rgba(16, 24, 40, .045);
+        }
+        .pf-login-company-brand img {
+            display: block;
+            width: min(100%, 340px);
+            height: auto;
+            max-height: 44px;
+            object-fit: contain;
+            object-position: left center;
+        }
+        .pf-login-company-brand .pf-company-logo-fallback {
+            color: var(--pf-heading);
+        }
+        .pf-login-heading {
+            margin: 0 0 18px !important;
+        }
+        @media (max-width: 860px) {
+            .pf-login-company-brand { margin-top: 2rem; }
+        }
+
         @media (max-width: 860px) {
             [data-testid="stMainBlockContainer"],
             .main .block-container { padding: 14px 16px 34px !important; }
@@ -982,11 +1069,19 @@ def render_sidebar_navigation(current: dict):
     nav = ROLE_SECTIONS.get(current["role"])
     if nav:
         nav_title, state_key, sections = nav
+        logo_uri = company_logo_data_uri()
+        company_logo = (
+            f'<img src="{logo_uri}" alt="{COMPANY_NAME}" />'
+            if logo_uri
+            else '<span class="pf-company-logo-fallback">CMOTD</span>'
+        )
         st.markdown(
-            """
+            f"""
             <div class="pf-sidebar-brand">
-                <div class="pf-sidebar-logo">PF</div>
-                <div>
+                <div class="pf-company-logo-card" aria-label="{COMPANY_NAME}">
+                    {company_logo}
+                </div>
+                <div class="pf-sidebar-app-meta">
                     <div class="pf-sidebar-product">ProcureFlow</div>
                     <div class="pf-sidebar-caption">Procurement workspace</div>
                 </div>

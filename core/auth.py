@@ -22,6 +22,7 @@ except Exception:  # pragma: no cover
     VerifyMismatchError = InvalidHashError = Exception  # type: ignore
 
 from core.db import run_query, now_iso, log_audit, df_query
+from core.branding import COMPANY_NAME, company_logo_data_uri
 
 SESSION_TIMEOUT_MINUTES = int(os.environ.get("PROCUREFLOW_SESSION_TIMEOUT_MINUTES", "60"))
 PRODUCTION_MODE = os.environ.get("PROCUREFLOW_PRODUCTION", "0") == "1"
@@ -444,8 +445,17 @@ def login_panel():
     # Wider center column: only the login presentation changes; authentication remains untouched.
     _left, centre, _right = st.columns([0.65, 1.9, 0.65])
     with centre:
+        logo_uri = company_logo_data_uri()
+        company_logo = (
+            f'<img src="{logo_uri}" alt="{COMPANY_NAME}" />'
+            if logo_uri
+            else '<span class="pf-company-logo-fallback">CMOTD</span>'
+        )
         st.markdown(
-            """
+            f"""
+            <div class="pf-login-company-brand" aria-label="{COMPANY_NAME}">
+                {company_logo}
+            </div>
             <div class="pf-login-heading">
                 <div class="pf-login-mark">PF</div>
                 <div>
