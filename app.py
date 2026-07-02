@@ -726,11 +726,134 @@ def inject_shell_css():
         </style>
         """,
         unsafe_allow_html=True,
+
+    )
+
+    # Final design-reference visual layer. It is intentionally CSS/markup only.
+    st.markdown(
+        """
+        <style>
+        :root {
+            --pf-reference-blue: #0959d2;
+            --pf-reference-blue-deep: #0648b8;
+            --pf-reference-blue-soft: #eef5ff;
+            --pf-reference-page: #f8fbff;
+            --pf-reference-text: #0c1730;
+            --pf-reference-muted: #66748f;
+            --pf-reference-line: #e7edf7;
+        }
+        [data-testid="stApp"], [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+            background: var(--pf-reference-page) !important;
+        }
+        [data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecoration"], [data-testid="stStatusWidget"], #MainMenu, footer {
+            display: none !important;
+        }
+        [data-testid="stMainBlockContainer"], .main .block-container {
+            max-width: none !important;
+            padding: 0 30px 52px !important;
+        }
+        @media (min-width: 1440px) {
+            [data-testid="stMainBlockContainer"], .main .block-container { padding-left: 48px !important; padding-right: 48px !important; }
+        }
+
+        /* Reference command bar */
+        .pf-reference-topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            min-height: 88px;
+            margin: 0 -30px 0;
+            padding: 0 30px;
+            background: rgba(255,255,255,.94);
+            border-bottom: 1px solid var(--pf-reference-line);
+            box-shadow: 0 1px 0 rgba(15, 23, 42, .015);
+        }
+        @media (min-width: 1440px) { .pf-reference-topbar { margin-left: -48px; margin-right: -48px; padding-left: 48px; padding-right: 48px; } }
+        .pf-reference-left, .pf-reference-actions, .pf-reference-user { display:flex; align-items:center; }
+        .pf-reference-left { gap: 22px; min-width: 0; }
+        .pf-reference-menu {
+            width: 42px; height: 42px; display: grid; align-content:center; justify-items:center; gap: 4px;
+            flex: 0 0 42px; border-radius: 50%; background: #f8fbff; border:1px solid #edf2f8;
+        }
+        .pf-reference-menu span { width: 16px; height: 1.6px; border-radius: 20px; background:#52627e; }
+        .pf-reference-breadcrumb { color:var(--pf-reference-text); font-size: 15px; font-weight: 700; white-space: nowrap; }
+        .pf-reference-breadcrumb b { color:var(--pf-reference-blue); font-weight: 800; }
+        .pf-reference-breadcrumb span { color:#a8b4c7; padding: 0 12px; font-weight: 500; }
+        .pf-reference-breadcrumb strong { font-weight: 800; }
+        .pf-reference-actions { gap: 12px; }
+        .pf-reference-search {
+            width: min(290px, 27vw); height: 42px; display:flex; align-items:center; gap:9px; padding:0 11px 0 14px;
+            background:#fff; border:1px solid #e6edf7; border-radius:12px; color:#9ba9c0; font-size:13px; box-shadow:0 1px 2px rgba(16,24,40,.015);
+        }
+        .pf-reference-search svg, .pf-reference-icon svg, .pf-reference-chevron, .pf-sidebar-account svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+        .pf-reference-search svg { width:17px; flex:0 0 17px; color:#8c9ab0; }
+        .pf-reference-search span { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .pf-reference-search kbd { padding:4px 6px; border:1px solid #e5ebf5; border-radius:6px; background:#f8fbff; color:#a0abc0; font-family:inherit; font-size:10px; font-weight:700; white-space:nowrap; }
+        .pf-reference-icon { position:relative; width:42px; height:42px; display:grid; place-items:center; color:#41516c; border-radius:50%; border:1px solid #edf2f8; background:#fff; }
+        .pf-reference-icon i { position:absolute; top:7px; right:7px; width:8px; height:8px; border:2px solid #fff; border-radius:50%; background:#2f75f7; }
+        .pf-reference-user { gap:10px; padding: 4px 0 4px 3px; color:var(--pf-reference-text); }
+        .pf-reference-avatar { width:40px; height:40px; display:grid; place-items:center; flex:0 0 40px; border-radius:50%; background:linear-gradient(135deg,#3f86ff,#1f63e0); color:#fff; font-size:12px; font-weight:850; box-shadow:0 6px 14px rgba(9,89,210,.18); }
+        .pf-reference-user-copy { display:flex; flex-direction:column; min-width:0; line-height:1.22; }
+        .pf-reference-user-copy b { max-width:145px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; font-weight:800; }
+        .pf-reference-user-copy span { margin-top:2px; color:#74839b; font-size:11px; }
+        .pf-reference-chevron { margin-left:2px; width:17px; color:#728198; }
+        @media (max-width: 1040px) { .pf-reference-search { display:none; } .pf-reference-topbar { min-height:72px; } }
+        @media (max-width: 720px) { .pf-reference-topbar { padding:0 16px; margin:0 -16px; } .pf-reference-menu, .pf-reference-icon { width:36px; height:36px; flex-basis:36px; } .pf-reference-left { gap:10px; } .pf-reference-breadcrumb { font-size:13px; } .pf-reference-breadcrumb span { padding:0 6px; } .pf-reference-user-copy, .pf-reference-chevron { display:none; } }
+
+        /* Exact visual rhythm for a blue operational rail. */
+        section[data-testid="stSidebar"], section[data-testid="stSidebar"] > div:first-child {
+            width: 302px !important; min-width:302px !important; max-width:302px !important;
+            background: linear-gradient(180deg,#0a5bd6 0%, #0647b8 100%) !important;
+        }
+        section[data-testid="stSidebar"] { border-right:0 !important; box-shadow: 5px 0 20px rgba(23,72,156,.08); }
+        section[data-testid="stSidebar"] > div:first-child { padding-top:0 !important; }
+        [data-testid="stSidebarHeader"] { display:none !important; }
+        [data-testid="stSidebarContent"] { padding: 28px 16px 24px !important; }
+        [data-testid="stSidebarContent"] > div { padding:0 !important; }
+        .pf-sidebar-brand { display:block !important; margin: 0 0 30px !important; padding:0 !important; }
+        .pf-company-logo-card { min-height:112px !important; padding: 15px 16px !important; background:#fff !important; border:1px solid rgba(255,255,255,.88) !important; border-radius:16px !important; box-shadow: 0 12px 22px rgba(1,45,121,.18) !important; }
+        .pf-company-logo-card img { width:100% !important; max-height:76px !important; object-fit:contain !important; object-position:left center !important; }
+        .pf-sidebar-app-meta { display:block !important; margin-top:24px !important; padding:0 7px !important; }
+        .pf-sidebar-brand .pf-sidebar-product { color:#fff !important; font-size:24px !important; font-weight:850 !important; letter-spacing:-.035em !important; }
+        .pf-sidebar-brand .pf-sidebar-caption { display:block !important; margin-top:7px !important; color:rgba(255,255,255,.86) !important; font-size:10px !important; font-weight:800 !important; letter-spacing:.13em !important; text-transform:uppercase !important; }
+        .pf-sidebar-nav-label { margin: 0 0 11px !important; padding:0 8px !important; color:rgba(255,255,255,.76) !important; font-size:10px !important; font-weight:850 !important; letter-spacing:.15em !important; text-transform:uppercase !important; }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] { margin:0 !important; }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] > div { gap:4px !important; }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label { min-height:44px !important; margin:0 !important; padding:11px 13px !important; border:1px solid transparent !important; border-radius:11px !important; color:#fff !important; background:transparent !important; font-size:13px !important; font-weight:750 !important; line-height:1.25 !important; transition: background .15s ease, transform .15s ease, border .15s ease !important; }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label:hover { background:rgba(255,255,255,.10) !important; border-color:rgba(255,255,255,.12) !important; transform:translateX(1px); }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) { background:linear-gradient(90deg,rgba(1,64,177,.80),rgba(17,93,210,.85)) !important; border-color:rgba(255,255,255,.22) !important; box-shadow:inset 0 1px 0 rgba(255,255,255,.10), 0 5px 14px rgba(2,50,132,.16) !important; }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label p, section[data-testid="stSidebar"] [data-testid="stRadio"] label span { color:#fff !important; font-weight:750 !important; }
+        section[data-testid="stSidebar"] [data-testid="stRadio"] label > div:first-child { display:none !important; }
+        section[data-testid="stSidebar"] hr, section[data-testid="stSidebar"] [data-testid="stDivider"] { border-color:rgba(255,255,255,.18) !important; }
+        section[data-testid="stSidebar"] [data-testid="stAlert"] { background:rgba(0,55,150,.28) !important; border-color:rgba(255,255,255,.17) !important; color:#fff !important; }
+        section[data-testid="stSidebar"] [data-testid="stAlert"] *, section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] { color:#fff !important; }
+        .pf-sidebar-account { display:flex; align-items:center; gap:10px; margin:16px 0 10px; padding:12px; border:1px solid rgba(255,255,255,.22); border-radius:13px; background:rgba(4,59,162,.30); box-shadow:inset 0 1px 0 rgba(255,255,255,.08); color:#fff; }
+        .pf-sidebar-account-avatar { width:37px; height:37px; display:grid; place-items:center; flex:0 0 37px; border-radius:50%; background:rgba(255,255,255,.16); color:#fff; font-size:12px; font-weight:850; }
+        .pf-sidebar-account-copy { display:flex; flex:1; flex-direction:column; min-width:0; line-height:1.18; }
+        .pf-sidebar-account-copy b { color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px; font-weight:800; }
+        .pf-sidebar-account-copy span { margin-top:3px; color:rgba(255,255,255,.76); font-size:11px; }
+        .pf-sidebar-account svg { flex:0 0 18px; color:#fff; }
+        section[data-testid="stSidebar"] .stButton > button { min-height:34px !important; background:rgba(255,255,255,.10) !important; border:1px solid rgba(255,255,255,.22) !important; border-radius:9px !important; color:#fff !important; font-size:12px !important; font-weight:750 !important; }
+
+        /* Login remains the same workflow, presented in the reference system style. */
+        .pf-login-company-brand { min-height:76px !important; margin: 52px 0 18px !important; padding:10px 14px !important; border-radius:16px !important; box-shadow:0 10px 22px rgba(16,24,40,.05) !important; }
+        .pf-login-company-brand img { max-height:52px !important; }
+        .pf-login-heading { margin:0 0 24px !important; }
+        .pf-login-heading h1 { color:var(--pf-reference-text) !important; }
+        @media (max-width: 900px) {
+            section[data-testid="stSidebar"], section[data-testid="stSidebar"] > div:first-child { width:286px !important; min-width:286px !important; max-width:286px !important; }
+            .pf-company-logo-card { min-height:96px !important; }
+            [data-testid="stMainBlockContainer"], .main .block-container { padding-left:16px !important; padding-right:16px !important; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
 
 def render_top_header(current: dict):
-    """Render the compact user/context bar without changing workspace content."""
+    """Render the design-reference command bar without changing user state or routing."""
     from html import escape
 
     landing = ROLE_LANDING.get(current["role"], "Workspace")
@@ -741,15 +864,29 @@ def render_top_header(current: dict):
     initials = escape(initials)
     st.markdown(
         f"""
-        <div class="pf-topbar">
-            <div class="pf-topbar-context">
-                <div class="pf-breadcrumb">ProcureFlow <span>/</span> {landing_label}</div>
+        <div class="pf-reference-topbar">
+            <div class="pf-reference-left">
+                <div class="pf-reference-menu" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                </div>
+                <div class="pf-reference-breadcrumb"><b>ProcureFlow</b><span>/</span><strong>{landing_label}</strong></div>
             </div>
-            <div class="pf-topbar-user" aria-label="Signed-in user: {full_name}, {role}">
-                <div class="pf-avatar" aria-hidden="true">{initials}</div>
-                <div class="pf-user-copy">
-                    <div class="pf-user-name">{full_name}</div>
-                    <div class="pf-user-caption">{role}</div>
+            <div class="pf-reference-actions" aria-label="Workspace controls">
+                <div class="pf-reference-search" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path></svg>
+                    <span>Search anything...</span><kbd>Ctrl + K</kbd>
+                </div>
+                <div class="pf-reference-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path></svg>
+                    <i></i>
+                </div>
+                <div class="pf-reference-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
+                </div>
+                <div class="pf-reference-user" aria-label="Signed-in user: {full_name}, {role}">
+                    <div class="pf-reference-avatar">{initials}</div>
+                    <div class="pf-reference-user-copy"><b>{full_name}</b><span>{role}</span></div>
+                    <svg class="pf-reference-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg>
                 </div>
             </div>
         </div>
@@ -1060,9 +1197,33 @@ def _build_attention_count_map(current: dict, sections: list[str]) -> dict[str, 
             counts[section] = 0
     return counts
 
+NAV_ICON_MAP = {
+    "Dashboard": "⌂", "Operations": "⌂", "Financial": "⌂", "Approval": "⌂", "Audit": "⌂", "Utility": "⌂", "Logistics": "⌂",
+    "Purchase": "▤", "Requests": "▤", "Draft": "▤", "Records": "▤", "All Activity": "◷", "Activity": "◷", "History": "◷",
+    "Budget": "▧", "Income": "▣", "Expenses": "▧", "Payments": "▣", "Cash": "◈", "Reconciliation": "⇄",
+    "User": "♙", "Roles": "◇", "Settings": "⚙", "Approval Configuration": "✓", "Pending": "✓",
+    "Import": "⇧", "Documents": "▧", "Archive": "▧", "Reports": "▤", "Compliance": "◇", "Audit Logs": "◈",
+    "Notification": "♧", "Availability": "◌", "Gateway": "⌘", "Vendor": "◉", "Sourcing": "⌕", "Quote": "◉",
+    "Purchase Order": "▣", "PO": "▣", "Delivery": "⇢", "Receiving": "⌄", "Return": "↶", "Proof": "✓",
+    "Invoice": "▧", "Receipt": "▧", "Payee": "◇", "Security": "◇", "Delegated": "⇄", "Backup": "⇩",
+}
+
+
+def nav_icon_for(section: str) -> str:
+    """Return a small visual icon for the sidebar without changing the selected value."""
+    value = str(section or "")
+    for keyword, icon in NAV_ICON_MAP.items():
+        if keyword.lower() in value.lower():
+            return icon
+    return "•"
+
+
 def format_nav_label(section: str, counts: dict[str, int]) -> str:
+    """Format navigation presentation while preserving the original section value."""
     count = int(counts.get(section, 0) or 0)
-    return f"{section}  🔴 {count}" if count else section
+    icon = nav_icon_for(section)
+    attention = f"  • {count}" if count else ""
+    return f"{icon}  {section}{attention}"
 
 
 def render_sidebar_navigation(current: dict):
@@ -1083,14 +1244,11 @@ def render_sidebar_navigation(current: dict):
                 </div>
                 <div class="pf-sidebar-app-meta">
                     <div class="pf-sidebar-product">ProcureFlow</div>
-                    <div class="pf-sidebar-caption">Procurement workspace</div>
+                    <div class="pf-sidebar-caption">Procurement Workspace</div>
                 </div>
             </div>
+            <div class="pf-sidebar-nav-label" aria-label="{nav_title}">Main</div>
             """,
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f'<div class="pf-sidebar-nav-label">{nav_title}</div>',
             unsafe_allow_html=True,
         )
 
@@ -1148,6 +1306,24 @@ def render_sidebar_navigation(current: dict):
         st.info("No navigation has been configured for this role.")
 
 
+def render_sidebar_account_card(current: dict):
+    """Presentation-only signed-in user card for the reference sidebar layout."""
+    from html import escape
+
+    full_name = escape(str(current.get("full_name") or "User"))
+    role = escape(str(display_role(current.get("role") or "")))
+    initials = "".join(part[:1] for part in str(current.get("full_name") or "User").split()[:2]).upper() or "U"
+    st.markdown(
+        f"""
+        <div class="pf-sidebar-account" aria-label="Signed-in user: {full_name}, {role}">
+            <div class="pf-sidebar-account-avatar">{escape(initials)}</div>
+            <div class="pf-sidebar-account-copy"><b>{full_name}</b><span>{role}</span></div>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 def main():
     st.set_page_config(
         page_title="ProcureFlow Enterprise Procurement",
@@ -1171,6 +1347,7 @@ def main():
         st.divider()
         render_notification_panel(current)
         st.divider()
+        render_sidebar_account_card(current)
         logout_button()
 
     render_app()

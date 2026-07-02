@@ -599,6 +599,84 @@ def inject_css():
     </style>
     """, unsafe_allow_html=True)
 
+    # Visual-only reference layer for all role pages. This follows the approved
+    # command-centre design while retaining every existing page, field and query.
+    st.markdown("""
+    <style>
+    :root {
+        --pf-blue: #0a5bd6;
+        --pf-blue-dark: #0648b8;
+        --pf-blue-soft: #edf5ff;
+        --pf-page: #f8fbff;
+        --pf-card: #ffffff;
+        --pf-line: #e5edf8;
+        --pf-text: #0c1730;
+        --pf-heading: #0c1730;
+        --pf-copy: #41506a;
+        --pf-muted: #71809a;
+    }
+    .pf-hero {
+        position:relative !important;
+        min-height: 122px;
+        margin: 0 0 28px !important;
+        padding: 28px 0 22px !important;
+        overflow:hidden;
+        background: linear-gradient(100deg, rgba(255,255,255,.88), rgba(245,249,255,.98)) !important;
+        border-bottom: 1px solid rgba(229,237,248,.92) !important;
+    }
+    .pf-hero::before { display:none !important; }
+    .pf-hero::after {
+        content:""; position:absolute; right:2%; top:4px; width:290px; height:128px; opacity:.52; pointer-events:none;
+        background:
+            radial-gradient(circle at 70% 39%, rgba(47,117,247,.25) 0 10px, transparent 11px),
+            radial-gradient(circle at 87% 63%, rgba(78,148,255,.17) 0 25px, transparent 26px),
+            linear-gradient(146deg, transparent 28%, rgba(128,178,255,.15) 29% 30%, transparent 31% 43%, rgba(128,178,255,.12) 44% 45%, transparent 46%),
+            linear-gradient(25deg, transparent 38%, rgba(93,153,255,.13) 39% 41%, transparent 42%);
+        filter: blur(.1px);
+    }
+    .pf-hero h1 { position:relative; z-index:1; max-width:850px; font-size:clamp(2rem, 2.75vw, 2.75rem) !important; font-weight:820 !important; letter-spacing:-.042em !important; }
+    .pf-hero p { position:relative; z-index:1; max-width:900px; font-size:.94rem !important; color:var(--pf-muted) !important; }
+
+    /* Two-line compact KPI styling that mirrors the approved reference. */
+    div[data-testid="stMetric"] {
+        position:relative !important; min-height:142px !important; padding:24px 20px 18px 82px !important;
+        overflow:hidden !important; border:1px solid #e6edf7 !important; border-radius:16px !important;
+        background:#fff !important; box-shadow:0 4px 13px rgba(23,57,122,.045) !important;
+    }
+    div[data-testid="stMetric"]::before {
+        content:"◌" !important; position:absolute !important; left:22px !important; top:29px !important;
+        width:40px !important; height:40px !important; display:grid !important; place-items:center !important;
+        border-radius:13px !important; color:#1e6eea !important; background:linear-gradient(135deg,#eaf3ff,#d9eaff) !important;
+        font-size:24px !important; font-weight:700 !important; line-height:1 !important;
+        box-shadow:0 6px 14px rgba(34,100,210,.12) !important;
+    }
+    div[data-testid="stHorizontalBlock"] > div:nth-child(3n) div[data-testid="stMetric"]::before { color:#ec9b00 !important; background:linear-gradient(135deg,#fff6d8,#ffefb7) !important; }
+    div[data-testid="stHorizontalBlock"] > div:nth-child(4n) div[data-testid="stMetric"]::before { color:#10a86c !important; background:linear-gradient(135deg,#e7fbf1,#d2f6e4) !important; }
+    div[data-testid="stMetric"] label { color:#5d6b85 !important; font-size:.79rem !important; font-weight:730 !important; line-height:1.3 !important; }
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] { margin-top:6px !important; color:var(--pf-text) !important; font-size:1.75rem !important; font-weight:820 !important; line-height:1.22 !important; }
+    div[data-testid="stMetric"] [data-testid="stMetricDelta"] { margin-top:7px !important; font-size:.72rem !important; }
+
+    /* Cards and modules form one consistent command-centre grid. */
+    .pf-card, div[data-testid="stVerticalBlockBorderWrapper"], div[data-testid="stExpander"], div[data-testid="stDataFrame"] {
+        border-color:#e5edf8 !important; border-radius:16px !important; box-shadow:0 4px 13px rgba(23,57,122,.04) !important;
+    }
+    [data-testid="stForm"] { border-color:#e5edf8 !important; border-radius:16px !important; box-shadow:0 4px 13px rgba(23,57,122,.035) !important; }
+    div[data-testid="stExpander"] details > summary { min-height:56px !important; background:#fff !important; }
+    [data-testid="stMarkdownContainer"] table, div[data-testid="stDataFrame"] { border-color:#e5edf8 !important; border-radius:14px !important; }
+    [data-testid="stMarkdownContainer"] table th, div[data-testid="stDataFrame"] [role="columnheader"] { background:#f9fbff !important; }
+    .stButton > button, .stDownloadButton > button, [data-testid="stFormSubmitButton"] > button { border-radius:11px !important; font-weight:750 !important; }
+    .stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"], [data-testid="stFormSubmitButton"] > button, button[data-testid="baseButton-primary"] { background:linear-gradient(135deg,#1369eb,#0854c9) !important; border-color:#0a5bd6 !important; box-shadow:0 8px 16px rgba(10,91,214,.18) !important; }
+    .stButton > button[kind="secondary"], .stDownloadButton > button[kind="secondary"], button[data-testid="baseButton-secondary"] { border-color:#dfe8f5 !important; color:#2f67cc !important; background:#fff !important; }
+    div[data-baseweb="input"] > div, div[data-baseweb="select"] > div, [data-testid="stTextArea"] textarea { border-color:#dce7f5 !important; border-radius:11px !important; }
+    @media (max-width: 780px) {
+        .pf-hero { min-height:auto; padding:22px 0 16px !important; }
+        .pf-hero::after { display:none; }
+        div[data-testid="stMetric"] { min-height:112px !important; padding:18px 14px 14px 66px !important; }
+        div[data-testid="stMetric"]::before { left:14px !important; top:23px !important; width:34px !important; height:34px !important; font-size:20px !important; }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 
 def role_header(title: str, subtitle: str) -> None:
     """Render the shared ProcureFlow workspace header.
