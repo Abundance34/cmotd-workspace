@@ -6,6 +6,8 @@ import hmac
 import os
 import secrets
 from datetime import datetime, timedelta
+from functools import lru_cache
+from pathlib import Path
 
 import streamlit as st
 
@@ -28,6 +30,25 @@ SESSION_TIMEOUT_MINUTES = int(os.environ.get("PROCUREFLOW_SESSION_TIMEOUT_MINUTE
 PRODUCTION_MODE = os.environ.get("PROCUREFLOW_PRODUCTION", "0") == "1"
 SESSION_COOKIE_NAME = "pf_session_token"
 SESSION_COOKIE_MANAGER_KEY = "_pf_session_cookie_manager"
+
+# Login artwork is derived from the user-provided CMOTD reference design. It is
+# presentation-only and never reads or changes the SQLite database.
+LOGIN_VISUAL_PATH = Path(__file__).resolve().parents[1] / "static" / "branding" / "cmotd_login_left_panel.webp"
+
+
+@lru_cache(maxsize=1)
+def _login_visual_data_uri() -> str:
+    """Return the branded login-left visual as an embedded WebP data URI.
+
+    Using a data URI keeps the login screen identical on local Windows runs and
+    Streamlit Cloud without relying on a static-file URL or third-party host.
+    """
+    try:
+        encoded = base64.b64encode(LOGIN_VISUAL_PATH.read_bytes()).decode("ascii")
+    except OSError:
+        return ""
+    return f"data:image/webp;base64,{encoded}"
+
 
 # Stdlib PBKDF2 password hashing. This avoids the passlib/bcrypt 72-byte password
 # error that can occur with newer bcrypt releases while still being much stronger
@@ -179,6 +200,17 @@ def _set_query_param(name: str, value: str | None):
             st.experimental_set_query_params(**params)
         except Exception:
             pass
+
+
+def _clear_navigation_query_params() -> None:
+    """Remove non-sensitive workspace hints before showing the login screen.
+
+    A shared URL may include ``pf_section`` / ``pf_role`` from the sender's
+    workspace. They are never authentication credentials, and an anonymous
+    visitor must not inherit the sender's navigation context.
+    """
+    for parameter in ("pf_section", "pf_role"):
+        _set_query_param(parameter, None)
 
 
 def _session_cookie_password() -> str:
@@ -365,7 +397,8 @@ def close_persistent_session():
             pass
     st.session_state.pop("pf_session_token", None)
     _clear_browser_session_token()
-    # pf_section/pf_role are non-sensitive navigation hints only.
+    # Do not leave a previous role/workspace link in the address bar after logout.
+    _clear_navigation_query_params()
 
 def has_permission(permission: str) -> bool:
     user = st.session_state.get("user")
@@ -405,6 +438,9 @@ def session_expired() -> bool:
 def require_user() -> bool:
     if "user" not in st.session_state:
         if not restore_user_from_session():
+            # Shared workspace URLs can include a sender's navigation hints.
+            # Anonymous visitors always start at the login page.
+            _clear_navigation_query_params()
             return False
     if session_expired():
         close_persistent_session()
@@ -438,64 +474,328 @@ def require_user() -> bool:
 
 
 def login_panel():
-    """Render the existing login fields in a centered, polished visual shell.
+    """Render the approved CMOTD login reference as the functional login page.
 
-    Credentials, validation, demo accounts, and session behavior are unchanged.
+    Authentication, account passwords, the SQLite user table, and session
+    behavior remain unchanged. Only the anonymous entry screen is restyled.
     """
-    # Wider center column: only the login presentation changes; authentication remains untouched.
-    _left, centre, _right = st.columns([0.65, 1.9, 0.65])
-    with centre:
-        logo_uri = company_logo_data_uri()
-        company_logo = (
-            f'<img src="{logo_uri}" alt="{COMPANY_NAME}" />'
-            if logo_uri
-            else '<span class="pf-company-logo-fallback">CMOTD</span>'
-        )
+    login_visual_uri = _login_visual_data_uri()
+    login_visual_style = (
+        f'background-image:url("{login_visual_uri}");'
+        if login_visual_uri
+        else "background:linear-gradient(180deg,#e7f0ff 0%,#0a4daa 52%,#06285f 100%);"
+    )
+    logo_uri = company_logo_data_uri()
+    company_logo = (
+        f'<img src="{logo_uri}" alt="{COMPANY_NAME}" />'
+        if logo_uri
+        else '<span class="pf-login-company-fallback">CMOTD</span>'
+    )
+
+    # The page styles are scoped to the anonymous screen. Signed-in role
+    # workspaces, forms, tables, navigation, and dashboards retain their CSS.
+    st.markdown(
+        """
+        <style>
+        body:has(.pf-login-page) [data-testid="stAppViewContainer"],
+        body:has(.pf-login-page) [data-testid="stApp"] {
+            background:#f8fbff !important;
+        }
+        body:has(.pf-login-page) [data-testid="stHeader"] { display:none !important; }
+        body:has(.pf-login-page) [data-testid="stMainBlockContainer"],
+        body:has(.pf-login-page) .main .block-container {
+            width:100% !important;
+            max-width:none !important;
+            min-height:100vh !important;
+            margin:0 !important;
+            padding:0 !important;
+        }
+        body:has(.pf-login-page) .pf-login-page {
+            position:relative;
+            min-height:100vh;
+            overflow:hidden;
+        }
+        body:has(.pf-login-page) .pf-login-page::before,
+        body:has(.pf-login-page) .pf-login-page::after {
+            content:"";
+            position:fixed;
+            z-index:0;
+            pointer-events:none;
+        }
+        body:has(.pf-login-page) .pf-login-page::before {
+            top:24px; right:40px; width:86px; height:86px;
+            background-image:radial-gradient(circle,rgba(30,99,237,.25) 1.7px,transparent 2px);
+            background-size:16px 16px;
+        }
+        body:has(.pf-login-page) .pf-login-page::after {
+            right:-170px; bottom:-180px; width:640px; height:560px;
+            border:1px solid rgba(58,119,228,.13);
+            border-radius:50%;
+            box-shadow:0 0 0 28px rgba(58,119,228,.045),0 0 0 57px rgba(58,119,228,.03),0 0 0 87px rgba(58,119,228,.02);
+        }
+        body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-visual) {
+            position:relative;
+            z-index:1;
+            align-items:stretch !important;
+            min-height:100vh !important;
+            gap:0 !important;
+        }
+        body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-visual) > [data-testid="stColumn"] {
+            min-height:100vh !important;
+        }
+        body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-visual) > [data-testid="stColumn"]:first-child {
+            flex:0 0 45% !important;
+            width:45% !important;
+        }
+        body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-visual) > [data-testid="stColumn"]:last-child {
+            flex:0 0 55% !important;
+            width:55% !important;
+            background:rgba(250,252,255,.76);
+        }
+        .pf-login-visual {
+            width:100%;
+            min-height:100vh;
+            background-position:center center;
+            background-repeat:no-repeat;
+            background-size:cover;
+        }
+        .pf-login-right-spacer { height:89px; }
+        body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) {
+            width:min(calc(100% - 72px),668px) !important;
+            margin:0 auto !important;
+            overflow:hidden !important;
+            background:rgba(255,255,255,.97) !important;
+            border:1px solid rgba(224,232,246,.95) !important;
+            border-radius:18px !important;
+            box-shadow:0 18px 46px rgba(41,84,150,.10) !important;
+        }
+        body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) > div {
+            padding:51px 73px 38px !important;
+        }
+        .pf-login-brand {
+            display:flex;
+            justify-content:center;
+            align-items:center;
+            min-height:61px;
+            margin:0 0 28px;
+        }
+        .pf-login-brand img {
+            display:block;
+            width:min(100%,425px);
+            max-height:72px;
+            object-fit:contain;
+        }
+        .pf-login-company-fallback { font-weight:850; color:#102a56; font-size:18px; }
+        .pf-login-title {
+            margin:0;
+            color:#0b1f48;
+            font-size:26px;
+            font-weight:850;
+            line-height:1.17;
+            letter-spacing:-.035em;
+            text-align:center;
+        }
+        .pf-login-title strong { color:#1461e7; font-weight:850; }
+        .pf-login-subtitle {
+            max-width:530px;
+            margin:13px auto 27px;
+            color:#4f6389;
+            font-size:14px;
+            font-weight:550;
+            line-height:1.65;
+            text-align:center;
+        }
+        .pf-login-divider {
+            position:relative;
+            height:2px;
+            margin:0 0 33px;
+            background:#e3eaf6;
+        }
+        .pf-login-divider::before {
+            content:"";
+            position:absolute;
+            top:-1px; left:calc(50% - 21px);
+            width:42px; height:3px;
+            border-radius:99px;
+            background:#1967ee;
+        }
+        body:has(.pf-login-page) [data-testid="stForm"] {
+            margin:0 !important;
+            padding:0 !important;
+            border:0 !important;
+            background:transparent !important;
+        }
+        body:has(.pf-login-page) [data-testid="stForm"] > div,
+        body:has(.pf-login-page) [data-testid="stForm"] form {
+            border:0 !important;
+            padding:0 !important;
+            background:transparent !important;
+        }
+        body:has(.pf-login-page) [data-testid="stTextInput"] { margin-bottom:25px !important; }
+        body:has(.pf-login-page) [data-testid="stTextInput"] label,
+        body:has(.pf-login-page) [data-testid="stTextInput"] [data-testid="stWidgetLabel"] p {
+            color:#1c3259 !important;
+            font-size:13px !important;
+            font-weight:800 !important;
+            margin-bottom:8px !important;
+        }
+        body:has(.pf-login-page) [data-testid="stTextInput"] input {
+            min-height:51px !important;
+            padding:0 47px 0 46px !important;
+            border:1px solid #cbd9ee !important;
+            border-radius:9px !important;
+            background-color:#fff !important;
+            color:#243a61 !important;
+            font-size:14px !important;
+            font-weight:600 !important;
+            box-shadow:0 1px 2px rgba(20,50,102,.02) !important;
+        }
+        body:has(.pf-login-page) [data-testid="stTextInput"] input:focus {
+            border-color:#2a6ce8 !important;
+            box-shadow:0 0 0 3px rgba(42,108,232,.12) !important;
+        }
+        body:has(.pf-login-page) [data-testid="stTextInput"]:has(input[type="text"]) input {
+            background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' fill='none' stroke='%238095b7' stroke-width='2' viewBox='0 0 24 24'%3E%3Cpath d='M20 21a8 8 0 1 0-16 0'/%3E%3Ccircle cx='12' cy='7' r='4'/%3E%3C/svg%3E") !important;
+            background-repeat:no-repeat !important;
+            background-position:16px center !important;
+            background-size:18px !important;
+        }
+        body:has(.pf-login-page) [data-testid="stTextInput"]:has(input[type="password"]) input {
+            background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' fill='none' stroke='%238095b7' stroke-width='2' viewBox='0 0 24 24'%3E%3Crect x='5' y='10' width='14' height='10' rx='2'/%3E%3Cpath d='M8 10V7a4 4 0 0 1 8 0v3'/%3E%3C/svg%3E") !important;
+            background-repeat:no-repeat !important;
+            background-position:16px center !important;
+            background-size:18px !important;
+        }
+        body:has(.pf-login-page) [data-testid="stTextInput"] button { right:13px !important; color:#6880a7 !important; }
+        .pf-login-options {
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:16px;
+            margin:-4px 0 27px;
+            color:#314b77;
+            font-size:13px;
+            font-weight:650;
+        }
+        .pf-login-options .pf-remember { display:inline-flex; align-items:center; gap:8px; }
+        .pf-login-options .pf-remember i {
+            width:15px; height:15px;
+            display:inline-block;
+            border:1.5px solid #9db0ce;
+            border-radius:3px;
+            background:#fff;
+        }
+        .pf-login-options .pf-forgot { color:#1766ed; font-weight:750; }
+        body:has(.pf-login-page) [data-testid="stFormSubmitButton"] button {
+            min-height:54px !important;
+            border:0 !important;
+            border-radius:9px !important;
+            background:linear-gradient(90deg,#1767e8 0%,#1461dc 100%) !important;
+            color:#fff !important;
+            font-size:16px !important;
+            font-weight:800 !important;
+            box-shadow:0 10px 20px rgba(20,95,221,.20) !important;
+        }
+        body:has(.pf-login-page) [data-testid="stFormSubmitButton"] button:hover {
+            background:linear-gradient(90deg,#0f5dde 0%,#0e54c9 100%) !important;
+            transform:translateY(-1px);
+        }
+        .pf-login-card-footer {
+            margin-top:27px;
+            color:#6c80a3;
+            font-size:12px;
+            font-weight:650;
+            text-align:center;
+        }
+        .pf-login-card-footer b { color:#1c64df; padding:0 8px; }
+        .pf-login-legal {
+            margin:21px auto 0;
+            color:#7184a5;
+            font-size:12px;
+            line-height:1.7;
+            text-align:center;
+        }
+        @media (max-width:1000px) {
+            body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-visual) > [data-testid="stColumn"]:first-child {
+                flex:0 0 40% !important; width:40% !important;
+            }
+            body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-visual) > [data-testid="stColumn"]:last-child {
+                flex:0 0 60% !important; width:60% !important;
+            }
+            body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) { width:min(calc(100% - 48px),620px) !important; }
+            body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) > div { padding:44px 48px 34px !important; }
+        }
+        @media (max-width:780px) {
+            body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-visual) > [data-testid="stColumn"]:first-child { display:none !important; }
+            body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-visual) > [data-testid="stColumn"]:last-child { flex:0 0 100% !important; width:100% !important; }
+            .pf-login-right-spacer { height:32px; }
+            body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) { width:calc(100% - 32px) !important; }
+            body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) > div { padding:38px 25px 30px !important; }
+            .pf-login-title { font-size:22px; }
+            .pf-login-subtitle { font-size:13px; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="pf-login-page"></div>', unsafe_allow_html=True)
+    left_column, right_column = st.columns([45, 55], gap="small")
+
+    with left_column:
         st.markdown(
-            f"""
-            <div class="pf-login-company-brand" aria-label="{COMPANY_NAME}">
-                {company_logo}
-            </div>
-            <div class="pf-login-heading">
-                <div class="pf-login-mark">PF</div>
-                <div>
-                    <h1>ProcureFlow Procurement Workspace</h1>
-                    <p>ServiceNow-inspired procurement command center for requests, sourcing, POs, receiving, invoices, expenses, cash advances, budgets, and audits.</p>
-                </div>
-            </div>
-            """,
+            f'<div class="pf-login-visual" style="{login_visual_style}" aria-label="{COMPANY_NAME} procurement workspace"></div>',
             unsafe_allow_html=True,
         )
+
+    with right_column:
+        st.markdown('<div class="pf-login-right-spacer"></div>', unsafe_allow_html=True)
         with st.container(border=True):
-            st.subheader("Login")
-            username = st.text_input("Username", value="" if PRODUCTION_MODE else "admin")
-            password = st.text_input("Password", type="password", value="" if PRODUCTION_MODE else "admin123")
-            if st.button("Login", type="primary", use_container_width=True):
-                user = login_user(username, password)
-                if user:
-                    st.session_state["user"] = user
-                    st.session_state["last_seen_at"] = datetime.now().isoformat(timespec="seconds")
-                    token = create_persistent_session(user)
-                    if token:
-                        st.session_state["pf_session_token"] = token
-                        _store_browser_session_token(token)
-                    log_audit("LOGIN", "User", user["id"], "User logged in", user["id"], user.get("role"))
-                    st.rerun()
-                else:
-                    st.error("Invalid username or password.")
-        if not PRODUCTION_MODE:
-            with st.expander("Local demo credentials"):
-                st.markdown("""
-                | Role | Username | Password |
-                |---|---|---|
-                | Admin | `admin` | `admin123` |
-                | Procurement Manager | `procurement` | `procure123` |
-                | Finance | `finance` | `finance123` |
-                | Approver/MD | `approver` | `approve123` |
-                | Auditor | `auditor` | `audit123` |
-                | Utility Head / Facility Head | `facility` | `facility123` |
-                | Logistics Officer | `logistics` | `logistics123` |
-                """)
+            st.markdown(
+                f"""
+                <div class="pf-login-brand" aria-label="{COMPANY_NAME}">{company_logo}</div>
+                <h1 class="pf-login-title">ProcureFlow <strong>Procurement Workspace</strong></h1>
+                <p class="pf-login-subtitle">ServiceNow-inspired procurement command center for requests, sourcing, POs, receiving, invoices, expenses, cash advances, budgets, and audits.</p>
+                <div class="pf-login-divider" aria-hidden="true"></div>
+                """,
+                unsafe_allow_html=True,
+            )
+            with st.form("pf_login_form", clear_on_submit=False):
+                username = st.text_input("Username", value="", placeholder="Enter your username", key="pf_login_username")
+                password = st.text_input("Password", value="", type="password", placeholder="Enter your password", key="pf_login_password")
+                st.markdown(
+                    """
+                    <div class="pf-login-options" aria-label="Login assistance">
+                        <span class="pf-remember"><i aria-hidden="true"></i>Remember me</span>
+                        <span class="pf-forgot">Forgot password?</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                submitted = st.form_submit_button("↪  Login", use_container_width=True)
+                if submitted:
+                    user = login_user(username, password)
+                    if user:
+                        st.session_state["user"] = user
+                        st.session_state["last_seen_at"] = datetime.now().isoformat(timespec="seconds")
+                        token = create_persistent_session(user)
+                        if token:
+                            st.session_state["pf_session_token"] = token
+                            _store_browser_session_token(token)
+                        log_audit("LOGIN", "User", user["id"], "User logged in", user["id"], user.get("role"))
+                        st.rerun()
+                    else:
+                        st.error("Invalid username or password.")
+            st.markdown(
+                """
+                <div class="pf-login-card-footer">Secure<b>•</b>Reliable<b>•</b>Built for Procurement Excellence</div>
+                """,
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            f'<div class="pf-login-legal">© 2026 {COMPANY_NAME}.<br />All rights reserved.</div>',
+            unsafe_allow_html=True,
+        )
 
 
 def logout_button():
