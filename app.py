@@ -1593,11 +1593,14 @@ def format_nav_label(section: str, counts: dict[str, int]) -> str:
 
 
 def render_sidebar_navigation(current: dict):
-    """Render the role navigation with working links and red attention dots.
+    """Render all role navigation as in-page Streamlit controls.
 
-    The destination values and session keys are unchanged.  Only the visual
-    renderer changes from Streamlit's radio labels to dedicated navigation
-    links so a task indicator can be a true red dot rather than text.
+    Earlier UI patches rendered each sidebar item as an HTML ``<a>`` element.
+    Although visually convenient, those anchors changed the browser URL on
+    every click and could appear as a separate in-app page/tab.  This renderer
+    deliberately uses native Streamlit buttons instead.  A click updates the
+    existing role's section state and reruns the current app view in place;
+    no browser navigation, new tab, or new URL is created.
     """
     from html import escape
 
@@ -1629,64 +1632,69 @@ def render_sidebar_navigation(current: dict):
         unsafe_allow_html=True,
     )
 
-    # Honour existing action-button navigation first, then a direct user click
-    # from the new link-based rail.  The same per-role section session keys are
-    # retained for all workspaces.
+    # Keep all existing programmatic navigation routes working.  Direct links
+    # are only honoured once; subsequent sidebar clicks are local session-state
+    # changes and are never converted into URL links.
     pending_key = f"_pending_nav_{state_key}"
+    query_seen_key = f"_pf_initial_route_seen_{state_key}"
     pending_section = st.session_state.pop(pending_key, None)
     if pending_section in sections:
         st.session_state[state_key] = pending_section
-    else:
+    elif state_key not in st.session_state or st.session_state[state_key] not in sections:
         query_section = _query_value("pf_section")
         query_role = _query_value("pf_role")
-        if query_role == current.get("role") and query_section in sections:
+        if (
+            not st.session_state.get(query_seen_key)
+            and query_role == current.get("role")
+            and query_section in sections
+        ):
             st.session_state[state_key] = query_section
-        elif state_key not in st.session_state or st.session_state[state_key] not in sections:
+        else:
             st.session_state[state_key] = sections[0]
+        st.session_state[query_seen_key] = True
 
     selected = str(st.session_state.get(state_key, sections[0]))
     counts = _build_attention_count_map(current, list(sections))
     if int(counts.get(selected, 0) or 0) > 0:
-        # Opening a section clears only its attention marker; notifications and
-        # activity history remain intact.
+        # Opening a section only clears its visual attention badge.  It does
+        # not delete notifications, activity, records, or workflow tasks.
         mark_section_attention_seen(current, selected)
         counts[selected] = 0
 
-    collapsed = _sidebar_is_collapsed()
-    links: list[str] = []
-    for section in sections:
-        is_active = section == selected
-        item_class = "pf-sidebar-nav-item is-active" if is_active else "pf-sidebar-nav-item"
-        href = escape(_sidebar_url(current, section, collapsed), quote=True)
-        section_name = escape(str(section))
-        icon = escape(nav_icon_for(section))
-        count = int(counts.get(section, 0) or 0)
-        attention_label = f"{count} item{'s' if count != 1 else ''} need attention"
-        dot = (
-            f'<span class="pf-nav-attention-dot" title="{attention_label}" aria-label="{attention_label}"></span>'
-            if count else ""
-        )
-        current_attr = ' aria-current="page"' if is_active else ""
-        links.append(
-            f'<a class="{item_class}" href="{href}"{current_attr}>'
-            f'<span class="pf-sidebar-nav-icon" aria-hidden="true">{icon}</span>'
-            f'<span class="pf-sidebar-nav-copy">{section_name}</span>{dot}</a>'
-        )
+    # Each native widget receives a stable key.  The small generated CSS keeps
+    # the existing blue visual system and puts a genuine red task dot on only
+    # the tabs that need attention.
+    button_css = [
+        "<style>",
+        "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] { margin: 0 0 2px !important; }",
+        "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button { position: relative !important; width: 100% !important; min-height: 43px !important; margin: 0 !important; padding: 9px 30px 9px 12px !important; border: 1px solid transparent !important; border-radius: 10px !important; background: transparent !important; color: #ffffff !important; box-shadow: none !important; text-align: left !important; justify-content: flex-start !important; font-size: 12px !important; font-weight: 750 !important; line-height: 1.2 !important; }",
+        "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button:hover { background: rgba(255,255,255,.15) !important; color: #ffffff !important; transform: none !important; }",
+        "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button p, section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button span { color: #ffffff !important; font-weight: 750 !important; text-align: left !important; }",
+    ]
+    for index, section in enumerate(sections):
+        button_key = f"pf_nav_button_{state_key}_{index}"
+        selector = f"section[data-testid='stSidebar'] div[class*='st-key-{button_key}'] button"
+        if section == selected:
+            button_css.append(
+                f"{selector} {{ background: linear-gradient(90deg, rgba(1,64,177,.84), rgba(17,93,210,.90)) !important; border-color: rgba(255,255,255,.24) !important; box-shadow: inset 0 1px 0 rgba(255,255,255,.11), 0 5px 14px rgba(2,50,132,.16) !important; }}"
+            )
+        if int(counts.get(section, 0) or 0) > 0:
+            button_css.append(
+                f"{selector}::after {{ content: '' !important; position: absolute !important; top: 50% !important; right: 13px !important; width: 8px !important; height: 8px !important; transform: translateY(-50%) !important; border: 2px solid rgba(255,255,255,.96) !important; border-radius: 999px !important; background: #ef4444 !important; box-shadow: 0 2px 7px rgba(92,0,0,.34) !important; }}"
+            )
+    button_css.append("</style>")
+    st.markdown("\n".join(button_css), unsafe_allow_html=True)
 
-    st.markdown(
-        f'<nav class="pf-sidebar-navigation" aria-label="{escape(nav_title)}">{"".join(links)}</nav>',
-        unsafe_allow_html=True,
-    )
-
-    # Preserve the current public URL contract for role pages and external
-    # links.  We only add/remove the visual sidebar preference separately.
-    try:
-        if _query_value("pf_section") != selected:
-            st.query_params["pf_section"] = selected
-        if _query_value("pf_role") != current.get("role", ""):
-            st.query_params["pf_role"] = current.get("role", "")
-    except Exception:
-        pass
+    # Native buttons keep the user on the same page/session for every role.
+    # No hyperlinks or query-parameter writes are used here.
+    for index, section in enumerate(sections):
+        button_key = f"pf_nav_button_{state_key}_{index}"
+        label = f"{nav_icon_for(section)}  {section}"
+        if st.button(label, key=button_key, use_container_width=True):
+            if section != selected:
+                st.session_state[state_key] = section
+                mark_section_attention_seen(current, section)
+                st.rerun()
 
 
 def render_sidebar_account_card(current: dict):
