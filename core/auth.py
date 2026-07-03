@@ -474,11 +474,12 @@ def require_user() -> bool:
 
 
 def login_panel():
-    """Render a fixed-height CMOTD login screen without page scrolling.
+    """Render a compact, fixed desktop login screen.
 
-    Authentication, passwords, SQLite records, roles, permissions and the
-    shared-link login protection remain unchanged.  This function only
-    controls the anonymous login presentation.
+    This is presentation-only. Authentication, passwords, SQLite records,
+    shared-link handling, roles, permissions, and workflow logic remain
+    untouched. The desktop composition is anchored to the browser viewport so
+    every visible control fits without vertical scrolling.
     """
     logo_uri = company_logo_data_uri()
     company_logo = (
@@ -486,49 +487,71 @@ def login_panel():
         if logo_uri
         else '<span class="pf-login-company-fallback">CMOTD</span>'
     )
+    marine_visual_uri = _login_visual_data_uri()
+    marine_visual_css = f"background-image:url('{marine_visual_uri}');" if marine_visual_uri else ""
 
-    # Scoped CSS: it is active only while the anonymous login marker exists.
-    # Desktop intentionally uses the visible browser viewport as the complete
-    # canvas so the page is static rather than a vertically scrolling form.
     st.markdown(
         """
         <style>
+        /* Login-only viewport reset. Nothing below applies after authentication. */
         html:has(.pf-login-page),
         body:has(.pf-login-page) {
             height:100% !important;
-            max-height:100% !important;
+            min-height:100% !important;
+            margin:0 !important;
             overflow:hidden !important;
-            background:#f8fbff !important;
+            background:#f7faff !important;
         }
+        body:has(.pf-login-page) [data-testid="stHeader"],
+        body:has(.pf-login-page) [data-testid="stToolbar"] { display:none !important; }
         body:has(.pf-login-page) [data-testid="stApp"],
         body:has(.pf-login-page) [data-testid="stAppViewContainer"],
         body:has(.pf-login-page) .main,
         body:has(.pf-login-page) [data-testid="stMain"] {
-            height:100dvh !important;
-            min-height:100dvh !important;
-            max-height:100dvh !important;
+            width:100vw !important;
+            height:100vh !important;
+            min-height:100vh !important;
+            max-height:100vh !important;
+            margin:0 !important;
             overflow:hidden !important;
-            background:#f8fbff !important;
+            background:#f7faff !important;
         }
-        body:has(.pf-login-page) [data-testid="stHeader"] { display:none !important; }
         body:has(.pf-login-page) [data-testid="stMainBlockContainer"],
         body:has(.pf-login-page) .main .block-container {
-            width:100% !important;
+            width:100vw !important;
             max-width:none !important;
-            height:100dvh !important;
-            min-height:100dvh !important;
-            max-height:100dvh !important;
+            height:100vh !important;
+            min-height:100vh !important;
+            max-height:100vh !important;
             margin:0 !important;
             padding:0 !important;
             overflow:hidden !important;
         }
-        body:has(.pf-login-page) .pf-login-page {
-            position:absolute !important;
+
+        /* Markers do not reserve vertical space in Streamlit's element stack. */
+        body:has(.pf-login-page) [data-testid="stElementContainer"]:has(.pf-login-page),
+        body:has(.pf-login-page) [data-testid="stElementContainer"]:has(.pf-login-left-anchor),
+        body:has(.pf-login-page) [data-testid="stElementContainer"]:has(.pf-login-right-stage) {
+            height:0 !important;
+            min-height:0 !important;
+            margin:0 !important;
+            padding:0 !important;
+            overflow:hidden !important;
+        }
+        body:has(.pf-login-page) .pf-login-page,
+        body:has(.pf-login-page) .pf-login-left-anchor,
+        body:has(.pf-login-page) .pf-login-right-stage {
+            display:block !important;
             width:0 !important;
             height:0 !important;
+            min-height:0 !important;
+            margin:0 !important;
+            padding:0 !important;
             overflow:hidden !important;
             pointer-events:none !important;
         }
+
+        /* Decorative details stay behind the fixed two-panel layout. */
         body:has(.pf-login-page) .pf-login-page::before,
         body:has(.pf-login-page) .pf-login-page::after {
             content:"";
@@ -537,263 +560,270 @@ def login_panel():
             pointer-events:none;
         }
         body:has(.pf-login-page) .pf-login-page::before {
-            top:22px;
-            right:42px;
-            width:96px;
-            height:96px;
-            background-image:radial-gradient(circle,rgba(34,104,232,.22) 1.6px,transparent 2px);
+            top:18px;
+            right:34px;
+            width:84px;
+            height:84px;
+            opacity:.9;
+            background-image:radial-gradient(circle,rgba(37,105,229,.24) 1.55px,transparent 2px);
             background-size:16px 16px;
         }
         body:has(.pf-login-page) .pf-login-page::after {
-            right:-165px;
-            bottom:-190px;
-            width:660px;
-            height:590px;
-            border:1px solid rgba(58,119,228,.12);
+            right:-156px;
+            bottom:-178px;
+            width:580px;
+            height:520px;
+            border:1px solid rgba(67,126,231,.11);
             border-radius:50%;
-            box-shadow:0 0 0 28px rgba(58,119,228,.040),0 0 0 58px rgba(58,119,228,.027),0 0 0 88px rgba(58,119,228,.018);
+            box-shadow:0 0 0 27px rgba(67,126,231,.035),0 0 0 56px rgba(67,126,231,.023),0 0 0 85px rgba(67,126,231,.016);
         }
 
-        /* Fixed, full-screen two-panel composition. */
+        /* Pin the Streamlit column row to the viewport. This removes the
+           blank top gap and keeps the login page truly static on desktop. */
         body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-left-anchor) {
-            position:relative !important;
+            position:fixed !important;
             z-index:1 !important;
-            width:100% !important;
-            height:100dvh !important;
-            min-height:100dvh !important;
-            max-height:100dvh !important;
+            inset:0 !important;
+            width:100vw !important;
+            height:100vh !important;
+            min-height:100vh !important;
+            max-height:100vh !important;
+            display:flex !important;
+            flex-wrap:nowrap !important;
             gap:0 !important;
-            align-items:stretch !important;
+            margin:0 !important;
+            padding:0 !important;
             overflow:hidden !important;
+            align-items:stretch !important;
+            background:#f7faff !important;
         }
         body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-left-anchor) > [data-testid="stColumn"] {
-            height:100dvh !important;
-            min-height:100dvh !important;
-            max-height:100dvh !important;
+            height:100vh !important;
+            min-height:100vh !important;
+            max-height:100vh !important;
+            margin:0 !important;
+            padding:0 !important;
             overflow:hidden !important;
         }
         body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-left-anchor) > [data-testid="stColumn"]:first-child {
-            flex:0 0 45% !important;
-            width:45% !important;
-            background:#073378 !important;
+            flex:0 0 40% !important;
+            width:40% !important;
+            background:#073379 !important;
         }
         body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-left-anchor) > [data-testid="stColumn"]:last-child {
-            flex:0 0 55% !important;
-            width:55% !important;
+            flex:0 0 60% !important;
+            width:60% !important;
             position:relative !important;
-            background:linear-gradient(145deg,#f8fbff 0%,#f5f9ff 100%) !important;
+            background:linear-gradient(145deg,#fbfdff 0%,#f4f8ff 100%) !important;
         }
-        .pf-login-left-anchor,
-        .pf-login-right-stage {
-            width:0 !important;
-            height:0 !important;
-            min-height:0 !important;
+
+        /* The marine artwork is a true full-height panel, not an in-flow
+           Streamlit image, so it cannot begin halfway down the page. */
+        body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-left-anchor) > div,
+        body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-left-anchor) [data-testid="stVerticalBlock"],
+        body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-left-anchor) [data-testid="stElementContainer"]:has(.pf-login-left-visual),
+        body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-left-anchor) [data-testid="stMarkdown"]:has(.pf-login-left-visual) {
+            width:100% !important;
+            height:100vh !important;
+            min-height:100vh !important;
+            max-height:100vh !important;
             margin:0 !important;
             padding:0 !important;
             overflow:hidden !important;
         }
-        body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-left-anchor) [data-testid="stImage"],
-        body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-left-anchor) [data-testid="stImage"] > div,
-        body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-left-anchor) [data-testid="stImage"] img {
+        .pf-login-left-visual {
             display:block !important;
             width:100% !important;
-            height:100dvh !important;
-            min-height:100dvh !important;
-            max-height:100dvh !important;
+            height:100vh !important;
+            min-height:100vh !important;
+            background-color:#063178 !important;
+            background-repeat:no-repeat !important;
+            background-position:center center !important;
+            background-size:cover !important;
+        }
+
+        /* The card is centered independently from Streamlit's regular block
+           flow. This guarantees that it stays within the visible desktop area. */
+        body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-right-stage) > div,
+        body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-right-stage) [data-testid="stVerticalBlock"] {
+            min-height:100% !important;
+        }
+        body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) {
+            position:absolute !important;
+            top:50% !important;
+            left:50% !important;
+            z-index:2 !important;
+            width:min(630px,calc(100% - 64px)) !important;
+            max-height:calc(100vh - 28px) !important;
             margin:0 !important;
-            padding:0 !important;
-        }
-        body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-left-anchor) [data-testid="stImage"] img {
-            object-fit:cover !important;
-            object-position:center center !important;
-        }
-        body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-right-stage) > div:first-child,
-        body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-right-stage) [data-testid="stVerticalBlock"]:has(.pf-login-right-stage) {
-            height:100dvh !important;
-            min-height:100dvh !important;
-            max-height:100dvh !important;
+            transform:translate(-50%,-50%) !important;
             overflow:hidden !important;
+            box-sizing:border-box !important;
+            background:rgba(255,255,255,.98) !important;
+            border:1px solid rgba(218,229,246,.98) !important;
+            border-radius:18px !important;
+            box-shadow:0 18px 44px rgba(38,77,140,.11) !important;
         }
-        body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-right-stage) [data-testid="stVerticalBlock"]:has(.pf-login-right-stage) {
-            display:flex !important;
-            flex-direction:column !important;
-            justify-content:center !important;
-            gap:0 !important;
-            padding:22px 0 !important;
+        body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) > div {
+            padding:clamp(20px,2.2vh,28px) clamp(32px,4vw,48px) clamp(17px,2vh,24px) !important;
             box-sizing:border-box !important;
         }
 
-        /* Compact login card: every control remains above the bottom edge. */
-        body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) {
-            width:min(calc(100% - 56px),630px) !important;
-            margin:0 auto !important;
-            overflow:hidden !important;
-            background:rgba(255,255,255,.97) !important;
-            border:1px solid rgba(220,230,246,.98) !important;
-            border-radius:18px !important;
-            box-shadow:0 18px 46px rgba(41,84,150,.10) !important;
-        }
-        body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) > div {
-            padding:34px 54px 26px !important;
-        }
         .pf-login-brand {
             display:flex;
-            justify-content:center;
             align-items:center;
-            min-height:48px;
-            margin:0 0 14px;
+            justify-content:center;
+            min-height:38px;
+            margin:0 0 9px;
         }
         .pf-login-brand img {
             display:block;
-            width:min(100%,340px);
-            max-height:54px;
+            width:min(100%,320px);
+            max-height:45px;
             object-fit:contain;
         }
-        .pf-login-company-fallback { font-weight:850; color:#102a56; font-size:18px; }
+        .pf-login-company-fallback { color:#132753; font-size:17px; font-weight:850; }
         .pf-login-title {
             margin:0;
-            color:#0b1f48;
-            font-size:27px;
+            color:#102246;
+            font-size:clamp(22px,1.58vw,27px);
             font-weight:850;
-            line-height:1.16;
-            letter-spacing:-.035em;
+            line-height:1.15;
+            letter-spacing:-.032em;
             text-align:center;
         }
-        .pf-login-title strong { color:#1461e7; font-weight:850; }
+        .pf-login-title strong { color:#1463e8; font-weight:850; }
         .pf-login-subtitle {
-            max-width:535px;
-            margin:9px auto 18px;
-            color:#4f6389;
-            font-size:14px;
-            font-weight:550;
-            line-height:1.54;
+            max-width:530px;
+            margin:7px auto 12px;
+            color:#4e638b;
+            font-size:clamp(12px,.83vw,13px);
+            font-weight:560;
+            line-height:1.45;
             text-align:center;
         }
         .pf-login-divider {
             position:relative;
             height:2px;
-            margin:0 0 20px;
-            background:#e3eaf6;
+            margin:0 0 13px;
+            background:#e3ebf7;
         }
-        .pf-login-divider::before {
+        .pf-login-divider::after {
             content:"";
             position:absolute;
-            top:-1px;
-            left:calc(50% - 21px);
-            width:42px;
-            height:3px;
+            top:0;
+            left:50%;
+            width:52px;
+            height:2px;
+            margin-left:-26px;
             border-radius:99px;
-            background:#1967ee;
+            background:#1464e9;
         }
-        body:has(.pf-login-page) [data-testid="stForm"],
-        body:has(.pf-login-page) [data-testid="stForm"] > div,
-        body:has(.pf-login-page) [data-testid="stForm"] form {
-            margin:0 !important;
-            padding:0 !important;
-            border:0 !important;
-            background:transparent !important;
-        }
-        body:has(.pf-login-page) [data-testid="stTextInput"] { margin-bottom:16px !important; }
-        body:has(.pf-login-page) [data-testid="stTextInput"] label,
-        body:has(.pf-login-page) [data-testid="stTextInput"] [data-testid="stWidgetLabel"] p {
-            color:#1c3259 !important;
-            font-size:13px !important;
+
+        body:has(.pf-login-page) [data-testid="stForm"] { border:0 !important; padding:0 !important; }
+        body:has(.pf-login-page) [data-testid="stTextInput"] { margin-bottom:9px !important; }
+        body:has(.pf-login-page) [data-testid="stTextInput"] label {
+            margin:0 0 5px !important;
+            color:#16315f !important;
+            font-size:12px !important;
             font-weight:800 !important;
-            margin-bottom:7px !important;
         }
         body:has(.pf-login-page) [data-testid="stTextInput"] input {
-            min-height:48px !important;
-            padding:0 47px 0 46px !important;
-            border:1px solid #cbd9ee !important;
+            min-height:43px !important;
+            padding:0 44px 0 46px !important;
+            border:1px solid #cbd9f0 !important;
             border-radius:9px !important;
-            background-color:#fff !important;
-            color:#243a61 !important;
+            color:#1d3156 !important;
             font-size:14px !important;
             font-weight:600 !important;
-            box-shadow:0 1px 2px rgba(20,50,102,.02) !important;
+            box-shadow:none !important;
+            background-color:#fff !important;
         }
         body:has(.pf-login-page) [data-testid="stTextInput"] input:focus {
-            border-color:#2a6ce8 !important;
-            box-shadow:0 0 0 3px rgba(42,108,232,.12) !important;
+            border-color:#2b70eb !important;
+            box-shadow:0 0 0 3px rgba(43,112,235,.12) !important;
         }
-        body:has(.pf-login-page) [data-testid="stTextInput"]:has(input[type="text"]) input {
-            background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' fill='none' stroke='%238095b7' stroke-width='2' viewBox='0 0 24 24'%3E%3Cpath d='M20 21a8 8 0 1 0-16 0'/%3E%3Ccircle cx='12' cy='7' r='4'/%3E%3C/svg%3E") !important;
+        body:has(.pf-login-page) [data-testid="stTextInput"]:has(input:not([type="password"])) input {
+            background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' fill='none' stroke='%238099bd' stroke-width='2' viewBox='0 0 24 24'%3E%3Cpath d='M20 21a8 8 0 1 0-16 0'/%3E%3Ccircle cx='12' cy='7' r='4'/%3E%3C/svg%3E") !important;
             background-repeat:no-repeat !important;
-            background-position:16px center !important;
+            background-position:15px center !important;
             background-size:18px !important;
         }
         body:has(.pf-login-page) [data-testid="stTextInput"]:has(input[type="password"]) input {
-            background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' fill='none' stroke='%238095b7' stroke-width='2' viewBox='0 0 24 24'%3E%3Crect x='5' y='10' width='14' height='10' rx='2'/%3E%3Cpath d='M8 10V7a4 4 0 0 1 8 0v3'/%3E%3C/svg%3E") !important;
+            background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' fill='none' stroke='%238099bd' stroke-width='2' viewBox='0 0 24 24'%3E%3Crect x='5' y='10' width='14' height='10' rx='2'/%3E%3Cpath d='M8 10V7a4 4 0 0 1 8 0v3'/%3E%3C/svg%3E") !important;
             background-repeat:no-repeat !important;
-            background-position:16px center !important;
+            background-position:15px center !important;
             background-size:18px !important;
         }
-        body:has(.pf-login-page) [data-testid="stTextInput"] button { right:13px !important; color:#6880a7 !important; }
+        body:has(.pf-login-page) [data-testid="stTextInput"] button { right:12px !important; color:#6680aa !important; }
         .pf-login-options {
             display:flex;
             align-items:center;
             justify-content:space-between;
-            gap:16px;
-            margin:-1px 0 16px;
-            color:#314b77;
-            font-size:13px;
-            font-weight:650;
+            gap:14px;
+            margin:0 0 11px;
+            color:#314d7a;
+            font-size:12px;
+            font-weight:700;
         }
         .pf-login-options .pf-remember { display:inline-flex; align-items:center; gap:8px; }
         .pf-login-options .pf-remember i {
-            width:15px;
-            height:15px;
             display:inline-block;
-            border:1.5px solid #9db0ce;
+            width:14px;
+            height:14px;
+            box-sizing:border-box;
+            border:1.5px solid #9fb3d4;
             border-radius:3px;
             background:#fff;
         }
-        .pf-login-options .pf-forgot { color:#1766ed; font-weight:750; }
+        .pf-login-options .pf-forgot { color:#1463e8; font-weight:800; }
         body:has(.pf-login-page) [data-testid="stFormSubmitButton"] button {
-            min-height:50px !important;
+            min-height:44px !important;
             border:0 !important;
             border-radius:9px !important;
-            background:linear-gradient(90deg,#1767e8 0%,#1461dc 100%) !important;
+            background:linear-gradient(90deg,#1b68e9 0%,#135bd8 100%) !important;
             color:#fff !important;
-            font-size:15px !important;
+            font-size:14px !important;
             font-weight:800 !important;
-            box-shadow:0 9px 18px rgba(20,95,221,.20) !important;
+            box-shadow:0 8px 16px rgba(20,94,216,.18) !important;
         }
         body:has(.pf-login-page) [data-testid="stFormSubmitButton"] button:hover {
-            background:linear-gradient(90deg,#0f5dde 0%,#0e54c9 100%) !important;
+            background:linear-gradient(90deg,#135edc 0%,#0e51c8 100%) !important;
             transform:translateY(-1px);
         }
         .pf-login-card-footer {
-            margin-top:18px;
-            color:#6c80a3;
-            font-size:12px;
+            margin-top:12px;
+            color:#7184a5;
+            font-size:11px;
             font-weight:650;
             text-align:center;
         }
-        .pf-login-card-footer b { color:#1c64df; padding:0 8px; }
+        .pf-login-card-footer b { color:#1765e5; padding:0 7px; }
         .pf-login-legal {
-            width:min(calc(100% - 56px),630px);
-            margin:12px auto 0;
-            color:#7184a5;
-            font-size:11px;
-            line-height:1.55;
+            margin-top:7px;
+            color:#7b8eae;
+            font-size:10px;
+            line-height:1.4;
             text-align:center;
         }
 
-        @media (max-height:820px) and (min-width:781px) {
-            body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) > div { padding:28px 48px 20px !important; }
-            .pf-login-brand { min-height:42px; margin-bottom:10px; }
-            .pf-login-brand img { max-height:48px; }
-            .pf-login-title { font-size:24px; }
-            .pf-login-subtitle { margin:7px auto 13px; font-size:13px; line-height:1.45; }
-            .pf-login-divider { margin-bottom:15px; }
-            body:has(.pf-login-page) [data-testid="stTextInput"] { margin-bottom:12px !important; }
-            body:has(.pf-login-page) [data-testid="stTextInput"] input { min-height:45px !important; }
-            .pf-login-options { margin:0 0 12px; }
-            body:has(.pf-login-page) [data-testid="stFormSubmitButton"] button { min-height:47px !important; }
-            .pf-login-card-footer { margin-top:14px; }
-            .pf-login-legal { margin-top:9px; }
+        /* Tight laptop heights keep the whole card visible without scrolling. */
+        @media (max-height:760px) and (min-width:781px) {
+            body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) > div { padding:18px 38px 16px !important; }
+            .pf-login-brand { min-height:30px; margin-bottom:6px; }
+            .pf-login-brand img { max-height:37px; width:min(100%,275px); }
+            .pf-login-title { font-size:22px; }
+            .pf-login-subtitle { margin:5px auto 9px; font-size:12px; line-height:1.35; }
+            .pf-login-divider { margin-bottom:10px; }
+            body:has(.pf-login-page) [data-testid="stTextInput"] { margin-bottom:6px !important; }
+            body:has(.pf-login-page) [data-testid="stTextInput"] input { min-height:39px !important; }
+            .pf-login-options { margin:0 0 8px; }
+            body:has(.pf-login-page) [data-testid="stFormSubmitButton"] button { min-height:40px !important; }
+            .pf-login-card-footer { margin-top:9px; }
+            .pf-login-legal { margin-top:5px; }
         }
+
+        /* Mobile retains access to the full form rather than clipping it. */
         @media (max-width:780px) {
             html:has(.pf-login-page), body:has(.pf-login-page),
             body:has(.pf-login-page) [data-testid="stApp"],
@@ -802,37 +832,57 @@ def login_panel():
             body:has(.pf-login-page) [data-testid="stMain"],
             body:has(.pf-login-page) [data-testid="stMainBlockContainer"],
             body:has(.pf-login-page) .main .block-container {
+                width:100% !important;
                 height:auto !important;
-                min-height:100dvh !important;
+                min-height:100vh !important;
                 max-height:none !important;
                 overflow:auto !important;
             }
-            body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-left-anchor) { height:auto !important; min-height:100dvh !important; max-height:none !important; }
+            body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-left-anchor) {
+                position:relative !important;
+                inset:auto !important;
+                width:100% !important;
+                height:auto !important;
+                min-height:100vh !important;
+                max-height:none !important;
+                display:block !important;
+                overflow:visible !important;
+            }
             body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-left-anchor) > [data-testid="stColumn"]:first-child { display:none !important; }
-            body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-left-anchor) > [data-testid="stColumn"]:last-child { flex:0 0 100% !important; width:100% !important; }
-            body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-right-stage) > div:first-child,
-            body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-right-stage) [data-testid="stVerticalBlock"]:has(.pf-login-right-stage) { height:auto !important; min-height:100dvh !important; max-height:none !important; overflow:visible !important; }
-            body:has(.pf-login-page) [data-testid="stColumn"]:has(.pf-login-right-stage) [data-testid="stVerticalBlock"]:has(.pf-login-right-stage) { justify-content:center !important; padding:30px 0 !important; }
-            body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) { width:calc(100% - 32px) !important; }
-            body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) > div { padding:34px 24px 28px !important; }
+            body:has(.pf-login-page) [data-testid="stHorizontalBlock"]:has(.pf-login-left-anchor) > [data-testid="stColumn"]:last-child {
+                width:100% !important;
+                min-height:100vh !important;
+                position:relative !important;
+                overflow:visible !important;
+            }
+            body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) {
+                position:relative !important;
+                top:auto !important;
+                left:auto !important;
+                width:calc(100% - 32px) !important;
+                max-height:none !important;
+                margin:30px auto !important;
+                transform:none !important;
+                overflow:visible !important;
+            }
+            body:has(.pf-login-page) [data-testid="stVerticalBlockBorderWrapper"]:has(.pf-login-brand) > div { padding:28px 24px 22px !important; }
             .pf-login-title { font-size:23px; }
             .pf-login-subtitle { font-size:13px; }
-            .pf-login-legal { width:calc(100% - 32px); }
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # A marker enables the CSS to stay strictly limited to this anonymous page.
     st.markdown('<div class="pf-login-page" aria-hidden="true"></div>', unsafe_allow_html=True)
-    left_column, right_column = st.columns([45, 55], gap="small")
+    left_column, right_column = st.columns([40, 60], gap="small")
 
     with left_column:
         st.markdown('<div class="pf-login-left-anchor" aria-hidden="true"></div>', unsafe_allow_html=True)
-        # Streamlit serves this local image through its managed media endpoint.
-        # That is more reliable than a large CSS data-URI on Streamlit Cloud.
-        st.image(str(LOGIN_VISUAL_PATH), use_container_width=True)
+        st.markdown(
+            f'<div class="pf-login-left-visual" style="{marine_visual_css}" aria-label="Marine procurement workspace visual"></div>',
+            unsafe_allow_html=True,
+        )
 
     with right_column:
         st.markdown('<div class="pf-login-right-stage" aria-hidden="true"></div>', unsafe_allow_html=True)
@@ -873,15 +923,12 @@ def login_panel():
                     else:
                         st.error("Invalid username or password.")
             st.markdown(
-                """
+                f"""
                 <div class="pf-login-card-footer">Secure<b>•</b>Reliable<b>•</b>Built for Procurement Excellence</div>
+                <div class="pf-login-legal">© 2026 {COMPANY_NAME}. All rights reserved.</div>
                 """,
                 unsafe_allow_html=True,
             )
-        st.markdown(
-            f'<div class="pf-login-legal">© 2026 {COMPANY_NAME}.<br />All rights reserved.</div>',
-            unsafe_allow_html=True,
-        )
 
 def logout_button():
     if st.button("Logout", use_container_width=True):
