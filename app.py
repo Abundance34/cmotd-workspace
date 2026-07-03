@@ -851,9 +851,209 @@ def inject_shell_css():
         unsafe_allow_html=True,
     )
 
+    # Interactive sidebar controls and task indicators.  This final CSS layer
+    # affects presentation only; it does not change workflow data or routing.
+    st.markdown(
+        """
+        <style>
+        /* Small, accessible control at the left of the command bar. */
+        .pf-reference-menu.pf-sidebar-toggle {
+            cursor: pointer;
+            text-decoration: none !important;
+            color: #42526b !important;
+            transition: background .16s ease, border-color .16s ease, color .16s ease, transform .16s ease;
+        }
+        .pf-reference-menu.pf-sidebar-toggle:hover {
+            background: #eff6ff !important;
+            border-color: #bfdbfe !important;
+            color: #175cd3 !important;
+            transform: translateY(-1px);
+        }
+        .pf-reference-menu.pf-sidebar-toggle svg {
+            width: 20px;
+            height: 20px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.9;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        /* A true notification/task alert is red and only rendered when unread work exists. */
+        .pf-reference-icon .pf-task-dot {
+            position: absolute;
+            top: 7px;
+            right: 7px;
+            width: 9px;
+            height: 9px;
+            border: 2px solid #ffffff;
+            border-radius: 999px;
+            background: #ef4444 !important;
+            box-shadow: 0 2px 6px rgba(239, 68, 68, .34);
+        }
+
+        /* Compact CMOTD lock-up: clean, fitted, and clear of the navigation. */
+        .pf-sidebar-brand { margin-bottom: 22px !important; }
+        .pf-company-logo-card {
+            height: 88px !important;
+            min-height: 88px !important;
+            display: flex !important;
+            align-items: center !important;
+            box-sizing: border-box !important;
+            padding: 12px 14px !important;
+            overflow: hidden !important;
+        }
+        .pf-company-logo-card img {
+            display: block !important;
+            width: 100% !important;
+            height: 54px !important;
+            max-height: 54px !important;
+            object-fit: contain !important;
+            object-position: left center !important;
+        }
+        .pf-sidebar-app-meta { margin-top: 19px !important; }
+
+        /* Custom navigation supports a proper attention dot without changing section names. */
+        .pf-sidebar-navigation {
+            display: grid;
+            gap: 4px;
+            margin: 0;
+            padding: 0;
+        }
+        .pf-sidebar-nav-item {
+            min-height: 44px;
+            display: flex !important;
+            align-items: center;
+            gap: 10px;
+            box-sizing: border-box;
+            margin: 0 !important;
+            padding: 10px 12px !important;
+            border: 1px solid transparent;
+            border-radius: 11px;
+            background: transparent;
+            color: #ffffff !important;
+            text-decoration: none !important;
+            font-size: 13px;
+            font-weight: 750;
+            line-height: 1.24;
+            transition: background .15s ease, transform .15s ease, border-color .15s ease;
+        }
+        .pf-sidebar-nav-item:hover {
+            background: rgba(255,255,255,.10) !important;
+            border-color: rgba(255,255,255,.14) !important;
+            color: #ffffff !important;
+            transform: translateX(1px);
+        }
+        .pf-sidebar-nav-item.is-active {
+            background: linear-gradient(90deg, rgba(1,64,177,.84), rgba(17,93,210,.90)) !important;
+            border-color: rgba(255,255,255,.24) !important;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,.11), 0 5px 14px rgba(2,50,132,.16) !important;
+        }
+        .pf-sidebar-nav-icon {
+            width: 18px;
+            flex: 0 0 18px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: rgba(255,255,255,.94) !important;
+            font-size: 15px;
+            line-height: 1;
+        }
+        .pf-sidebar-nav-copy {
+            min-width: 0;
+            flex: 1 1 auto;
+            color: #ffffff !important;
+            font-weight: 750 !important;
+            overflow-wrap: anywhere;
+        }
+        section[data-testid="stSidebar"] .pf-nav-attention-dot {
+            width: 8px;
+            height: 8px;
+            flex: 0 0 8px;
+            display: inline-block;
+            border: 2px solid rgba(255,255,255,.95);
+            border-radius: 999px;
+            background: #ef4444 !important;
+            box-shadow: 0 2px 7px rgba(92, 0, 0, .34);
+        }
+
+        /* The marker is rendered only for collapsed state. Chrome/Edge support :has(). */
+        .pf-shell-state { display: none !important; }
+        body:has(.pf-sidebar-is-collapsed) section[data-testid="stSidebar"] {
+            display: none !important;
+        }
+        body:has(.pf-sidebar-is-collapsed) [data-testid="stMainBlockContainer"],
+        body:has(.pf-sidebar-is-collapsed) .main .block-container {
+            max-width: none !important;
+        }
+
+        @media (max-width: 720px) {
+            .pf-company-logo-card { height: 78px !important; min-height: 78px !important; }
+            .pf-company-logo-card img { height: 46px !important; max-height: 46px !important; }
+            .pf-sidebar-nav-item { min-height: 40px; font-size: 12px; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _query_value(name: str) -> str | None:
+    """Read one query parameter without changing any browser state."""
+    try:
+        value = st.query_params.get(name)
+        if isinstance(value, list):
+            return str(value[0]) if value else None
+        return str(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def _sidebar_is_collapsed() -> bool:
+    """Return the visual navigation-rail preference from the current URL."""
+    return (_query_value("pf_sidebar") or "").strip().lower() == "collapsed"
+
+
+def _selected_section_for(current: dict) -> str:
+    """Resolve the user's current section for the header control and nav links."""
+    nav = ROLE_SECTIONS.get(current.get("role"))
+    if not nav:
+        return ""
+    _title, state_key, sections = nav
+    query_section = _query_value("pf_section")
+    query_role = _query_value("pf_role")
+    if query_role == current.get("role") and query_section in sections:
+        return str(query_section)
+    selected = st.session_state.get(state_key)
+    return str(selected) if selected in sections else str(sections[0])
+
+
+def _sidebar_url(current: dict, section: str, collapsed: bool) -> str:
+    """Build a same-window URL for navigation or rail toggling."""
+    from urllib.parse import urlencode
+
+    params = {"pf_role": str(current.get("role") or ""), "pf_section": str(section or "")}
+    if collapsed:
+        params["pf_sidebar"] = "collapsed"
+    return "?" + urlencode(params)
+
+
+def _unread_notification_total(current: dict) -> int:
+    """Small read-only count used only for the red command-bar alert dot."""
+    try:
+        return _nav_count_query(
+            """
+            SELECT COUNT(*) FROM notifications
+            WHERE is_read=0 AND (user_id=? OR role=? OR role='All')
+            """,
+            (int(current.get("id") or 0), str(current.get("role") or "")),
+        )
+    except Exception:
+        return 0
+
 
 def render_top_header(current: dict):
-    """Render the design-reference command bar without changing user state or routing."""
+    """Render the shared command bar and working sidebar collapse control."""
     from html import escape
 
     landing = ROLE_LANDING.get(current["role"], "Workspace")
@@ -862,13 +1062,27 @@ def render_top_header(current: dict):
     landing_label = escape(str(landing))
     initials = "".join(part[:1] for part in str(current.get("full_name") or "User").split()[:2]).upper() or "U"
     initials = escape(initials)
+    selected_section = _selected_section_for(current)
+    collapsed = _sidebar_is_collapsed()
+    toggle_href = escape(_sidebar_url(current, selected_section, not collapsed), quote=True)
+    toggle_label = "Expand navigation" if collapsed else "Collapse navigation"
+    state_marker = '<span class="pf-shell-state pf-sidebar-is-collapsed" aria-hidden="true"></span>' if collapsed else ''
+    unread_count = _unread_notification_total(current)
+    task_dot = '<i class="pf-task-dot" title="Unread task or notification"></i>' if unread_count else ''
+    # SVG communicates direction more clearly than a decorative three-line icon.
+    toggle_icon = (
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path><path d="M5 5v14"></path></svg>'
+        if collapsed
+        else '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path><path d="M19 5v14"></path></svg>'
+    )
     st.markdown(
         f"""
+        {state_marker}
         <div class="pf-reference-topbar">
             <div class="pf-reference-left">
-                <div class="pf-reference-menu" aria-hidden="true">
-                    <span></span><span></span><span></span>
-                </div>
+                <a class="pf-reference-menu pf-sidebar-toggle" href="{toggle_href}" aria-label="{toggle_label}" title="{toggle_label}">
+                    {toggle_icon}
+                </a>
                 <div class="pf-reference-breadcrumb"><b>ProcureFlow</b><span>/</span><strong>{landing_label}</strong></div>
             </div>
             <div class="pf-reference-actions" aria-label="Workspace controls">
@@ -876,9 +1090,9 @@ def render_top_header(current: dict):
                     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path></svg>
                     <span>Search anything...</span><kbd>Ctrl + K</kbd>
                 </div>
-                <div class="pf-reference-icon" aria-hidden="true">
+                <div class="pf-reference-icon" aria-label="Notifications">
                     <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path></svg>
-                    <i></i>
+                    {task_dot}
                 </div>
                 <div class="pf-reference-icon" aria-hidden="true">
                     <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
@@ -1227,83 +1441,100 @@ def format_nav_label(section: str, counts: dict[str, int]) -> str:
 
 
 def render_sidebar_navigation(current: dict):
+    """Render the role navigation with working links and red attention dots.
+
+    The destination values and session keys are unchanged.  Only the visual
+    renderer changes from Streamlit's radio labels to dedicated navigation
+    links so a task indicator can be a true red dot rather than text.
+    """
+    from html import escape
+
     nav = ROLE_SECTIONS.get(current["role"])
-    if nav:
-        nav_title, state_key, sections = nav
-        logo_uri = company_logo_data_uri()
-        company_logo = (
-            f'<img src="{logo_uri}" alt="{COMPANY_NAME}" />'
-            if logo_uri
-            else '<span class="pf-company-logo-fallback">CMOTD</span>'
-        )
-        st.markdown(
-            f"""
-            <div class="pf-sidebar-brand">
-                <div class="pf-company-logo-card" aria-label="{COMPANY_NAME}">
-                    {company_logo}
-                </div>
-                <div class="pf-sidebar-app-meta">
-                    <div class="pf-sidebar-product">ProcureFlow</div>
-                    <div class="pf-sidebar-caption">Procurement Workspace</div>
-                </div>
-            </div>
-            <div class="pf-sidebar-nav-label" aria-label="{nav_title}">Main</div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        # Programmatic navigation requests are stored under a separate pending
-        # key because Streamlit forbids writing to a widget-backed key after
-        # that widget has been instantiated in the same run. Action buttons can
-        # safely set _pending_nav_<state_key>, rerun, and this block applies the
-        # destination before the sidebar radio is created.
-        pending_key = f"_pending_nav_{state_key}"
-        pending_section = st.session_state.pop(pending_key, None)
-        if pending_section in sections:
-            st.session_state[state_key] = pending_section
-
-        # Use an explicit widget key that is the same key read by the
-        # workspace renderer. This prevents the common Streamlit "one click
-        # behind" navigation issue where a page falls back to the dashboard
-        # and only opens the requested section after a second click.
-        if state_key not in st.session_state or st.session_state[state_key] not in sections:
-            persisted = None
-            try:
-                if st.query_params.get("pf_role") == current.get("role"):
-                    persisted = st.query_params.get("pf_section")
-            except Exception:
-                persisted = None
-            st.session_state[state_key] = persisted if persisted in sections else sections[0]
-
-        # Streamlit updates widget session_state before the script reruns. That
-        # means the clicked section is already available here, so we can clear
-        # its red badge *before* rendering the radio label and without forcing
-        # another st.rerun(). The page now opens on the first click.
-        preselected = st.session_state.get(state_key, sections[0])
-        counts = _build_attention_count_map(current, list(sections))
-        if int(counts.get(preselected, 0) or 0) > 0:
-            mark_section_attention_seen(current, preselected)
-            counts[preselected] = 0
-
-        selected = st.radio(
-            "Navigation menu",
-            sections,
-            key=state_key,
-            label_visibility="collapsed",
-            format_func=lambda sec: format_nav_label(sec, counts),
-        )
-        try:
-            # Avoid rewriting URL query params on every rerun. Updating them
-            # unnecessarily can trigger extra browser/history work and make
-            # navigation feel slower.
-            if st.query_params.get("pf_section") != selected:
-                st.query_params["pf_section"] = selected
-            if st.query_params.get("pf_role") != current.get("role", ""):
-                st.query_params["pf_role"] = current.get("role", "")
-        except Exception:
-            pass
-    else:
+    if not nav:
         st.info("No navigation has been configured for this role.")
+        return
+
+    nav_title, state_key, sections = nav
+    logo_uri = company_logo_data_uri()
+    company_logo = (
+        f'<img src="{logo_uri}" alt="{escape(COMPANY_NAME)}" />'
+        if logo_uri
+        else '<span class="pf-company-logo-fallback">CMOTD</span>'
+    )
+    st.markdown(
+        f"""
+        <div class="pf-sidebar-brand">
+            <div class="pf-company-logo-card" aria-label="{escape(COMPANY_NAME)}">
+                {company_logo}
+            </div>
+            <div class="pf-sidebar-app-meta">
+                <div class="pf-sidebar-product">ProcureFlow</div>
+                <div class="pf-sidebar-caption">Procurement Workspace</div>
+            </div>
+        </div>
+        <div class="pf-sidebar-nav-label" aria-label="{escape(nav_title)}">Main</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Honour existing action-button navigation first, then a direct user click
+    # from the new link-based rail.  The same per-role section session keys are
+    # retained for all workspaces.
+    pending_key = f"_pending_nav_{state_key}"
+    pending_section = st.session_state.pop(pending_key, None)
+    if pending_section in sections:
+        st.session_state[state_key] = pending_section
+    else:
+        query_section = _query_value("pf_section")
+        query_role = _query_value("pf_role")
+        if query_role == current.get("role") and query_section in sections:
+            st.session_state[state_key] = query_section
+        elif state_key not in st.session_state or st.session_state[state_key] not in sections:
+            st.session_state[state_key] = sections[0]
+
+    selected = str(st.session_state.get(state_key, sections[0]))
+    counts = _build_attention_count_map(current, list(sections))
+    if int(counts.get(selected, 0) or 0) > 0:
+        # Opening a section clears only its attention marker; notifications and
+        # activity history remain intact.
+        mark_section_attention_seen(current, selected)
+        counts[selected] = 0
+
+    collapsed = _sidebar_is_collapsed()
+    links: list[str] = []
+    for section in sections:
+        is_active = section == selected
+        item_class = "pf-sidebar-nav-item is-active" if is_active else "pf-sidebar-nav-item"
+        href = escape(_sidebar_url(current, section, collapsed), quote=True)
+        section_name = escape(str(section))
+        icon = escape(nav_icon_for(section))
+        count = int(counts.get(section, 0) or 0)
+        attention_label = f"{count} item{'s' if count != 1 else ''} need attention"
+        dot = (
+            f'<span class="pf-nav-attention-dot" title="{attention_label}" aria-label="{attention_label}"></span>'
+            if count else ""
+        )
+        current_attr = ' aria-current="page"' if is_active else ""
+        links.append(
+            f'<a class="{item_class}" href="{href}"{current_attr}>'
+            f'<span class="pf-sidebar-nav-icon" aria-hidden="true">{icon}</span>'
+            f'<span class="pf-sidebar-nav-copy">{section_name}</span>{dot}</a>'
+        )
+
+    st.markdown(
+        f'<nav class="pf-sidebar-navigation" aria-label="{escape(nav_title)}">{"".join(links)}</nav>',
+        unsafe_allow_html=True,
+    )
+
+    # Preserve the current public URL contract for role pages and external
+    # links.  We only add/remove the visual sidebar preference separately.
+    try:
+        if _query_value("pf_section") != selected:
+            st.query_params["pf_section"] = selected
+        if _query_value("pf_role") != current.get("role", ""):
+            st.query_params["pf_role"] = current.get("role", "")
+    except Exception:
+        pass
 
 
 def render_sidebar_account_card(current: dict):
