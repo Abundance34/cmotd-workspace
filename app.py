@@ -997,6 +997,130 @@ def inject_shell_css():
         unsafe_allow_html=True,
     )
 
+    # Native command-bar styles. These replace only the unsafe raw-HTML header
+    # control; the sidebar, content pages, role permissions, and data flow are
+    # unaffected.
+    st.markdown(
+        """
+        <style>
+        div[class*="st-key-pf_sidebar_toggle"] button {
+            min-height: 42px !important;
+            width: 42px !important;
+            min-width: 42px !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            border: 1px solid #e6edf7 !important;
+            border-radius: 12px !important;
+            background: #f8fbff !important;
+            color: #42526b !important;
+            font-size: 26px !important;
+            line-height: 1 !important;
+            font-weight: 500 !important;
+            box-shadow: none !important;
+        }
+        div[class*="st-key-pf_sidebar_toggle"] button:hover {
+            border-color: #bfdbfe !important;
+            background: #eff6ff !important;
+            color: #175cd3 !important;
+        }
+        .pf-native-breadcrumb {
+            min-height: 42px;
+            display: flex;
+            align-items: center;
+            color: #0c1730;
+            font-size: 15px;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .pf-native-breadcrumb b { color: #0959d2; font-weight: 800; }
+        .pf-native-breadcrumb span { color: #a8b4c7; padding: 0 12px; font-weight: 500; }
+        .pf-native-breadcrumb strong { color: #0c1730; font-weight: 800; }
+        .pf-native-search {
+            width: min(100%, 290px);
+            height: 42px;
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            box-sizing: border-box;
+            padding: 0 11px 0 14px;
+            border: 1px solid #e6edf7;
+            border-radius: 12px;
+            background: #ffffff;
+            color: #9ba9c0;
+            font-size: 13px;
+            box-shadow: 0 1px 2px rgba(16,24,40,.015);
+        }
+        .pf-native-search-icon { color: #8c9ab0; font-size: 20px; line-height: 1; transform: rotate(-18deg); }
+        .pf-native-search span:nth-child(2) { flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .pf-native-search kbd { padding: 4px 6px; border: 1px solid #e5ebf5; border-radius: 6px; background: #f8fbff; color: #a0abc0; font-family: inherit; font-size: 10px; font-weight: 700; white-space: nowrap; }
+        .pf-native-profile {
+            min-height: 42px;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 10px;
+            color: #0c1730;
+        }
+        .pf-native-bell {
+            position: relative;
+            width: 42px;
+            height: 42px;
+            display: grid;
+            place-items: center;
+            flex: 0 0 42px;
+            border: 1px solid #edf2f8;
+            border-radius: 50%;
+            background: #ffffff;
+            color: #41516c;
+            font-size: 21px;
+            line-height: 1;
+        }
+        .pf-native-task-dot {
+            position: absolute;
+            top: 7px;
+            right: 7px;
+            width: 9px;
+            height: 9px;
+            border: 2px solid #ffffff;
+            border-radius: 999px;
+            background: #ef4444;
+            box-shadow: 0 2px 6px rgba(239,68,68,.34);
+        }
+        .pf-native-avatar {
+            width: 40px;
+            height: 40px;
+            display: grid;
+            place-items: center;
+            flex: 0 0 40px;
+            border-radius: 50%;
+            background: linear-gradient(135deg,#3f86ff,#1f63e0);
+            color: #ffffff;
+            font-size: 12px;
+            font-weight: 850;
+            box-shadow: 0 6px 14px rgba(9,89,210,.18);
+        }
+        .pf-native-profile-copy { min-width: 0; display: flex; flex-direction: column; line-height: 1.22; }
+        .pf-native-profile-copy b { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #0c1730; font-size: 13px; font-weight: 800; }
+        .pf-native-profile-copy span { margin-top: 2px; color: #74839b; font-size: 11px; }
+        .pf-native-chevron { color: #728198; font-size: 18px; line-height: 1; }
+        .pf-native-header-divider { height: 1px; margin: 12px 0 24px; background: #e7edf7; }
+        @media (max-width: 1040px) {
+            .pf-native-search { display: none !important; }
+            .pf-native-profile-copy, .pf-native-chevron { display: none !important; }
+        }
+        @media (max-width: 720px) {
+            .pf-native-breadcrumb { font-size: 13px; }
+            .pf-native-breadcrumb span { padding: 0 6px; }
+            .pf-native-bell { width: 36px; height: 36px; flex-basis: 36px; }
+            .pf-native-avatar { width: 36px; height: 36px; flex-basis: 36px; }
+            div[class*="st-key-pf_sidebar_toggle"] button { width: 36px !important; min-width: 36px !important; min-height: 36px !important; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 def _query_value(name: str) -> str | None:
     """Read one query parameter without changing any browser state."""
@@ -1010,8 +1134,14 @@ def _query_value(name: str) -> str | None:
 
 
 def _sidebar_is_collapsed() -> bool:
-    """Return the visual navigation-rail preference from the current URL."""
-    return (_query_value("pf_sidebar") or "").strip().lower() == "collapsed"
+    """Return the in-session navigation-rail preference.
+
+    The old version used a query-string link (``?pf_sidebar=collapsed``). That
+    made the browser navigate to a new URL whenever the user pressed the
+    collapse icon. The visual preference now lives only in Streamlit session
+    state, so the control simply folds/unfolds the existing sidebar in place.
+    """
+    return bool(st.session_state.get("_pf_sidebar_collapsed", False))
 
 
 def _selected_section_for(current: dict) -> str:
@@ -1028,13 +1158,16 @@ def _selected_section_for(current: dict) -> str:
     return str(selected) if selected in sections else str(sections[0])
 
 
-def _sidebar_url(current: dict, section: str, collapsed: bool) -> str:
-    """Build a same-window URL for navigation or rail toggling."""
+def _sidebar_url(current: dict, section: str, collapsed: bool = False) -> str:
+    """Build a same-window URL for a section only.
+
+    ``collapsed`` remains an optional argument for compatibility with older
+    callers, but it is deliberately ignored. Sidebar state is local to the
+    current Streamlit session and must never be encoded into a navigation URL.
+    """
     from urllib.parse import urlencode
 
     params = {"pf_role": str(current.get("role") or ""), "pf_section": str(section or "")}
-    if collapsed:
-        params["pf_sidebar"] = "collapsed"
     return "?" + urlencode(params)
 
 
@@ -1052,8 +1185,38 @@ def _unread_notification_total(current: dict) -> int:
         return 0
 
 
+def _render_sidebar_state_css(collapsed: bool):
+    """Apply the session-only visual state for the navigation rail.
+
+    This is intentionally CSS-only. It does not touch role routing, query
+    parameters, database records, notifications, or workflow state.
+    """
+    if not collapsed:
+        return
+    st.markdown(
+        """
+        <style>
+        section[data-testid="stSidebar"] {
+            display: none !important;
+        }
+        [data-testid="stMainBlockContainer"],
+        .main .block-container {
+            max-width: none !important;
+            width: 100% !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_top_header(current: dict):
-    """Render the shared command bar and working sidebar collapse control."""
+    """Render a native Streamlit command bar with an in-place sidebar toggle.
+
+    Native widgets are used for the toggle rather than a raw HTML anchor. This
+    prevents link navigation and avoids raw markup leaking into the workspace.
+    The visual header remains shared by all role workspaces.
+    """
     from html import escape
 
     landing = ROLE_LANDING.get(current["role"], "Workspace")
@@ -1062,51 +1225,40 @@ def render_top_header(current: dict):
     landing_label = escape(str(landing))
     initials = "".join(part[:1] for part in str(current.get("full_name") or "User").split()[:2]).upper() or "U"
     initials = escape(initials)
-    selected_section = _selected_section_for(current)
     collapsed = _sidebar_is_collapsed()
-    toggle_href = escape(_sidebar_url(current, selected_section, not collapsed), quote=True)
-    toggle_label = "Expand navigation" if collapsed else "Collapse navigation"
-    state_marker = '<span class="pf-shell-state pf-sidebar-is-collapsed" aria-hidden="true"></span>' if collapsed else ''
     unread_count = _unread_notification_total(current)
-    task_dot = '<i class="pf-task-dot" title="Unread task or notification"></i>' if unread_count else ''
-    # SVG communicates direction more clearly than a decorative three-line icon.
-    toggle_icon = (
-        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path><path d="M5 5v14"></path></svg>'
-        if collapsed
-        else '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path><path d="M19 5v14"></path></svg>'
-    )
-    st.markdown(
-        f"""
-        {state_marker}
-        <div class="pf-reference-topbar">
-            <div class="pf-reference-left">
-                <a class="pf-reference-menu pf-sidebar-toggle" href="{toggle_href}" aria-label="{toggle_label}" title="{toggle_label}">
-                    {toggle_icon}
-                </a>
-                <div class="pf-reference-breadcrumb"><b>ProcureFlow</b><span>/</span><strong>{landing_label}</strong></div>
-            </div>
-            <div class="pf-reference-actions" aria-label="Workspace controls">
-                <div class="pf-reference-search" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path></svg>
-                    <span>Search anything...</span><kbd>Ctrl + K</kbd>
-                </div>
-                <div class="pf-reference-icon" aria-label="Notifications">
-                    <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path></svg>
-                    {task_dot}
-                </div>
-                <div class="pf-reference-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path></svg>
-                </div>
-                <div class="pf-reference-user" aria-label="Signed-in user: {full_name}, {role}">
-                    <div class="pf-reference-avatar">{initials}</div>
-                    <div class="pf-reference-user-copy"><b>{full_name}</b><span>{role}</span></div>
-                    <svg class="pf-reference-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg>
-                </div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    task_dot = '<span class="pf-native-task-dot" aria-label="Unread task or notification"></span>' if unread_count else ''
+
+    # Kept as normal Streamlit columns so the control executes in the same page
+    # and does not create a URL link, tab, or destination view.
+    toggle_col, breadcrumb_col, search_col, profile_col = st.columns([0.46, 2.7, 2.2, 2.2])
+    with toggle_col:
+        toggle_icon = "☰" if collapsed else "‹"
+        toggle_help = "Expand navigation" if collapsed else "Collapse navigation"
+        if st.button(toggle_icon, key="pf_sidebar_toggle", help=toggle_help, use_container_width=True):
+            st.session_state["_pf_sidebar_collapsed"] = not collapsed
+            st.rerun()
+    with breadcrumb_col:
+        st.markdown(
+            f'<div class="pf-native-breadcrumb"><b>ProcureFlow</b><span>/</span><strong>{landing_label}</strong></div>',
+            unsafe_allow_html=True,
+        )
+    with search_col:
+        st.markdown(
+            '<div class="pf-native-search" aria-label="Search"><span class="pf-native-search-icon">⌕</span><span>Search anything...</span><kbd>Ctrl + K</kbd></div>',
+            unsafe_allow_html=True,
+        )
+    with profile_col:
+        st.markdown(
+            f"""<div class="pf-native-profile">
+                <div class="pf-native-bell" aria-label="Notifications">♧{task_dot}</div>
+                <div class="pf-native-avatar">{initials}</div>
+                <div class="pf-native-profile-copy"><b>{full_name}</b><span>{role}</span></div>
+                <div class="pf-native-chevron" aria-hidden="true">⌄</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+    st.markdown('<div class="pf-native-header-divider"></div>', unsafe_allow_html=True)
 
 
 def _nav_count_query(sql: str, params: tuple = ()) -> int:
@@ -1571,6 +1723,7 @@ def main():
         return
 
     current = st.session_state["user"]
+    _render_sidebar_state_css(_sidebar_is_collapsed())
     render_top_header(current)
 
     with st.sidebar:
