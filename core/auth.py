@@ -23,10 +23,11 @@ except Exception:  # pragma: no cover
     PasswordHasher = None  # type: ignore
     VerifyMismatchError = InvalidHashError = Exception  # type: ignore
 
-from core.db import run_query, now_iso, log_audit, df_query
+from core.db import run_query, now_iso, log_audit, df_query, create_notification
 from core.branding import COMPANY_NAME, company_logo_data_uri
 
-SESSION_TIMEOUT_MINUTES = int(os.environ.get("PROCUREFLOW_SESSION_TIMEOUT_MINUTES", "60"))
+SESSION_TIMEOUT_MINUTES = int(os.environ.get("PROCUREFLOW_SESSION_TIMEOUT_MINUTES", "720"))
+REMEMBER_ME_SESSION_DAYS = int(os.environ.get("PROCUREFLOW_REMEMBER_ME_SESSION_DAYS", "30"))
 PRODUCTION_MODE = os.environ.get("PROCUREFLOW_PRODUCTION", "0") == "1"
 SESSION_COOKIE_NAME = "pf_session_token"
 SESSION_COOKIE_MANAGER_KEY = "_pf_session_cookie_manager"
@@ -332,28 +333,85 @@ def _session_token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def create_persistent_session(user: dict) -> str:
+def _session_expiry_iso(remember_me: bool = False) -> str:
+    """Return the server-side expiry time for a login session."""
+    if remember_me:
+        expiry = datetime.now() + timedelta(days=REMEMBER_ME_SESSION_DAYS)
+    else:
+        expiry = datetime.now() + timedelta(minutes=SESSION_TIMEOUT_MINUTES)
+    return expiry.isoformat(timespec="seconds")
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def _user_session_columns() -> set[str]:
+    try:
+        return {str(r["name"]) for r in run_query("PRAGMA table_info(user_sessions)", fetch=True)}
+    except Exception:
+        return set()
+
+
+def _ensure_session_runtime_columns() -> None:
+    """Add remember-me session columns when older SQLite files are opened.
+
+    init_db() also performs this migration, but login can run against older
+    databases copied from previous builds. These ALTERs are safe and do not
+    touch existing users, passwords, procurement records, or workflows.
+    """
+    cols = _user_session_columns()
+    try:
+        if cols and "remember_me" not in cols:
+            run_query("ALTER TABLE user_sessions ADD COLUMN remember_me INTEGER DEFAULT 0")
+        if cols and "expires_at" not in cols:
+            run_query("ALTER TABLE user_sessions ADD COLUMN expires_at TEXT")
+    except Exception:
+        pass
+
+
+def create_persistent_session(user: dict, remember_me: bool = False) -> str:
     """Create a DB-backed server session without placing a token in the URL.
 
-    Streamlit session state owns the opaque browser-session token. Production
-    reverse proxies may add HttpOnly/Secure/SameSite cookies around this server
-    session; the application never writes session credentials to query params.
+    Streamlit session state owns the opaque browser-session token. The optional
+    Remember me checkbox only extends the server-side session expiry; it does
+    not change passwords, roles, permissions, workflow records, or SQLite data.
     """
+    _ensure_session_runtime_columns()
     token = secrets.token_urlsafe(32)
     token_hash = _session_token_hash(token)
     ts = now_iso()
+    expires_at = _session_expiry_iso(bool(remember_me))
+    cols = _user_session_columns()
     try:
-        run_query(
-            "INSERT INTO user_sessions (session_token, user_id, login_at, last_seen_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'Active', ?, ?)",
-            (token_hash, int(user["id"]), ts, ts, ts, ts),
-        )
+        if {"remember_me", "expires_at"}.issubset(cols):
+            run_query(
+                """
+                INSERT INTO user_sessions (session_token, user_id, login_at, last_seen_at, status, remember_me, expires_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'Active', ?, ?, ?, ?)
+                """,
+                (token_hash, int(user["id"]), ts, ts, 1 if remember_me else 0, expires_at, ts, ts),
+            )
+        else:
+            run_query(
+                "INSERT INTO user_sessions (session_token, user_id, login_at, last_seen_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'Active', ?, ?)",
+                (token_hash, int(user["id"]), ts, ts, ts, ts),
+            )
     except Exception:
         return ""
+    st.session_state["pf_remember_me"] = bool(remember_me)
+    st.session_state["pf_session_expires_at"] = expires_at
     return token
 
 def restore_user_from_session() -> bool:
     # The opaque token is restored from the encrypted browser cookie after a
     # full refresh. It is never written to URL query parameters.
+    _ensure_session_runtime_columns()
     token = st.session_state.get("pf_session_token") or _browser_session_token()
     if not token:
         return False
@@ -371,21 +429,39 @@ def restore_user_from_session() -> bool:
     if not rows:
         return False
     row = dict(rows[0])
-    last_seen = row.get("last_seen_at") or row.get("login_at")
-    try:
-        last = datetime.fromisoformat(last_seen)
-        if datetime.now() - last > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
+    remember_me = bool(int(row.get("remember_me") or 0))
+    expires_at = _parse_iso_datetime(row.get("expires_at"))
+    if expires_at is not None:
+        if datetime.now() > expires_at:
             run_query("UPDATE user_sessions SET status='Expired', logout_at=?, updated_at=? WHERE session_token=?", (now_iso(), now_iso(), token_hash))
             log_audit("SESSION_EXPIRED", "User", row.get("user_id"), "Session expired", row.get("user_id"), row.get("role"))
             return False
-    except Exception:
-        pass
+    else:
+        last_seen = row.get("last_seen_at") or row.get("login_at")
+        try:
+            last = datetime.fromisoformat(last_seen)
+            limit = timedelta(days=REMEMBER_ME_SESSION_DAYS) if remember_me else timedelta(minutes=SESSION_TIMEOUT_MINUTES)
+            if datetime.now() - last > limit:
+                run_query("UPDATE user_sessions SET status='Expired', logout_at=?, updated_at=? WHERE session_token=?", (now_iso(), now_iso(), token_hash))
+                log_audit("SESSION_EXPIRED", "User", row.get("user_id"), "Session expired", row.get("user_id"), row.get("role"))
+                return False
+        except Exception:
+            pass
     user = {k: row[k] for k in row.keys() if k in {"id", "username", "full_name", "role", "password_hash", "must_change_password", "is_active", "last_login_at", "account_locked", "failed_login_count", "created_at", "updated_at"}}
     st.session_state["user"] = user
     st.session_state["last_seen_at"] = datetime.now().isoformat(timespec="seconds")
-    run_query("UPDATE user_sessions SET last_seen_at=?, updated_at=? WHERE session_token=?", (now_iso(), now_iso(), token_hash))
+    st.session_state["pf_remember_me"] = remember_me
+    new_expiry = _session_expiry_iso(remember_me)
+    st.session_state["pf_session_expires_at"] = new_expiry
+    try:
+        cols = _user_session_columns()
+        if "expires_at" in cols:
+            run_query("UPDATE user_sessions SET last_seen_at=?, expires_at=?, updated_at=? WHERE session_token=?", (now_iso(), new_expiry, now_iso(), token_hash))
+        else:
+            run_query("UPDATE user_sessions SET last_seen_at=?, updated_at=? WHERE session_token=?", (now_iso(), now_iso(), token_hash))
+    except Exception:
+        pass
     return True
-
 
 def close_persistent_session():
     token = st.session_state.get("pf_session_token")
@@ -425,6 +501,9 @@ def require_permission(permission: str) -> bool:
 
 
 def session_expired() -> bool:
+    expiry = _parse_iso_datetime(st.session_state.get("pf_session_expires_at"))
+    if expiry is not None:
+        return datetime.now() > expiry
     last_seen = st.session_state.get("last_seen_at")
     if not last_seen:
         return False
@@ -432,8 +511,8 @@ def session_expired() -> bool:
         last = datetime.fromisoformat(last_seen)
     except ValueError:
         return False
-    return datetime.now() - last > timedelta(minutes=SESSION_TIMEOUT_MINUTES)
-
+    limit = timedelta(days=REMEMBER_ME_SESSION_DAYS) if st.session_state.get("pf_remember_me") else timedelta(minutes=SESSION_TIMEOUT_MINUTES)
+    return datetime.now() - last > limit
 
 def require_user() -> bool:
     if "user" not in st.session_state:
@@ -470,6 +549,41 @@ def require_user() -> bool:
             st.session_state["pf_last_session_db_touch"] = now_dt.isoformat(timespec="seconds")
         except Exception:
             pass
+    return True
+
+
+def request_password_reset(username: str) -> bool:
+    """Notify Admin that a user needs password help.
+
+    The request does not reveal account existence to the requester and does not
+    reset a password automatically. Admin still controls the existing forced
+    password-change/reset process from User Management.
+    """
+    clean_username = (username or "").strip()
+    if not clean_username:
+        return False
+    rows = run_query(
+        "SELECT id, username, full_name, role FROM users WHERE lower(username)=lower(?) AND is_active=1 LIMIT 1",
+        (clean_username,),
+        fetch=True,
+    )
+    if rows:
+        target = dict(rows[0])
+        title = "Password reset requested"
+        message = (
+            f"{target.get('full_name') or target.get('username')} ({target.get('username')}, {target.get('role')}) "
+            "requested password assistance from the login screen. Admin should review User Management and force a password change or issue a temporary password if appropriate."
+        )
+        try:
+            create_notification(None, "Admin", title, message, "User", int(target["id"]), "High", ["in_app", "browser_push"], action_label="Open User Management")
+        except Exception:
+            try:
+                create_notification(None, "Admin", title, message, "User", int(target["id"]), "High")
+            except Exception:
+                pass
+        log_audit("PASSWORD_RESET_REQUESTED", "User", int(target["id"]), {"username": target.get("username"), "source": "login_screen"}, None, "Anonymous")
+    else:
+        log_audit("PASSWORD_RESET_REQUESTED_UNKNOWN_USER", "User", None, {"username": clean_username[:64], "source": "login_screen"}, None, "Anonymous")
     return True
 
 
@@ -777,6 +891,25 @@ def login_panel():
             background:#fff;
         }
         .pf-login-options .pf-forgot { color:#1463e8; font-weight:800; }
+        body:has(.pf-login-page) [data-testid="stCheckbox"] { margin:0 0 8px !important; }
+        body:has(.pf-login-page) [data-testid="stCheckbox"] label,
+        body:has(.pf-login-page) [data-testid="stCheckbox"] p { color:#314d7a !important; font-size:12px !important; font-weight:750 !important; }
+        body:has(.pf-login-page) div[class*="st-key-pf_forgot_password_button"] button {
+            min-height:24px !important;
+            padding:0 !important;
+            border:0 !important;
+            background:transparent !important;
+            box-shadow:none !important;
+            color:#1463e8 !important;
+            font-size:12px !important;
+            font-weight:850 !important;
+            text-align:right !important;
+        }
+        body:has(.pf-login-page) div[class*="st-key-pf_forgot_password_button"] button:hover {
+            background:transparent !important;
+            color:#0c4fbd !important;
+            text-decoration:underline !important;
+        }
         body:has(.pf-login-page) [data-testid="stFormSubmitButton"] button {
             min-height:44px !important;
             border:0 !important;
@@ -899,29 +1032,28 @@ def login_panel():
             with st.form("pf_login_form", clear_on_submit=False):
                 username = st.text_input("Username", value="", placeholder="Enter your username", key="pf_login_username")
                 password = st.text_input("Password", value="", type="password", placeholder="Enter your password", key="pf_login_password")
-                st.markdown(
-                    """
-                    <div class="pf-login-options" aria-label="Login assistance">
-                        <span class="pf-remember"><i aria-hidden="true"></i>Remember me</span>
-                        <span class="pf-forgot">Forgot password?</span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                remember_me = st.checkbox("Remember me", value=False, key="pf_login_remember")
                 submitted = st.form_submit_button("↪  Login", use_container_width=True)
                 if submitted:
                     user = login_user(username, password)
                     if user:
                         st.session_state["user"] = user
                         st.session_state["last_seen_at"] = datetime.now().isoformat(timespec="seconds")
-                        token = create_persistent_session(user)
+                        token = create_persistent_session(user, remember_me=bool(remember_me))
                         if token:
                             st.session_state["pf_session_token"] = token
                             _store_browser_session_token(token)
-                        log_audit("LOGIN", "User", user["id"], "User logged in", user["id"], user.get("role"))
+                        log_audit("LOGIN", "User", user["id"], "User logged in", user["id"], user.get("role"), after_values={"remember_me": bool(remember_me)})
                         st.rerun()
                     else:
                         st.error("Invalid username or password.")
+            if st.button("Forgot password?", key="pf_forgot_password_button", use_container_width=True):
+                requested_username = str(st.session_state.get("pf_login_username") or "").strip()
+                if not requested_username:
+                    st.warning("Enter your username first, then click Forgot password again.")
+                else:
+                    request_password_reset(requested_username)
+                    st.success("If the account exists, Admin has been notified to review User Management and force a password change.")
             st.markdown(
                 f"""
                 <div class="pf-login-card-footer">Secure<b>•</b>Reliable<b>•</b>Built for Procurement Excellence</div>

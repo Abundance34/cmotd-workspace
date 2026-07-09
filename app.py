@@ -1133,6 +1133,18 @@ def _query_value(name: str) -> str | None:
         return None
 
 
+def _set_query_value(name: str, value: str | None) -> None:
+    """Update one query parameter in place without opening a new browser tab."""
+    try:
+        if value is None:
+            if name in st.query_params:
+                del st.query_params[name]
+        else:
+            st.query_params[name] = value
+    except Exception:
+        pass
+
+
 def _sidebar_is_collapsed() -> bool:
     """Return the in-session navigation-rail preference.
 
@@ -1654,6 +1666,13 @@ def render_sidebar_navigation(current: dict):
         st.session_state[query_seen_key] = True
 
     selected = str(st.session_state.get(state_key, sections[0]))
+    # Keep the active workspace in the current browser URL so a refresh restores
+    # the same page for the signed-in user. This does not use hyperlinks and it
+    # does not open a new page/tab. Anonymous shared-link visitors are still
+    # cleared to the login screen by core.auth before authentication.
+    if _query_value("pf_role") != str(current.get("role")) or _query_value("pf_section") != selected:
+        _set_query_value("pf_role", str(current.get("role")))
+        _set_query_value("pf_section", selected)
     counts = _build_attention_count_map(current, list(sections))
     if int(counts.get(selected, 0) or 0) > 0:
         # Opening a section only clears its visual attention badge.  It does
@@ -1693,6 +1712,8 @@ def render_sidebar_navigation(current: dict):
         if st.button(label, key=button_key, use_container_width=True):
             if section != selected:
                 st.session_state[state_key] = section
+                _set_query_value("pf_role", str(current.get("role")))
+                _set_query_value("pf_section", section)
                 mark_section_attention_seen(current, section)
                 st.rerun()
 

@@ -2588,6 +2588,10 @@ def ensure_dashboard_upgrade_schema():
             ("event_time", "event_time TEXT"),
             ("session_id", "session_id INTEGER"),
         ],
+        "user_sessions": [
+            ("remember_me", "remember_me INTEGER DEFAULT 0"),
+            ("expires_at", "expires_at TEXT"),
+        ],
         "notifications": [
             ("section_target", "section_target TEXT"),
             ("attention_counted", "attention_counted INTEGER DEFAULT 1"),
