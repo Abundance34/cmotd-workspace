@@ -30,6 +30,27 @@ PRIORITIES = ["Low", "Normal", "High", "Urgent"]
 RECEIVING_STATUSES = ["Pending Receipt", "Partially Received", "Fully Received", "Disputed", "Returned"]
 
 
+def _phase2_bootstrap():
+    """Ensure optional enterprise notification/gateway schemas exist before role pages use them.
+
+    This keeps notification rendering safe on Streamlit Cloud reruns without
+    changing app workflows or data. The full database initialization already
+    runs at startup; this helper is a lightweight guard for pages that call it.
+    """
+    if st.session_state.get("_pf_phase2_bootstrap_done"):
+        return
+    try:
+        from core.db import ensure_phase2_schema, seed_phase2_defaults, ensure_command_chain_schema
+        ensure_phase2_schema()
+        seed_phase2_defaults()
+        ensure_command_chain_schema()
+    except Exception:
+        # Keep the UI from crashing while the normal startup initializer handles
+        # schema creation. Downstream queries already surface real data issues.
+        pass
+    st.session_state["_pf_phase2_bootstrap_done"] = True
+
+
 def user() -> dict[str, Any]:
     return st.session_state["user"]
 
