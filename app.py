@@ -1,4 +1,10 @@
+import os
 import streamlit as st
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:  # optional realtime refresh helper
+    st_autorefresh = None
 
 from core.db import init_db, df_query, run_query, now_iso
 from core.auth import initialize_browser_session_storage, login_panel, logout_button, require_user
@@ -18,6 +24,30 @@ def boot_database_once():
     init_db()
     return True
 
+
+
+
+LIVE_REFRESH_INTERVAL_MS = int(os.environ.get("PROCUREFLOW_LIVE_REFRESH_INTERVAL_MS", "5000"))
+
+
+def enable_live_updates(current: dict) -> None:
+    """Near-real-time UI polling for notifications and shared messages.
+
+    Streamlit reads notifications/messages from SQLite on each rerun. This small
+    optional autorefresh makes new messages and task notifications appear within
+    a few seconds without users pressing the browser refresh button. It does not
+    change database records, roles, permissions, or workflow logic.
+    """
+    if st_autorefresh is None or LIVE_REFRESH_INTERVAL_MS <= 0:
+        return
+    try:
+        st_autorefresh(
+            interval=max(3000, LIVE_REFRESH_INTERVAL_MS),
+            limit=None,
+            key=f"pf_live_refresh_{int(current.get('id') or 0)}_{str(current.get('role') or '').replace(' ', '_')}",
+        )
+    except Exception:
+        pass
 
 ROLE_LANDING = {
     "Admin": "Admin Console",
@@ -1752,6 +1782,7 @@ def main():
         return
 
     current = st.session_state["user"]
+    enable_live_updates(current)
     _render_sidebar_state_css(_sidebar_is_collapsed())
     render_top_header(current)
 

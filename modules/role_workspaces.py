@@ -30,6 +30,300 @@ PRIORITIES = ["Low", "Normal", "High", "Urgent"]
 RECEIVING_STATUSES = ["Pending Receipt", "Partially Received", "Fully Received", "Disputed", "Returned"]
 
 
+# ---------------------------------------------------------------------------
+# Safety definitions used by role pages
+# ---------------------------------------------------------------------------
+# These constants/helpers keep every role workspace safe when a page is opened
+# directly from navigation. They do not change workflow logic or database data.
+AWAY_ROLES = ["Approver", "Procurement Manager"]
+GATEWAY_MOVEMENT_TYPES = ["Item Movement", "Equipment Movement", "Material Transfer", "Return Movement", "Vehicle Movement", "Other"]
+GATEWAY_UOMS = ["Unit", "Pcs", "Kg", "Tonnes", "Litres", "Meters", "Cartons", "Bags", "Boxes", "Set", "Other"]
+GATEWAY_QUALITY_OPTIONS = ["Good", "New", "Used", "Damaged", "Fragile", "Serviceable", "Other"]
+GATEWAY_FRAGILITY_OPTIONS = ["Normal", "Fragile", "Highly Fragile", "Heavy", "Hazardous", "Other"]
+GATEWAY_PASS_STATUSES = ["Draft", "Submitted", "Pending Procurement Manager / Approver Review", "Returned for Correction", "Approved", "Rejected", "Generated", "Downloaded", "Closed"]
+GATEWAY_COMPANY = "Center for Marine and Offshore Technology Development"
+
+
+def _clean(value: Any, default: str = "") -> str:
+    """Normalize values for display and document generation."""
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except Exception:
+        pass
+    text = str(value).strip()
+    return text if text and text.lower() not in {"none", "nan", "nat"} else default
+
+
+def _fmt_date(value: Any, default: str = "") -> str:
+    text = _clean(value)
+    if not text:
+        return default
+    try:
+        return pd.to_datetime(text).date().isoformat()
+    except Exception:
+        return text
+
+
+def _fmt_dt(value: Any, default: str = "") -> str:
+    text = _clean(value)
+    if not text:
+        return default
+    try:
+        return pd.to_datetime(text).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return text
+
+
+def _row_value(row: Any, key: str, default: Any = "") -> Any:
+    try:
+        if hasattr(row, "index") and key not in row.index:
+            return default
+        if hasattr(row, "get"):
+            return row.get(key, default)
+        return getattr(row, key, default)
+    except Exception:
+        return default
+
+
+def _qty_text(row: Any) -> str:
+    qty = _row_value(row, "quantity", "")
+    unit = _row_value(row, "unit_of_measure", "")
+    return " ".join(part for part in [_clean(qty), _clean(unit)] if part)
+
+
+def _gateway_asset_path(filename: str) -> str | None:
+    for root in (Path("static"), Path("assets"), Path("data")):
+        candidate = root / filename
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _table_exists_local(table: str) -> bool:
+    try:
+        rows = run_query("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,), fetch=True)
+        return bool(rows)
+    except Exception:
+        return False
+
+
+def _safe_table_df(table: str, limit: int = 500) -> pd.DataFrame:
+    if not _table_exists_local(table):
+        return pd.DataFrame()
+    safe_limit = max(1, min(int(limit or 500), 5000))
+    try:
+        return df_query(f"SELECT * FROM {table} ORDER BY id DESC LIMIT {safe_limit}")
+    except Exception:
+        try:
+            return df_query(f"SELECT * FROM {table} LIMIT {safe_limit}")
+        except Exception:
+            return pd.DataFrame()
+
+
+def activity_history_page(scope: str = "mine"):
+    """Safe activity/history view used by Admin and all role workspaces."""
+    _phase2_bootstrap()
+    st.subheader("Activity & History Logs" if scope == "all" else "My Activity History")
+    if not _table_exists_local("activity_logs"):
+        st.info("No activity log table is available yet.")
+        return
+    params: tuple[Any, ...] = ()
+    where = ""
+    if scope != "all":
+        uid = int(user().get("id") or 0)
+        role = str(user().get("role") or "")
+        where = "WHERE user_id=? OR related_user_id=? OR role=? OR visibility_scope IN ('workflow','role')"
+        params = (uid, uid, role)
+    df = df_query(
+        f"""
+        SELECT id, created_at, role, action, entity_type, entity_id, public_summary, visibility_scope
+        FROM activity_logs
+        {where}
+        ORDER BY created_at DESC, id DESC
+        LIMIT 500
+        """,
+        params,
+    )
+    if df.empty:
+        st.info("No activity history recorded yet.")
+        return
+    dataframe(df)
+    csv_download(df, "activity_history_logs" if scope == "all" else "my_activity_history")
+
+
+def admin_availability_review_page():
+    """Admin review page for away/delegation notices."""
+    _phase2_bootstrap()
+    st.subheader("Availability & Delegation Requests")
+    if not _table_exists_local("user_availability"):
+        st.info("No availability records are available yet.")
+        return
+    try:
+        rows = df_query(
+            """
+            SELECT ua.*, u.full_name, u.username, u.role
+            FROM user_availability ua
+            LEFT JOIN users u ON u.id=ua.user_id
+            ORDER BY ua.created_at DESC
+            LIMIT 500
+            """
+        )
+    except Exception:
+        rows = _safe_table_df("user_availability", 500)
+    if rows.empty:
+        st.success("No availability or delegation requests yet.")
+        return
+    dataframe(rows)
+    csv_download(rows, "availability_delegation_requests")
+
+
+def acting_approval_queue():
+    st.subheader("Acting Approval Queue")
+    pending_approval_page() if "pending_approval_page" in globals() else st.info("No acting approval queue is available yet.")
+
+
+def approval_configuration_page():
+    approval_config_page() if "approval_config_page" in globals() else configuration_page()
+
+
+def budget_command_center():
+    budgets_page() if "budgets_page" in globals() else budget_audit_page()
+
+
+def budget_audit_page():
+    st.subheader("Budget Audit")
+    if _table_exists_local("budgets"):
+        dataframe(_safe_table_df("budgets", 500))
+    else:
+        st.info("No budget records available yet.")
+
+
+def delegated_approval_review_page():
+    st.subheader("Delegated Approval Review")
+    if _table_exists_local("approval_delegations"):
+        dataframe(_safe_table_df("approval_delegations", 500))
+    else:
+        st.info("No delegated approval records available yet.")
+
+
+def facility_handoff_trail_page():
+    st.subheader("Utility / Facility Head Handoff Trail")
+    df = df_query(
+        """
+        SELECT id, request_no, department_project, category, status, requested_by, facility_manager_user_id, assigned_procurement_manager_id, updated_at
+        FROM purchase_requests
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 500
+        """
+    ) if _table_exists_local("purchase_requests") else pd.DataFrame()
+    dataframe(df) if not df.empty else st.info("No handoff records available yet.")
+
+
+def get_pm_for_facility_manager(facility_manager_user_id: int | None = None) -> int | None:
+    """Return an active Procurement Manager for automatic routing."""
+    try:
+        if facility_manager_user_id and _table_exists_local("facility_manager_links"):
+            linked = run_query(
+                "SELECT procurement_manager_user_id FROM facility_manager_links WHERE facility_manager_user_id=? AND is_active=1 ORDER BY id DESC LIMIT 1",
+                (int(facility_manager_user_id),),
+                fetch=True,
+            )
+            if linked:
+                return int(linked[0]["procurement_manager_user_id"])
+        rows = run_query("SELECT id FROM users WHERE role='Procurement Manager' AND is_active=1 ORDER BY id LIMIT 1", fetch=True)
+        return int(rows[0]["id"]) if rows else None
+    except Exception:
+        return None
+
+
+def ensure_thread(entity_type: str, entity_id: int, facility_manager_user_id: int, procurement_manager_user_id: int) -> int | None:
+    _phase2_bootstrap()
+    try:
+        existing = run_query(
+            "SELECT id FROM collaboration_threads WHERE entity_type=? AND entity_id=? AND facility_manager_user_id=? AND procurement_manager_user_id=? LIMIT 1",
+            (entity_type, int(entity_id), int(facility_manager_user_id), int(procurement_manager_user_id)),
+            fetch=True,
+        )
+        if existing:
+            return int(existing[0]["id"])
+        return run_insert(
+            "INSERT INTO collaboration_threads (entity_type, entity_id, facility_manager_user_id, procurement_manager_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (entity_type, int(entity_id), int(facility_manager_user_id), int(procurement_manager_user_id), now_iso(), now_iso()),
+        )
+    except Exception:
+        return None
+
+
+def render_private_thread(entity_type: str, entity_id: int, facility_manager_user_id: int, procurement_manager_user_id: int, key_prefix: str):
+    thread_id = ensure_thread(entity_type, entity_id, facility_manager_user_id, procurement_manager_user_id)
+    if not thread_id:
+        st.info("Shared thread is not available for this record yet.")
+        return
+    st.markdown("#### Shared Thread")
+    messages = df_query(
+        """
+        SELECT cm.created_at, cm.message_text, u.full_name sender
+        FROM collaboration_messages cm
+        LEFT JOIN users u ON u.id=cm.sender_user_id
+        WHERE cm.thread_id=?
+        ORDER BY cm.created_at ASC
+        """,
+        (thread_id,),
+    )
+    if messages.empty:
+        st.caption("No messages yet.")
+    else:
+        for m in messages.itertuples():
+            st.markdown(f"**{escape(str(m.sender or 'User'))}** · {escape(str(m.created_at or ''))}<br>{escape(str(m.message_text or ''))}", unsafe_allow_html=True)
+    msg = st.text_area("Message", key=f"{key_prefix}_message")
+    if st.button("Send message", key=f"{key_prefix}_send", type="primary"):
+        if msg.strip():
+            run_query("INSERT INTO collaboration_messages (thread_id, sender_user_id, message_text, is_private, created_at) VALUES (?, ?, ?, 1, ?)", (thread_id, int(user()["id"]), msg.strip(), now_iso()))
+            st.rerun()
+
+
+def facility_import_documents():
+    st.subheader("Import Documents")
+    import_center()
+
+
+def facility_shared_threads():
+    st.subheader("Shared Threads with Procurement Manager")
+    if not _table_exists_local("collaboration_threads"):
+        st.info("No shared threads are available yet.")
+        return
+    uid = int(user().get("id") or 0)
+    threads = df_query(
+        """
+        SELECT ct.*, pm.full_name procurement_manager
+        FROM collaboration_threads ct
+        LEFT JOIN users pm ON pm.id=ct.procurement_manager_user_id
+        WHERE ct.facility_manager_user_id=?
+        ORDER BY ct.updated_at DESC, ct.created_at DESC
+        LIMIT 100
+        """,
+        (uid,),
+    )
+    dataframe(threads) if not threads.empty else st.info("No shared threads yet.")
+
+
+def render_gateway_pass_preview(gateway_pass_id: int):
+    st.markdown("#### Gateway Pass Preview")
+    gp = df_query("SELECT * FROM gateway_passes WHERE id=?", (gateway_pass_id,)) if _table_exists_local("gateway_passes") else pd.DataFrame()
+    if gp.empty:
+        st.info("Gateway pass preview is not available yet.")
+        return
+    row = gp.iloc[0]
+    st.info(f"Pass: {row.get('pass_number', gateway_pass_id)} | Status: {row.get('status', '')}")
+    items = gateway_pass_items_df(gateway_pass_id) if "gateway_pass_items_df" in globals() else pd.DataFrame()
+    if not items.empty:
+        dataframe(items)
+
+
+
 def _phase2_bootstrap():
     """Ensure optional enterprise notification/gateway schemas exist before role pages use them.
 
@@ -3421,6 +3715,18 @@ def edit_gateway_pass_form(gateway_pass_id: int):
         c9, c10 = st.columns(2)
         receiver = c9.text_input("Receiver name", value=row["receiver_name"] or "", key=f"edit_gp_receiver_{gateway_pass_id}")
         checkpoint = c10.text_input("Security checkpoint", value=row["security_checkpoint"] or "", key=f"edit_gp_check_{gateway_pass_id}")
+        # Preserve optional fields that are not visible in this compact edit form.
+        # This prevents direct navigation to the edit page from failing with a
+        # NameError while leaving the existing record values unchanged.
+        return_required = bool(_clean(row.get("expected_return_date")))
+        expected_return = _date_or_default(row.get("expected_return_date"), expected_movement)
+        actual_return_applies = bool(_clean(row.get("actual_return_date")))
+        actual_return = _date_or_default(row.get("actual_return_date"), expected_movement)
+        receiver_org = _clean(row.get("receiver_organization"))
+        security_officer = _clean(row.get("security_officer_name"))
+        gate_time = _clean(row.get("gate_verification_time"))
+        exit_entry = _clean(row.get("exit_entry_confirmation"))
+        security_signature = _clean(row.get("security_signature"))
         submitted = st.form_submit_button("Save Gateway Pass Details")
     if submitted:
         run_query(

@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import os
 import secrets
+import time
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -26,8 +27,8 @@ except Exception:  # pragma: no cover
 from core.db import run_query, now_iso, log_audit, df_query, create_notification
 from core.branding import COMPANY_NAME, company_logo_data_uri
 
-SESSION_TIMEOUT_MINUTES = int(os.environ.get("PROCUREFLOW_SESSION_TIMEOUT_MINUTES", "720"))
-REMEMBER_ME_SESSION_DAYS = int(os.environ.get("PROCUREFLOW_REMEMBER_ME_SESSION_DAYS", "30"))
+SESSION_TIMEOUT_MINUTES = int(os.environ.get("PROCUREFLOW_SESSION_TIMEOUT_MINUTES", "43200"))
+REMEMBER_ME_SESSION_DAYS = int(os.environ.get("PROCUREFLOW_REMEMBER_ME_SESSION_DAYS", "90"))
 PRODUCTION_MODE = os.environ.get("PROCUREFLOW_PRODUCTION", "0") == "1"
 SESSION_COOKIE_NAME = "pf_session_token"
 SESSION_COOKIE_MANAGER_KEY = "_pf_session_cookie_manager"
@@ -517,10 +518,27 @@ def session_expired() -> bool:
 def require_user() -> bool:
     if "user" not in st.session_state:
         if not restore_user_from_session():
+            # After a browser refresh, Streamlit's encrypted cookie component can
+            # need one or two frontend cycles before it can expose the existing
+            # server-session token. Wait briefly for that bridge instead of
+            # immediately sending a valid signed-in user back to the login page.
+            if (
+                EncryptedCookieManager is not None
+                and st.session_state.get(SESSION_COOKIE_MANAGER_KEY) is not None
+                and not st.session_state.get("_pf_cookie_bridge_ready", False)
+            ):
+                attempts = int(st.session_state.get("_pf_cookie_restore_attempts", 0) or 0)
+                if attempts < 12:
+                    st.session_state["_pf_cookie_restore_attempts"] = attempts + 1
+                    st.info("Restoring your signed-in session…")
+                    time.sleep(0.15)
+                    st.rerun()
+            st.session_state.pop("_pf_cookie_restore_attempts", None)
             # Shared workspace URLs can include a sender's navigation hints.
             # Anonymous visitors always start at the login page.
             _clear_navigation_query_params()
             return False
+    st.session_state.pop("_pf_cookie_restore_attempts", None)
     if session_expired():
         close_persistent_session()
         st.session_state.clear()
