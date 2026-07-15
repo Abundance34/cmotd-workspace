@@ -518,21 +518,12 @@ def session_expired() -> bool:
 def require_user() -> bool:
     if "user" not in st.session_state:
         if not restore_user_from_session():
-            # After a browser refresh, Streamlit's encrypted cookie component can
-            # need one or two frontend cycles before it can expose the existing
-            # server-session token. Wait briefly for that bridge instead of
-            # immediately sending a valid signed-in user back to the login page.
-            if (
-                EncryptedCookieManager is not None
-                and st.session_state.get(SESSION_COOKIE_MANAGER_KEY) is not None
-                and not st.session_state.get("_pf_cookie_bridge_ready", False)
-            ):
-                attempts = int(st.session_state.get("_pf_cookie_restore_attempts", 0) or 0)
-                if attempts < 12:
-                    st.session_state["_pf_cookie_restore_attempts"] = attempts + 1
-                    st.info("Restoring your signed-in session…")
-                    time.sleep(0.15)
-                    st.rerun()
+            # Do not block the login form behind the optional browser-cookie
+            # bridge.  The earlier restore loop could leave users seeing only
+            # "Restoring your signed-in session…" after pressing Login when the
+            # Streamlit cookie component was not ready.  The server-side
+            # session remains authoritative; if a saved cookie becomes available
+            # on a later rerun, restore_user_from_session() will still restore it.
             st.session_state.pop("_pf_cookie_restore_attempts", None)
             # Shared workspace URLs can include a sender's navigation hints.
             # Anonymous visitors always start at the login page.
