@@ -910,17 +910,28 @@ def inject_shell_css():
             stroke-linejoin: round;
         }
 
-        /* A true notification/task alert is red and only rendered when unread work exists. */
-        .pf-reference-icon .pf-task-dot {
+        /* WhatsApp-style task badges: red with visible counts. */
+        .pf-reference-icon .pf-task-dot,
+        .pf-reference-icon .pf-task-badge {
             position: absolute;
-            top: 7px;
-            right: 7px;
-            width: 9px;
-            height: 9px;
+            top: 2px;
+            right: 1px;
+            min-width: 18px;
+            height: 18px;
+            padding: 0 5px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            box-sizing: border-box;
             border: 2px solid #ffffff;
             border-radius: 999px;
             background: #ef4444 !important;
-            box-shadow: 0 2px 6px rgba(239, 68, 68, .34);
+            color: #ffffff !important;
+            font-size: 10px;
+            font-weight: 900;
+            line-height: 1;
+            letter-spacing: -.02em;
+            box-shadow: 0 3px 8px rgba(239, 68, 68, .36);
         }
 
         /* Compact CMOTD lock-up: clean, fitted, and clear of the navigation. */
@@ -1107,16 +1118,27 @@ def inject_shell_css():
             font-size: 21px;
             line-height: 1;
         }
-        .pf-native-task-dot {
+        .pf-native-task-dot,
+        .pf-native-task-badge {
             position: absolute;
-            top: 7px;
-            right: 7px;
-            width: 9px;
-            height: 9px;
+            top: 1px;
+            right: 0;
+            min-width: 18px;
+            height: 18px;
+            padding: 0 5px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            box-sizing: border-box;
             border: 2px solid #ffffff;
             border-radius: 999px;
             background: #ef4444;
-            box-shadow: 0 2px 6px rgba(239,68,68,.34);
+            color: #ffffff !important;
+            font-size: 10px;
+            font-weight: 900;
+            line-height: 1;
+            letter-spacing: -.02em;
+            box-shadow: 0 3px 8px rgba(239,68,68,.36);
         }
         .pf-native-avatar {
             width: 40px;
@@ -1228,6 +1250,17 @@ def _unread_notification_total(current: dict) -> int:
         return 0
 
 
+def _badge_label(count: int) -> str:
+    """Return the compact WhatsApp-style badge number used in the UI."""
+    try:
+        value = int(count or 0)
+    except Exception:
+        value = 0
+    if value <= 0:
+        return ""
+    return "99+" if value > 99 else str(value)
+
+
 def _render_sidebar_state_css(collapsed: bool):
     """Apply the session-only visual state for the navigation rail.
 
@@ -1270,7 +1303,8 @@ def render_top_header(current: dict):
     initials = escape(initials)
     collapsed = _sidebar_is_collapsed()
     unread_count = _unread_notification_total(current)
-    task_dot = '<span class="pf-native-task-dot" aria-label="Unread task or notification"></span>' if unread_count else ''
+    badge_text = _badge_label(unread_count)
+    task_dot = f'<span class="pf-native-task-badge" aria-label="{badge_text} unread task or notification">{badge_text}</span>' if badge_text else ''
 
     # Kept as normal Streamlit columns so the control executes in the same page
     # and does not create a URL link, tab, or destination view.
@@ -1711,7 +1745,7 @@ def render_sidebar_navigation(current: dict):
     button_css = [
         "<style>",
         "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] { margin: 0 0 2px !important; }",
-        "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button { position: relative !important; width: 100% !important; min-height: 43px !important; margin: 0 !important; padding: 9px 30px 9px 12px !important; border: 1px solid transparent !important; border-radius: 10px !important; background: transparent !important; color: #ffffff !important; box-shadow: none !important; text-align: left !important; justify-content: flex-start !important; font-size: 12px !important; font-weight: 750 !important; line-height: 1.2 !important; }",
+        "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button { position: relative !important; width: 100% !important; min-height: 43px !important; margin: 0 !important; padding: 9px 48px 9px 12px !important; border: 1px solid transparent !important; border-radius: 10px !important; background: transparent !important; color: #ffffff !important; box-shadow: none !important; text-align: left !important; justify-content: flex-start !important; font-size: 12px !important; font-weight: 750 !important; line-height: 1.2 !important; }",
         "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button:hover { background: rgba(255,255,255,.15) !important; color: #ffffff !important; transform: none !important; }",
         "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button p, section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button span { color: #ffffff !important; font-weight: 750 !important; text-align: left !important; }",
     ]
@@ -1722,9 +1756,10 @@ def render_sidebar_navigation(current: dict):
             button_css.append(
                 f"{selector} {{ background: linear-gradient(90deg, rgba(1,64,177,.84), rgba(17,93,210,.90)) !important; border-color: rgba(255,255,255,.24) !important; box-shadow: inset 0 1px 0 rgba(255,255,255,.11), 0 5px 14px rgba(2,50,132,.16) !important; }}"
             )
-        if int(counts.get(section, 0) or 0) > 0:
+        badge_text = _badge_label(int(counts.get(section, 0) or 0))
+        if badge_text:
             button_css.append(
-                f"{selector}::after {{ content: '' !important; position: absolute !important; top: 50% !important; right: 13px !important; width: 8px !important; height: 8px !important; transform: translateY(-50%) !important; border: 2px solid rgba(255,255,255,.96) !important; border-radius: 999px !important; background: #ef4444 !important; box-shadow: 0 2px 7px rgba(92,0,0,.34) !important; }}"
+                f"{selector}::after {{ content: '{badge_text}' !important; position: absolute !important; top: 50% !important; right: 10px !important; min-width: 19px !important; height: 19px !important; padding: 0 6px !important; transform: translateY(-50%) !important; display: inline-flex !important; align-items: center !important; justify-content: center !important; box-sizing: border-box !important; border: 2px solid rgba(255,255,255,.96) !important; border-radius: 999px !important; background: #ef4444 !important; color: #ffffff !important; font-size: 10px !important; font-weight: 900 !important; line-height: 1 !important; letter-spacing: -.02em !important; box-shadow: 0 3px 8px rgba(92,0,0,.35) !important; }}"
             )
     button_css.append("</style>")
     st.markdown("\n".join(button_css), unsafe_allow_html=True)
