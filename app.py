@@ -1447,33 +1447,175 @@ def mark_section_attention_seen(current: dict, section: str):
         pass
 
 
+def _infer_sidebar_section_from_notification(current: dict, notification: dict, sections: list[str]) -> str | None:
+    """Best-effort section routing used only for numbered sidebar badges.
+
+    Some older notifications were created before ``section_target`` existed or
+    with a section name that no longer exactly matches the current role menu.
+    Without this fallback the app can have unread notifications but no visible
+    red badge.  This helper keeps the existing notification records untouched
+    and only decides where the badge count should appear.
+    """
+    section_set = {str(item) for item in sections}
+    raw_section = str(notification.get("section_target") or "").strip()
+    if raw_section in section_set:
+        return raw_section
+
+    role = str(current.get("role") or "")
+    text = " ".join(
+        str(notification.get(name) or "")
+        for name in ("title", "message", "entity_type", "action_label")
+    ).lower()
+
+    def first_existing(*candidates: str) -> str | None:
+        for candidate in candidates:
+            if candidate in section_set:
+                return candidate
+        return None
+
+    if role == "Admin":
+        if "gateway" in text:
+            return first_existing("Gateway Pass Management", "Admin Dashboard")
+        if any(x in text for x in ("away", "delegate", "delegation", "availability")):
+            return first_existing("Availability & Delegation Requests", "Admin Dashboard")
+        if "notification" in text or "push" in text or "outbox" in text:
+            return first_existing("Notifications Monitor", "Admin Dashboard")
+        if "budget" in text:
+            return first_existing("Budget Tracker", "Admin Dashboard")
+        if "login" in text or "logout" in text or "audit" in text:
+            return first_existing("Audit Logs", "Admin Dashboard")
+        return first_existing("Admin Dashboard")
+
+    if role == "Procurement Manager":
+        if "gateway" in text:
+            return first_existing("Gateway Pass Review", "Operations Dashboard")
+        if any(x in text for x in ("closure", "paid request", "post-payment", "complete, close", "archive")):
+            return first_existing("Post-Payment Closure", "Operations Dashboard")
+        if any(x in text for x in ("facility manager", "utility head", "facility head", "fm draft")):
+            return first_existing("Utility Head / Facility Head Inbox", "Operations Dashboard")
+        if "delegated" in text or "acting" in text:
+            return first_existing("Acting Approval Queue", "Operations Dashboard")
+        if any(x in text for x in ("away", "delegate", "availability")):
+            return first_existing("Availability / Away Notice", "Operations Dashboard")
+        if "purchase request" in text or "request" in text:
+            return first_existing("Purchase Requests", "Operations Dashboard")
+        if "vendor" in text:
+            return first_existing("Vendors", "Vendor Quotes", "Operations Dashboard")
+        if "sourcing" in text or "quote" in text:
+            return first_existing("Sourcing", "Vendor Quotes", "Operations Dashboard")
+        if "po" in text or "purchase order" in text:
+            return first_existing("Commercial PO Management", "Operations Dashboard")
+        return first_existing("Operations Dashboard")
+
+    if role == "Facility Manager":
+        if "gateway" in text:
+            return first_existing("Gateway Pass", "Utility / Facility Dashboard")
+        if "returned" in text:
+            return first_existing("Returned Requests", "Utility / Facility Dashboard")
+        if any(x in text for x in ("approved", "accepted", "converted")):
+            return first_existing("Approved / Accepted Requests", "Utility / Facility Dashboard")
+        if "draft" in text:
+            return first_existing("My Draft Requests", "Utility / Facility Dashboard")
+        if "procurement" in text or "request" in text:
+            return first_existing("Submit to Procurement Manager", "Utility / Facility Dashboard")
+        return first_existing("Utility / Facility Dashboard")
+
+    if role == "Logistics Officer":
+        if "gateway" in text:
+            return first_existing("Gateway Pass Coordination", "Logistics Dashboard")
+        if any(x in text for x in ("exception", "return", "damage", "shortage", "wrong item", "delay")):
+            return first_existing("Delivery Exceptions & Returns", "Logistics Dashboard")
+        if any(x in text for x in ("receiving", "goods received", "delivery note", "proof of delivery")):
+            return first_existing("Receiving Slips", "Logistics Dashboard")
+        if any(x in text for x in ("tracking", "in transit", "dispatched", "arrived", "delivery status")):
+            return first_existing("Delivery Tracking", "Logistics Dashboard")
+        if "document" in text or "waybill" in text:
+            return first_existing("Logistics Documents", "Logistics Dashboard")
+        if "po" in text or "purchase order" in text or "handover" in text:
+            return first_existing("PO Delivery Handover", "Logistics Dashboard")
+        return first_existing("Logistics Dashboard")
+
+    if role == "Finance":
+        if "invoice" in text:
+            return first_existing("Invoices", "Financial Dashboard")
+        if "receipt" in text:
+            return first_existing("Receipts", "Financial Dashboard")
+        if "payment" in text or "finance" in text:
+            return first_existing("Approved for Payment", "Financial Dashboard")
+        if "cash" in text:
+            return first_existing("Cash Advances", "Financial Dashboard")
+        if "expense" in text:
+            return first_existing("Expenses", "Financial Dashboard")
+        return first_existing("Financial Dashboard")
+
+    if role == "Approver":
+        if "gateway" in text:
+            return first_existing("Gateway Pass Approval", "Approval Dashboard")
+        if "po" in text or "purchase order" in text:
+            return first_existing("PO Approval", "Approval Dashboard")
+        if "payment" in text:
+            return first_existing("Payment Approval", "Approval Dashboard")
+        if any(x in text for x in ("away", "delegate", "availability")):
+            return first_existing("Availability / Away Notice", "Approval Dashboard")
+        if "approval" in text or "request" in text:
+            return first_existing("Pending Approvals", "Approval Dashboard")
+        return first_existing("Approval Dashboard")
+
+    if role == "Auditor":
+        if "gateway" in text:
+            return first_existing("Gateway Pass Audit", "Audit Dashboard")
+        if "budget" in text:
+            return first_existing("Budget Audit", "Audit Dashboard")
+        if "delegat" in text:
+            return first_existing("Delegated Approval Review", "Audit Dashboard")
+        if "approval" in text:
+            return first_existing("Approval Trails", "Audit Dashboard")
+        if "payment" in text or "finance" in text:
+            return first_existing("Finance Audit", "Audit Dashboard")
+        return first_existing("Audit Dashboard")
+
+    return next(iter(section_set), None) if section_set else None
+
+
 def _unread_attention_counts(current: dict, sections: list[str]) -> dict[str, int]:
-    """Return unread notification badge counts for every section in one query."""
+    """Return numbered unread/task badge counts for every sidebar section.
+
+    Counts are based on unread notifications for the signed-in user/role.  The
+    query now also handles older rows whose ``section_target`` is missing or no
+    longer exactly matches the menu, so the red numbered badge cannot disappear
+    while unread work still exists.
+    """
     unique_sections = list(dict.fromkeys(str(section) for section in sections if section))
     if not unique_sections:
         return {}
+    counts = {section: 0 for section in unique_sections}
     try:
-        placeholders = ",".join("?" for _ in unique_sections)
         rows = df_query(
-            f"""
-            SELECT n.section_target AS section, COUNT(*) AS count
+            """
+            SELECT
+                n.section_target,
+                n.title,
+                n.message,
+                n.entity_type,
+                n.action_label
             FROM notifications n
             WHERE n.is_read=0
               AND (n.user_id=? OR n.role=? OR n.role='All')
-              AND n.section_target IN ({placeholders})
-            GROUP BY n.section_target
             """,
-            (
-                int(current.get("id") or 0),
-                str(current.get("role") or ""),
-                *unique_sections,
-            ),
+            (int(current.get("id") or 0), str(current.get("role") or "")),
         )
-        return {
-            str(row["section"]): int(row["count"] or 0)
-            for _, row in rows.iterrows()
-            if row.get("section") is not None
-        }
+        for _, row in rows.iterrows():
+            item = {
+                "section_target": row.get("section_target"),
+                "title": row.get("title"),
+                "message": row.get("message"),
+                "entity_type": row.get("entity_type"),
+                "action_label": row.get("action_label"),
+            }
+            section = _infer_sidebar_section_from_notification(current, item, unique_sections)
+            if section in counts:
+                counts[section] += 1
+        return {section: count for section, count in counts.items() if count}
     except Exception:
         return {}
 
@@ -1744,14 +1886,20 @@ def render_sidebar_navigation(current: dict):
     # the tabs that need attention.
     button_css = [
         "<style>",
-        "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] { margin: 0 0 2px !important; }",
-        "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button { position: relative !important; width: 100% !important; min-height: 43px !important; margin: 0 !important; padding: 9px 48px 9px 12px !important; border: 1px solid transparent !important; border-radius: 10px !important; background: transparent !important; color: #ffffff !important; box-shadow: none !important; text-align: left !important; justify-content: flex-start !important; font-size: 12px !important; font-weight: 750 !important; line-height: 1.2 !important; }",
-        "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button:hover { background: rgba(255,255,255,.15) !important; color: #ffffff !important; transform: none !important; }",
-        "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button p, section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button span { color: #ffffff !important; font-weight: 750 !important; text-align: left !important; }",
+        "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'], section[data-testid='stSidebar'] div[class*='st-key-pf-nav-button-'] { margin: 0 0 2px !important; }",
+        "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button, section[data-testid='stSidebar'] div[class*='st-key-pf-nav-button-'] button { position: relative !important; width: 100% !important; min-height: 43px !important; margin: 0 !important; padding: 9px 48px 9px 12px !important; border: 1px solid transparent !important; border-radius: 10px !important; background: transparent !important; color: #ffffff !important; box-shadow: none !important; text-align: left !important; justify-content: flex-start !important; font-size: 12px !important; font-weight: 750 !important; line-height: 1.2 !important; }",
+        "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button:hover, section[data-testid='stSidebar'] div[class*='st-key-pf-nav-button-'] button:hover { background: rgba(255,255,255,.15) !important; color: #ffffff !important; transform: none !important; }",
+        "section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button p, section[data-testid='stSidebar'] div[class*='st-key-pf_nav_button_'] button span, section[data-testid='stSidebar'] div[class*='st-key-pf-nav-button-'] button p, section[data-testid='stSidebar'] div[class*='st-key-pf-nav-button-'] button span { color: #ffffff !important; font-weight: 750 !important; text-align: left !important; }",
     ]
     for index, section in enumerate(sections):
         button_key = f"pf_nav_button_{state_key}_{index}"
-        selector = f"section[data-testid='stSidebar'] div[class*='st-key-{button_key}'] button"
+        safe_button_key = button_key.replace("_", "-")
+        selector_parts = [
+            f"section[data-testid='stSidebar'] div[class*='st-key-{button_key}'] button",
+            f"section[data-testid='stSidebar'] div[class*='st-key-{safe_button_key}'] button",
+        ]
+        selector = ", ".join(selector_parts)
+        after_selector = ", ".join(f"{item}::after" for item in selector_parts)
         if section == selected:
             button_css.append(
                 f"{selector} {{ background: linear-gradient(90deg, rgba(1,64,177,.84), rgba(17,93,210,.90)) !important; border-color: rgba(255,255,255,.24) !important; box-shadow: inset 0 1px 0 rgba(255,255,255,.11), 0 5px 14px rgba(2,50,132,.16) !important; }}"
@@ -1759,7 +1907,7 @@ def render_sidebar_navigation(current: dict):
         badge_text = _badge_label(int(counts.get(section, 0) or 0))
         if badge_text:
             button_css.append(
-                f"{selector}::after {{ content: '{badge_text}' !important; position: absolute !important; top: 50% !important; right: 10px !important; min-width: 19px !important; height: 19px !important; padding: 0 6px !important; transform: translateY(-50%) !important; display: inline-flex !important; align-items: center !important; justify-content: center !important; box-sizing: border-box !important; border: 2px solid rgba(255,255,255,.96) !important; border-radius: 999px !important; background: #ef4444 !important; color: #ffffff !important; font-size: 10px !important; font-weight: 900 !important; line-height: 1 !important; letter-spacing: -.02em !important; box-shadow: 0 3px 8px rgba(92,0,0,.35) !important; }}"
+                f"{after_selector} {{ content: '{badge_text}' !important; position: absolute !important; top: 50% !important; right: 10px !important; min-width: 19px !important; height: 19px !important; padding: 0 6px !important; transform: translateY(-50%) !important; display: inline-flex !important; align-items: center !important; justify-content: center !important; box-sizing: border-box !important; border: 2px solid rgba(255,255,255,.96) !important; border-radius: 999px !important; background: #ef4444 !important; color: #ffffff !important; font-size: 10px !important; font-weight: 900 !important; line-height: 1 !important; letter-spacing: -.02em !important; box-shadow: 0 3px 8px rgba(92,0,0,.35) !important; }}"
             )
     button_css.append("</style>")
     st.markdown("\n".join(button_css), unsafe_allow_html=True)
@@ -1768,7 +1916,12 @@ def render_sidebar_navigation(current: dict):
     # No hyperlinks or query-parameter writes are used here.
     for index, section in enumerate(sections):
         button_key = f"pf_nav_button_{state_key}_{index}"
-        label = f"{nav_icon_for(section)}  {section}"
+        badge_text = _badge_label(int(counts.get(section, 0) or 0))
+        # The CSS pseudo-element above renders the true WhatsApp-style red pill.
+        # The small emoji fallback below guarantees the count still appears if a
+        # hosted Streamlit version changes its generated class names again.
+        label_badge = f"   🔴 {badge_text}" if badge_text else ""
+        label = f"{nav_icon_for(section)}  {section}{label_badge}"
         if st.button(label, key=button_key, use_container_width=True):
             if section != selected:
                 st.session_state[state_key] = section
