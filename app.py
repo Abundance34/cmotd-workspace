@@ -28,6 +28,7 @@ def boot_database_once():
 
 
 LIVE_REFRESH_INTERVAL_MS = int(os.environ.get("PROCUREFLOW_LIVE_REFRESH_INTERVAL_MS", "5000"))
+FAST_NAVIGATION_DOTS = os.environ.get("PROCUREFLOW_FAST_NAVIGATION_DOTS", "1") != "0"
 
 
 def enable_live_updates(current: dict) -> None:
@@ -1423,19 +1424,12 @@ def _unread_attention_counts(current: dict, sections: list[str]) -> dict[str, in
             f"""
             SELECT n.section_target AS section, COUNT(*) AS count
             FROM notifications n
-            LEFT JOIN section_attention_reads seen
-              ON seen.user_id=?
-             AND seen.role=?
-             AND seen.section=n.section_target
             WHERE n.is_read=0
               AND (n.user_id=? OR n.role=? OR n.role='All')
               AND n.section_target IN ({placeholders})
-              AND datetime(n.created_at) > datetime(COALESCE(seen.last_seen_at, '1970-01-01 00:00:00'))
             GROUP BY n.section_target
             """,
             (
-                int(current.get("id") or 0),
-                str(current.get("role") or ""),
                 int(current.get("id") or 0),
                 str(current.get("role") or ""),
                 *unique_sections,
@@ -1586,9 +1580,16 @@ def _build_attention_count_map(current: dict, sections: list[str]) -> dict[str, 
     notification calculations are now fetched once, which removes most of the
     repeated SQLite work from ordinary tab navigation.
     """
+    unread_map = _unread_attention_counts(current, sections)
+    if FAST_NAVIGATION_DOTS:
+        # Fast navigation mode: section dots are driven by unread notifications
+        # only. This avoids repeated workflow-count scans on every sidebar
+        # click, makes sections open faster, and keeps dots visible until the
+        # user explicitly clicks "Mark all as read" in the notification panel.
+        return {str(section): int(unread_map.get(section, 0) or 0) for section in sections}
+
     _ensure_section_seen_schema()
     seen_map = _section_last_seen_map(current, sections)
-    unread_map = _unread_attention_counts(current, sections)
     counts: dict[str, int] = {}
     for section in sections:
         try:
@@ -1704,12 +1705,6 @@ def render_sidebar_navigation(current: dict):
         _set_query_value("pf_role", str(current.get("role")))
         _set_query_value("pf_section", selected)
     counts = _build_attention_count_map(current, list(sections))
-    if int(counts.get(selected, 0) or 0) > 0:
-        # Opening a section only clears its visual attention badge.  It does
-        # not delete notifications, activity, records, or workflow tasks.
-        mark_section_attention_seen(current, selected)
-        counts[selected] = 0
-
     # Each native widget receives a stable key.  The small generated CSS keeps
     # the existing blue visual system and puts a genuine red task dot on only
     # the tabs that need attention.
@@ -1744,7 +1739,6 @@ def render_sidebar_navigation(current: dict):
                 st.session_state[state_key] = section
                 _set_query_value("pf_role", str(current.get("role")))
                 _set_query_value("pf_section", section)
-                mark_section_attention_seen(current, section)
                 st.rerun()
 
 

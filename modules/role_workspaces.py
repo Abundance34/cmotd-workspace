@@ -1915,35 +1915,51 @@ def render_notification_panel(current: dict):
             box-shadow:0 5px 13px rgba(127,29,29,.32);
         }
         section[data-testid="stSidebar"] .pf-notification-empty {
-            background:rgba(255,255,255,.94); color:#15305e; border-radius:16px;
-            padding:14px 16px; font-size:13px; font-weight:800;
-            border:1px solid rgba(255,255,255,.58);
+            background:#050b18; color:#ffffff; border-radius:16px;
+            padding:14px 16px; font-size:13px; font-weight:850;
+            border:1px solid rgba(255,255,255,.22);
+            box-shadow:0 10px 24px rgba(0,0,0,.18);
+        }
+        section[data-testid="stSidebar"] [data-testid="stExpander"],
+        section[data-testid="stSidebar"] [data-testid="stExpander"] details {
+            background:#050b18 !important;
+            border:1px solid rgba(255,255,255,.20) !important;
+            border-radius:16px !important;
+            color:#ffffff !important;
+            box-shadow:0 14px 30px rgba(0,0,0,.20) !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stExpander"] summary,
+        section[data-testid="stSidebar"] [data-testid="stExpander"] summary *,
+        section[data-testid="stSidebar"] [data-testid="stExpander"] p,
+        section[data-testid="stSidebar"] [data-testid="stExpander"] span {
+            color:#ffffff !important;
+            font-weight:850 !important;
         }
         section[data-testid="stSidebar"] .pf-notification-card {
-            background:#ffffff; color:#102246; border:1px solid rgba(214,226,246,.95);
+            background:#070f20; color:#ffffff; border:1px solid rgba(255,255,255,.18);
             border-left:5px solid #ef4444; border-radius:15px; padding:13px 14px;
-            margin:0 0 10px; box-shadow:0 10px 24px rgba(15,57,132,.16);
+            margin:0 0 10px; box-shadow:0 12px 28px rgba(0,0,0,.24);
         }
-        section[data-testid="stSidebar"] .pf-notification-card.normal { border-left-color:#2563eb; }
+        section[data-testid="stSidebar"] .pf-notification-card.normal { border-left-color:#60a5fa; }
         section[data-testid="stSidebar"] .pf-notification-card strong {
-            display:block; color:#071733; font-size:14px; line-height:1.25;
-            font-weight:900; margin-bottom:6px;
+            display:block; color:#ffffff !important; font-size:14px; line-height:1.25;
+            font-weight:950; margin-bottom:6px;
         }
         section[data-testid="stSidebar"] .pf-notification-card p {
-            margin:0 0 8px; color:#243b61; font-size:12.5px; line-height:1.45;
-            font-weight:750; white-space:normal; overflow-wrap:anywhere;
+            margin:0 0 8px; color:#e5eefc !important; font-size:12.5px; line-height:1.45;
+            font-weight:800; white-space:normal; overflow-wrap:anywhere;
         }
         section[data-testid="stSidebar"] .pf-notification-meta {
             display:flex; align-items:center; justify-content:space-between; gap:8px;
-            color:#64748b; font-size:10.5px; font-weight:800;
+            color:#cbd5e1 !important; font-size:10.5px; font-weight:850;
         }
         section[data-testid="stSidebar"] .pf-notification-pill {
             display:inline-flex; align-items:center; padding:3px 7px; border-radius:999px;
-            background:#fee2e2; color:#b91c1c; font-size:10px; font-weight:900;
+            background:#fee2e2; color:#991b1b !important; font-size:10px; font-weight:950;
         }
-        section[data-testid="stSidebar"] .pf-notification-pill.normal { background:#dbeafe; color:#1d4ed8; }
+        section[data-testid="stSidebar"] .pf-notification-pill.normal { background:#dbeafe; color:#1d4ed8 !important; }
         section[data-testid="stSidebar"] details[open] summary,
-        section[data-testid="stSidebar"] details summary { color:#0f2a56 !important; font-weight:900 !important; }
+        section[data-testid="stSidebar"] details summary { color:#ffffff !important; font-weight:950 !important; }
         </style>
         """,
         unsafe_allow_html=True,
