@@ -1448,13 +1448,13 @@ def mark_section_attention_seen(current: dict, section: str):
 
 
 def _infer_sidebar_section_from_notification(current: dict, notification: dict, sections: list[str]) -> str | None:
-    """Best-effort section routing used only for numbered sidebar badges.
+    """Route an unread notification to one exact sidebar section.
 
-    Some older notifications were created before ``section_target`` existed or
-    with a section name that no longer exactly matches the current role menu.
-    Without this fallback the app can have unread notifications but no visible
-    red badge.  This helper keeps the existing notification records untouched
-    and only decides where the badge count should appear.
+    The sidebar badge must behave like a chat badge: only the tab that received
+    the work shows a number, and opening that tab clears that number.  To avoid
+    lighting up unrelated tabs, this helper only returns a specific section when
+    the notification already has a matching ``section_target`` or when its text
+    strongly points to a single section.
     """
     section_set = {str(item) for item in sections}
     raw_section = str(notification.get("section_target") or "").strip()
@@ -1473,117 +1473,148 @@ def _infer_sidebar_section_from_notification(current: dict, notification: dict, 
                 return candidate
         return None
 
+    # Only strong, unambiguous matches are routed. Generic words like "request"
+    # or "update" are deliberately ignored so one notification does not make
+    # every sidebar item show a badge.
     if role == "Admin":
         if "gateway" in text:
-            return first_existing("Gateway Pass Management", "Admin Dashboard")
+            return first_existing("Gateway Pass Management")
         if any(x in text for x in ("away", "delegate", "delegation", "availability")):
-            return first_existing("Availability & Delegation Requests", "Admin Dashboard")
+            return first_existing("Availability & Delegation Requests")
         if "notification" in text or "push" in text or "outbox" in text:
-            return first_existing("Notifications Monitor", "Admin Dashboard")
+            return first_existing("Notifications Monitor")
         if "budget" in text:
-            return first_existing("Budget Tracker", "Admin Dashboard")
-        if "login" in text or "logout" in text or "audit" in text:
-            return first_existing("Audit Logs", "Admin Dashboard")
-        return first_existing("Admin Dashboard")
+            return first_existing("Budget Tracker")
+        if any(x in text for x in ("user", "password", "forgot password", "reset")):
+            return first_existing("User Management")
+        if any(x in text for x in ("audit", "login", "logout")):
+            return first_existing("Audit Logs", "Activity & History Logs")
+        return None
 
     if role == "Procurement Manager":
         if "gateway" in text:
-            return first_existing("Gateway Pass Review", "Operations Dashboard")
+            return first_existing("Gateway Pass Review")
         if any(x in text for x in ("closure", "paid request", "post-payment", "complete, close", "archive")):
-            return first_existing("Post-Payment Closure", "Operations Dashboard")
+            return first_existing("Post-Payment Closure")
         if any(x in text for x in ("facility manager", "utility head", "facility head", "fm draft")):
-            return first_existing("Utility Head / Facility Head Inbox", "Operations Dashboard")
-        if "delegated" in text or "acting" in text:
-            return first_existing("Acting Approval Queue", "Operations Dashboard")
+            return first_existing("Utility Head / Facility Head Inbox")
+        if any(x in text for x in ("delegated", "acting")):
+            return first_existing("Acting Approval Queue")
         if any(x in text for x in ("away", "delegate", "availability")):
-            return first_existing("Availability / Away Notice", "Operations Dashboard")
-        if "purchase request" in text or "request" in text:
-            return first_existing("Purchase Requests", "Operations Dashboard")
+            return first_existing("Availability / Away Notice")
+        if "low-value" in text or "low value" in text:
+            return first_existing("Low-Value Approvals")
+        if "purchase request" in text:
+            return first_existing("Purchase Requests")
+        if "vendor recommendation" in text:
+            return first_existing("Vendor Recommendation")
+        if "vendor quote" in text or "quotation" in text:
+            return first_existing("Vendor Quotes")
         if "vendor" in text:
-            return first_existing("Vendors", "Vendor Quotes", "Operations Dashboard")
+            return first_existing("Vendors")
         if "sourcing" in text or "quote" in text:
-            return first_existing("Sourcing", "Vendor Quotes", "Operations Dashboard")
-        if "po" in text or "purchase order" in text:
-            return first_existing("Commercial PO Management", "Operations Dashboard")
-        return first_existing("Operations Dashboard")
+            return first_existing("Sourcing", "Vendor Quotes")
+        if "purchase order" in text or "po " in text or text.endswith("po"):
+            return first_existing("Commercial PO Management")
+        if "document" in text or "upload" in text:
+            return first_existing("Procurement Documents", "Import Center")
+        if "report" in text:
+            return first_existing("Procurement Reports")
+        return None
 
     if role == "Facility Manager":
         if "gateway" in text:
-            return first_existing("Gateway Pass", "Utility / Facility Dashboard")
-        if "returned" in text:
-            return first_existing("Returned Requests", "Utility / Facility Dashboard")
+            return first_existing("Gateway Pass")
+        if "returned" in text or "correction" in text:
+            return first_existing("Returned Requests")
         if any(x in text for x in ("approved", "accepted", "converted")):
-            return first_existing("Approved / Accepted Requests", "Utility / Facility Dashboard")
+            return first_existing("Approved / Accepted Requests")
         if "draft" in text:
-            return first_existing("My Draft Requests", "Utility / Facility Dashboard")
-        if "procurement" in text or "request" in text:
-            return first_existing("Submit to Procurement Manager", "Utility / Facility Dashboard")
-        return first_existing("Utility / Facility Dashboard")
+            return first_existing("My Draft Requests", "Create Request Draft")
+        if "procurement manager" in text or "submit" in text:
+            return first_existing("Submit to Procurement Manager")
+        if "shared thread" in text or "message" in text or "chat" in text:
+            return first_existing("Shared Thread with Procurement Manager")
+        return None
 
     if role == "Logistics Officer":
         if "gateway" in text:
-            return first_existing("Gateway Pass Coordination", "Logistics Dashboard")
+            return first_existing("Gateway Pass Coordination")
         if any(x in text for x in ("exception", "return", "damage", "shortage", "wrong item", "delay")):
-            return first_existing("Delivery Exceptions & Returns", "Logistics Dashboard")
+            return first_existing("Delivery Exceptions & Returns")
         if any(x in text for x in ("receiving", "goods received", "delivery note", "proof of delivery")):
-            return first_existing("Receiving Slips", "Logistics Dashboard")
+            return first_existing("Receiving Slips")
         if any(x in text for x in ("tracking", "in transit", "dispatched", "arrived", "delivery status")):
-            return first_existing("Delivery Tracking", "Logistics Dashboard")
+            return first_existing("Delivery Tracking")
         if "document" in text or "waybill" in text:
-            return first_existing("Logistics Documents", "Logistics Dashboard")
-        if "po" in text or "purchase order" in text or "handover" in text:
-            return first_existing("PO Delivery Handover", "Logistics Dashboard")
-        return first_existing("Logistics Dashboard")
+            return first_existing("Logistics Documents")
+        if "purchase order" in text or "handover" in text or "po " in text:
+            return first_existing("PO Delivery Handover")
+        return None
 
     if role == "Finance":
         if "invoice" in text:
-            return first_existing("Invoices", "Financial Dashboard")
+            return first_existing("Invoices")
         if "receipt" in text:
-            return first_existing("Receipts", "Financial Dashboard")
-        if "payment" in text or "finance" in text:
-            return first_existing("Approved for Payment", "Financial Dashboard")
+            return first_existing("Receipts")
         if "cash" in text:
-            return first_existing("Cash Advances", "Financial Dashboard")
+            return first_existing("Cash Advances")
         if "expense" in text:
-            return first_existing("Expenses", "Financial Dashboard")
-        return first_existing("Financial Dashboard")
+            return first_existing("Expenses")
+        if "budget" in text:
+            return first_existing("Budgets")
+        if "reconciliation" in text:
+            return first_existing("Reconciliation")
+        if "vendor payment" in text or "payee" in text:
+            return first_existing("Vendor Payment Records")
+        if "payment" in text or "finance" in text:
+            return first_existing("Approved for Payment", "Payments")
+        return None
 
     if role == "Approver":
         if "gateway" in text:
-            return first_existing("Gateway Pass Approval", "Approval Dashboard")
-        if "po" in text or "purchase order" in text:
-            return first_existing("PO Approval", "Approval Dashboard")
+            return first_existing("Gateway Pass Approval")
+        if "purchase order" in text or "po " in text:
+            return first_existing("PO Approval")
         if "payment" in text:
-            return first_existing("Payment Approval", "Approval Dashboard")
+            return first_existing("Payment Approval")
         if any(x in text for x in ("away", "delegate", "availability")):
-            return first_existing("Availability / Away Notice", "Approval Dashboard")
+            return first_existing("Availability / Away Notice")
+        if "quote" in text:
+            return first_existing("Quote Comparison")
         if "approval" in text or "request" in text:
-            return first_existing("Pending Approvals", "Approval Dashboard")
-        return first_existing("Approval Dashboard")
+            return first_existing("Pending Approvals")
+        return None
 
     if role == "Auditor":
         if "gateway" in text:
-            return first_existing("Gateway Pass Audit", "Audit Dashboard")
+            return first_existing("Gateway Pass Audit")
         if "budget" in text:
-            return first_existing("Budget Audit", "Audit Dashboard")
+            return first_existing("Budget Audit")
         if "delegat" in text:
-            return first_existing("Delegated Approval Review", "Audit Dashboard")
+            return first_existing("Delegated Approval Review")
         if "approval" in text:
-            return first_existing("Approval Trails", "Audit Dashboard")
-        if "payment" in text or "finance" in text:
-            return first_existing("Finance Audit", "Audit Dashboard")
-        return first_existing("Audit Dashboard")
+            return first_existing("Approval Trails")
+        if "payment" in text or "finance" in text or "invoice" in text:
+            return first_existing("Finance, Invoice & Payment Audit")
+        if "document" in text or "download" in text:
+            return first_existing("Document Archive & Download Audit")
+        if "notification" in text:
+            return first_existing("Notification Delivery Audit")
+        if "user" in text or "security" in text:
+            return first_existing("User & Security Audit")
+        return None
 
-    return next(iter(section_set), None) if section_set else None
+    return None
 
 
 def _unread_attention_counts(current: dict, sections: list[str]) -> dict[str, int]:
-    """Return numbered unread/task badge counts for every sidebar section.
+    """Return unread badge counts for the exact tabs that received work.
 
-    Counts are based on unread notifications for the signed-in user/role.  The
-    query now also handles older rows whose ``section_target`` is missing or no
-    longer exactly matches the menu, so the red numbered badge cannot disappear
-    while unread work still exists.
+    Counts come only from unread notifications routed to a sidebar section. This
+    prevents unrelated tabs from showing red badges. Opening a tab marks only
+    that tab's routed notifications as read, so the badge disappears just like a
+    WhatsApp unread-chat count.
     """
     unique_sections = list(dict.fromkeys(str(section) for section in sections if section))
     if not unique_sections:
@@ -1593,13 +1624,14 @@ def _unread_attention_counts(current: dict, sections: list[str]) -> dict[str, in
         rows = df_query(
             """
             SELECT
+                n.id,
                 n.section_target,
                 n.title,
                 n.message,
                 n.entity_type,
                 n.action_label
             FROM notifications n
-            WHERE n.is_read=0
+            WHERE COALESCE(n.is_read,0)=0
               AND (n.user_id=? OR n.role=? OR n.role='All')
             """,
             (int(current.get("id") or 0), str(current.get("role") or "")),
@@ -1620,6 +1652,53 @@ def _unread_attention_counts(current: dict, sections: list[str]) -> dict[str, in
         return {}
 
 
+def _mark_sidebar_section_notifications_read(current: dict, section: str, sections: list[str]) -> None:
+    """Clear only one tab's badge by marking its routed notifications as read."""
+    target_section = str(section or "")
+    if not target_section:
+        return
+    try:
+        rows = df_query(
+            """
+            SELECT
+                n.id,
+                n.section_target,
+                n.title,
+                n.message,
+                n.entity_type,
+                n.action_label
+            FROM notifications n
+            WHERE COALESCE(n.is_read,0)=0
+              AND (n.user_id=? OR n.role=? OR n.role='All')
+            """,
+            (int(current.get("id") or 0), str(current.get("role") or "")),
+        )
+        ids: list[int] = []
+        for _, row in rows.iterrows():
+            item = {
+                "section_target": row.get("section_target"),
+                "title": row.get("title"),
+                "message": row.get("message"),
+                "entity_type": row.get("entity_type"),
+                "action_label": row.get("action_label"),
+            }
+            routed_section = _infer_sidebar_section_from_notification(current, item, sections)
+            if routed_section == target_section:
+                try:
+                    ids.append(int(row.get("id")))
+                except Exception:
+                    pass
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        run_query(
+            f"UPDATE notifications SET is_read=1 WHERE id IN ({placeholders})",
+            tuple(ids),
+        )
+    except Exception:
+        pass
+
+
 def _count_since(sql: str, params: tuple, seen_at: str) -> int:
     return _nav_count_query(sql, tuple(params) + (seen_at,))
 
@@ -1630,157 +1709,19 @@ def attention_count_for_section(
     seen_at: str | None = None,
     unread_count: int | None = None,
 ) -> int:
-    """Return WhatsApp-style *new since opened* counts per role section.
-
-    ``seen_at`` and ``unread_count`` are optional batch inputs used by the
-    sidebar. The public two-argument form is retained for compatibility.
-    """
-    role = current.get("role")
-    uid = int(current.get("id") or 0)
-    if seen_at is None:
-        seen_at = _section_last_seen(current, section)
+    """Return the unread notification count for a single sidebar section."""
     if unread_count is None:
         unread_count = _unread_attention_counts(current, [section]).get(section, 0)
-    unread = int(unread_count or 0)
-    count = 0
-    if role == "Admin":
-        mapping = {
-            "Admin Dashboard": ("SELECT COUNT(*) FROM user_availability WHERE (admin_review_status='Pending Review' OR status IN ('Away Requested','Away Active')) AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Notifications Monitor": ("SELECT COUNT(*) FROM notification_outbox WHERE status IN ('Queued','Fallback') AND datetime(created_at) > datetime(?)", ()),
-            "Availability & Delegation Requests": ("SELECT COUNT(*) FROM user_availability WHERE (admin_review_status='Pending Review' OR status='Away Requested') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Gateway Pass Management": ("SELECT COUNT(*) FROM gateway_passes WHERE status IN ('Sent for Procurement Review','Submitted','Submitted for Approval','Pending Approval','Pending Procurement Manager / Approver Review') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Audit Logs": ("SELECT COUNT(*) FROM audit_logs WHERE action IN ('LOGIN','LOGOUT','PASSWORD_RESET','ROLE_CHANGE') AND datetime(created_at) > datetime(?)", ()),
-        }
-        value = mapping.get(section)
-        if value:
-            count = _count_since(value[0], value[1], seen_at)
-    elif role == "Procurement Manager":
-        mapping = {
-            "Utility Head / Facility Head Inbox": ("SELECT COUNT(*) FROM purchase_requests WHERE (status IN ('Sent for Procurement Review','Submitted to Procurement Manager') OR next_role='procurement_manager') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Gateway Pass Review": ("SELECT COUNT(*) FROM gateway_passes gp WHERE (gp.status IN ('Sent for Procurement Review','Submitted','Reviewed by Procurement','Pending Procurement Manager / Approver Review') OR gp.next_role='procurement_manager') AND datetime(COALESCE(gp.updated_at, gp.created_at)) > datetime(?)", ()),
-            "Post-Payment Closure": ("SELECT COUNT(*) FROM purchase_requests WHERE (status IN ('Paid','Receipt Uploaded','Payment Submitted for Verification','Completed','Closed') OR (next_role='procurement_manager' AND payment_status='Paid')) AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Purchase Requests": ("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Submitted','Procurement Review','Requires Sourcing','Vendor Quote Collection','Approved') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Low-Value Approvals": (
-                "SELECT "
-                "(SELECT COUNT(*) FROM purchase_requests WHERE COALESCE(estimated_amount,0) <= 100000 "
-                " AND status IN ('Draft','Sent for Procurement Review','Submitted','Reviewed by Procurement','Vendor Recommendation','Submitted for Approval')) "
-                "+ (SELECT COUNT(*) FROM purchase_orders WHERE COALESCE(total_amount,0) <= 100000 "
-                " AND status IN ('Draft','Pending Approval')) "
-                "+ (SELECT COUNT(*) FROM payments WHERE COALESCE(amount,0) <= 100000 "
-                " AND status='Pending Approval' AND COALESCE(next_role,'procurement_manager')='procurement_manager')",
-                (),
-            ),
-            "Commercial PO Management": ("SELECT COUNT(*) FROM purchase_orders WHERE status IN ('Draft','Pending Approval','Approved') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Availability / Away Notice": ("SELECT COUNT(*) FROM user_availability WHERE user_id=? AND status NOT IN ('Returned','Cancelled') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", (uid,)),
-        }
-        value = mapping.get(section)
-        if value:
-            count = _count_since(value[0], value[1], seen_at)
-    elif role == "Facility Manager":
-        mapping = {
-            "My Draft Requests": ("SELECT COUNT(*) FROM purchase_requests WHERE facility_manager_user_id=? AND status IN ('FM Draft','Returned to Facility Manager') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", (uid,)),
-            "Submit to Procurement Manager": ("SELECT COUNT(*) FROM purchase_requests WHERE facility_manager_user_id=? AND status IN ('FM Draft','Returned to Facility Manager') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", (uid,)),
-            "Gateway Pass": ("SELECT COUNT(*) FROM gateway_passes WHERE facility_manager_user_id=? AND status IN ('Approved','Generated','Downloaded','Returned for Correction','Returned') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", (uid,)),
-            "Returned Requests": ("SELECT COUNT(*) FROM purchase_requests WHERE facility_manager_user_id=? AND status='Returned to Facility Manager' AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", (uid,)),
-            "Approved / Accepted Requests": ("SELECT COUNT(*) FROM purchase_requests WHERE facility_manager_user_id=? AND status IN ('Accepted by Procurement Manager','Approved','Paid','Closed') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", (uid,)),
-        }
-        value = mapping.get(section)
-        if value:
-            count = _count_since(value[0], value[1], seen_at)
-    elif role == "Logistics Officer":
-        mapping = {
-            "PO Delivery Handover": ("SELECT COUNT(*) FROM purchase_orders WHERE (next_role='logistics_officer' OR status='Released to Logistics') AND COALESCE(logistics_status,'Awaiting Handover') IN ('Awaiting Handover','Not Released') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Delivery Tracking": ("SELECT COUNT(*) FROM purchase_orders WHERE next_role='logistics_officer' AND status IN ('Scheduled','Dispatched','In Transit','Delayed','Arrived','Awaiting Delivery','Sent to Vendor') AND datetime(COALESCE(delivery_updated_at, updated_at, created_at)) > datetime(?)", ()),
-            "Receiving Slips": ("SELECT COUNT(*) FROM purchase_orders WHERE next_role='logistics_officer' AND status IN ('Arrived','Awaiting Delivery','Partially Received') AND COALESCE(receiving_status,'Pending Receipt') IN ('Pending Receipt','Partially Received','Disputed') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Delivery Exceptions & Returns": ("SELECT COUNT(*) FROM logistics_exceptions WHERE status IN ('Open','In Progress') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Gateway Pass Coordination": ("SELECT COUNT(*) FROM gateway_passes WHERE status IN ('Approved','Generated','Downloaded') AND datetime(COALESCE(logistics_updated_at, updated_at, created_at)) > datetime(?)", ()),
-        }
-        value = mapping.get(section)
-        if value:
-            count = _count_since(value[0], value[1], seen_at)
-    elif role == "Finance":
-        mapping = {
-            "Approved for Payment": ("SELECT COUNT(*) FROM purchase_requests WHERE (status='Approved for Payment' OR payment_status='Approved for Payment') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Invoices": ("SELECT COUNT(*) FROM invoices WHERE (status IN ('Uploaded','Needs Review','Returned') OR match_status IN ('Needs Review','Mismatch')) AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Receipts": ("SELECT COUNT(*) FROM receipt_records WHERE status='Recorded' AND datetime(created_at) > datetime(?)", ()),
-            "Payments": ("SELECT COUNT(*) FROM payments WHERE status IN ('Pending Approval','Approved') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-        }
-        value = mapping.get(section)
-        if value:
-            count = _count_since(value[0], value[1], seen_at)
-    elif role == "Approver":
-        mapping = {
-            "Pending Approvals": (
-                "SELECT COUNT(*) FROM purchase_requests pr LEFT JOIN users u ON u.id=pr.requested_by "
-                "WHERE pr.status IN ('Submitted for Approval','Pending Approval','Pending Approver/MD Approval') "
-                "AND (COALESCE(pr.estimated_amount,0) > 100000 OR (COALESCE(pr.estimated_amount,0) <= 100000 AND u.role='Procurement Manager')) "
-                "AND datetime(COALESCE(pr.updated_at, pr.created_at)) > datetime(?)",
-                (),
-            ),
-            "PO Approval": ("SELECT COUNT(*) FROM purchase_orders WHERE status='Pending Approval' AND COALESCE(total_amount,0) > 100000 AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Payment Approval": ("SELECT COUNT(*) FROM payments WHERE status='Pending Approval' AND COALESCE(amount,0) > 100000 AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Gateway Pass Approval": ("SELECT COUNT(*) FROM gateway_passes WHERE (status IN ('Submitted for Approval','Pending Approval') OR next_role='approver') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Availability / Away Notice": ("SELECT COUNT(*) FROM user_availability WHERE user_id=? AND status NOT IN ('Returned','Cancelled') AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", (uid,)),
-        }
-        value = mapping.get(section)
-        if value:
-            count = _count_since(value[0], value[1], seen_at)
-    elif role == "Auditor":
-        mapping = {
-            "Audit Dashboard": ("SELECT COUNT(*) FROM audit_events WHERE datetime(occurred_at) > datetime(?)", ()),
-            "All Activity & Evidence Ledger": ("SELECT COUNT(*) FROM audit_events WHERE datetime(occurred_at) > datetime(?)", ()),
-            "Sourcing & Vendor Quote Audit": ("SELECT COUNT(*) FROM sourcing_tasks WHERE datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Purchase Order & Logistics Evidence": ("SELECT COUNT(*) FROM purchase_orders WHERE datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Receiving Slips, Proof of Delivery & Returns": ("SELECT COUNT(*) FROM receiving_slips WHERE datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Finance, Invoice & Payment Audit": ("SELECT COUNT(*) FROM payments WHERE datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Payment Payee / Bank Detail Access Audit": ("SELECT COUNT(*) FROM payment_payee_details WHERE datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Gateway Pass Audit": ("SELECT COUNT(*) FROM gateway_passes WHERE datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Document Archive & Download Audit": ("SELECT COUNT(*) FROM audit_events WHERE action LIKE '%DOWNLOAD%' AND datetime(occurred_at) > datetime(?)", ()),
-            "Notification Delivery Audit": ("SELECT COUNT(*) FROM notification_outbox WHERE datetime(COALESCE(sent_at, last_failure_at, created_at)) > datetime(?)", ()),
-            "User & Security Audit": ("SELECT COUNT(*) FROM audit_events WHERE (action LIKE '%LOGIN%' OR action LIKE '%PASSWORD%' OR action LIKE '%DENIED%') AND datetime(occurred_at) > datetime(?)", ()),
-            "Approval Trails": ("SELECT COUNT(*) FROM approval_history WHERE datetime(created_at) > datetime(?)", ()),
-            "Delegated Approval Review": ("SELECT COUNT(*) FROM approval_delegations WHERE enabled=1 AND datetime(COALESCE(updated_at, created_at)) > datetime(?)", ()),
-            "Budget Audit": ("SELECT COUNT(*) FROM budget_history WHERE datetime(created_at) > datetime(?)", ()),
-            "Compliance Reports": ("SELECT COUNT(*) FROM notifications WHERE (role='Auditor' OR user_id=?) AND is_read=0 AND datetime(created_at) > datetime(?)", (uid,)),
-        }
-        value = mapping.get(section)
-        if value:
-            count = _count_since(value[0], value[1], seen_at)
-    return max(int(count or 0), int(unread or 0))
+    try:
+        return max(0, int(unread_count or 0))
+    except Exception:
+        return 0
 
 
 def _build_attention_count_map(current: dict, sections: list[str]) -> dict[str, int]:
-    """Build sidebar red-badge counts with batched shared lookups.
-
-    Per-section workflow counts remain accurate, but shared last-seen and
-    notification calculations are now fetched once, which removes most of the
-    repeated SQLite work from ordinary tab navigation.
-    """
+    """Build sidebar badge counts from unread notifications only."""
     unread_map = _unread_attention_counts(current, sections)
-    if FAST_NAVIGATION_DOTS:
-        # Fast navigation mode: section dots are driven by unread notifications
-        # only. This avoids repeated workflow-count scans on every sidebar
-        # click, makes sections open faster, and keeps dots visible until the
-        # user explicitly clicks "Mark all as read" in the notification panel.
-        return {str(section): int(unread_map.get(section, 0) or 0) for section in sections}
-
-    _ensure_section_seen_schema()
-    seen_map = _section_last_seen_map(current, sections)
-    counts: dict[str, int] = {}
-    for section in sections:
-        try:
-            counts[section] = int(
-                attention_count_for_section(
-                    current,
-                    section,
-                    seen_at=seen_map.get(section, "1970-01-01 00:00:00"),
-                    unread_count=unread_map.get(section, 0),
-                )
-                or 0
-            )
-        except Exception:
-            counts[section] = 0
-    return counts
+    return {str(section): int(unread_map.get(section, 0) or 0) for section in sections}
 
 NAV_ICON_MAP = {
     "Dashboard": "⌂", "Operations": "⌂", "Financial": "⌂", "Approval": "⌂", "Audit": "⌂", "Utility": "⌂", "Logistics": "⌂",
@@ -1923,11 +1864,14 @@ def render_sidebar_navigation(current: dict):
         label_badge = f"   🔴 {badge_text}" if badge_text else ""
         label = f"{nav_icon_for(section)}  {section}{label_badge}"
         if st.button(label, key=button_key, use_container_width=True):
-            if section != selected:
-                st.session_state[state_key] = section
-                _set_query_value("pf_role", str(current.get("role")))
-                _set_query_value("pf_section", section)
-                st.rerun()
+            # Opening a tab clears only that tab's unread badge, like opening a
+            # WhatsApp chat. Other tabs keep their own unread counts.
+            _mark_sidebar_section_notifications_read(current, section, list(sections))
+            mark_section_attention_seen(current, section)
+            st.session_state[state_key] = section
+            _set_query_value("pf_role", str(current.get("role")))
+            _set_query_value("pf_section", section)
+            st.rerun()
 
 
 def render_sidebar_account_card(current: dict):
