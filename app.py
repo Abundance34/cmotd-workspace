@@ -79,6 +79,7 @@ ROLE_SECTIONS = {
             "Gateway Pass Management",
             "Activity & History Logs",
             "Audit Logs",
+            "Database Viewer",
             "Backup / Export",
             "Settings",
         ],
@@ -1731,7 +1732,7 @@ NAV_ICON_MAP = {
     "Import": "⇧", "Documents": "▧", "Archive": "▧", "Reports": "▤", "Compliance": "◇", "Audit Logs": "◈",
     "Notification": "♧", "Availability": "◌", "Gateway": "⌘", "Vendor": "◉", "Sourcing": "⌕", "Quote": "◉",
     "Purchase Order": "▣", "PO": "▣", "Delivery": "⇢", "Receiving": "⌄", "Return": "↶", "Proof": "✓",
-    "Invoice": "▧", "Receipt": "▧", "Payee": "◇", "Security": "◇", "Delegated": "⇄", "Backup": "⇩",
+    "Invoice": "▧", "Receipt": "▧", "Payee": "◇", "Security": "◇", "Delegated": "⇄", "Backup": "⇩", "Database": "▦",
 }
 
 

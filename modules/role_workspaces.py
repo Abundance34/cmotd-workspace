@@ -466,6 +466,149 @@ def render_app():
 
 # ---------------- Admin ----------------
 
+
+
+def _quote_sqlite_identifier(identifier: str) -> str:
+    """Quote a SQLite identifier from a trusted table/column list."""
+    return '"' + str(identifier).replace('"', '""') + '"'
+
+
+def _sqlite_table_names() -> list[str]:
+    """Return user-table names for the Admin read-only database viewer."""
+    try:
+        rows = run_query(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table'
+              AND name NOT LIKE 'sqlite_%'
+            ORDER BY name
+            """,
+            fetch=True,
+        )
+        return [str(row["name"]) for row in rows]
+    except Exception:
+        return []
+
+
+def _sqlite_table_columns(table_name: str) -> list[dict[str, Any]]:
+    """Return column metadata for a trusted SQLite table name."""
+    if table_name not in _sqlite_table_names():
+        return []
+    conn = None
+    try:
+        from core.db import get_conn
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(f"PRAGMA table_info({_quote_sqlite_identifier(table_name)})")
+        return [dict(row) for row in cur.fetchall()]
+    except Exception:
+        return []
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+
+def _redact_database_viewer_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Mask sensitive fields in the read-only Admin database viewer."""
+    if df.empty:
+        return df
+    shown = df.copy()
+    sensitive_terms = (
+        "password", "hash", "secret", "token", "key", "encryption",
+        "signature", "bank", "account_number", "account_no", "payee",
+    )
+    for col in shown.columns:
+        name = str(col).lower()
+        if any(term in name for term in sensitive_terms):
+            shown[col] = shown[col].apply(lambda value: "" if _clean(value) == "" else "••••••••")
+    return shown
+
+
+def database_viewer_page():
+    """Admin-only read-only SQLite table viewer for Cloud Run deployments.
+
+    Cloud Run cannot be SSH-inspected like a VM, and this ProcureFlow build uses
+    SQLite. This page gives Admin users a safe, in-app way to view current tables
+    without modifying records. It performs SELECT/PRAGMA reads only.
+    """
+    if str(user().get("role") or "") != "Admin":
+        st.error("Database Viewer is available to Admin users only.")
+        return
+
+    st.subheader("Database Viewer")
+    st.caption("Read-only live SQLite table inspection. This page does not edit, insert, update, or delete records.")
+
+    tables = _sqlite_table_names()
+    if not tables:
+        st.warning("No SQLite tables were found in the current database.")
+        return
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        table_name = st.selectbox("Table", tables, key="admin_db_viewer_table")
+    columns = _sqlite_table_columns(table_name)
+    column_names = [str(col.get("name")) for col in columns if col.get("name")]
+    with c2:
+        limit = st.number_input("Rows", min_value=10, max_value=5000, value=200, step=50, key="admin_db_viewer_limit")
+    with c3:
+        sort_choice = st.selectbox(
+            "Sort",
+            ["Newest first", "Oldest first", "Default"],
+            key="admin_db_viewer_sort",
+        )
+
+    search_text = st.text_input("Search within this table", placeholder="Type to filter visible rows", key="admin_db_viewer_search")
+
+    count_df = df_query(f"SELECT COUNT(*) AS total_rows FROM {_quote_sqlite_identifier(table_name)}")
+    total_rows = int(count_df.iloc[0]["total_rows"]) if not count_df.empty else 0
+    metric_row([
+        ("Selected Table", table_name, "read-only"),
+        ("Total Rows", total_rows, "live SQLite"),
+        ("Columns", len(column_names), "schema"),
+    ], cols=3)
+
+    st.markdown("#### Table Structure")
+    if columns:
+        structure_df = pd.DataFrame(columns)
+        display_cols = [c for c in ["cid", "name", "type", "notnull", "dflt_value", "pk"] if c in structure_df.columns]
+        dataframe(structure_df[display_cols] if display_cols else structure_df)
+    else:
+        st.info("No column metadata available for this table.")
+
+    where = ""
+    params: list[Any] = []
+    if search_text.strip() and column_names:
+        searchable = [name for name in column_names if name]
+        if searchable:
+            where_parts = [f"CAST({_quote_sqlite_identifier(col)} AS TEXT) LIKE ?" for col in searchable]
+            where = " WHERE " + " OR ".join(where_parts)
+            params = [f"%{search_text.strip()}%" for _ in searchable]
+
+    order_by = ""
+    lowered_cols = {col.lower(): col for col in column_names}
+    order_col = lowered_cols.get("id") or lowered_cols.get("created_at") or lowered_cols.get("updated_at")
+    if order_col and sort_choice != "Default":
+        direction = "DESC" if sort_choice == "Newest first" else "ASC"
+        order_by = f" ORDER BY {_quote_sqlite_identifier(order_col)} {direction}"
+
+    query = f"SELECT * FROM {_quote_sqlite_identifier(table_name)}{where}{order_by} LIMIT ?"
+    params.append(int(limit))
+    data = df_query(query, tuple(params))
+
+    st.markdown("#### Table Data")
+    if data.empty:
+        st.info("No rows matched this view.")
+    else:
+        shown = _redact_database_viewer_df(data)
+        dataframe(shown)
+        csv_download(shown, f"database_view_{table_name}")
+
+    st.info("Sensitive fields such as passwords, hashes, secrets, tokens, bank details, and payee details are masked in this viewer.")
+
 def admin_console():
     role_header("Admin Console", "System administration, data import, configuration, users, audit and complete procurement visibility.")
 
@@ -2943,6 +3086,8 @@ def admin_console():
         activity_history_page(scope="admin")
     elif section == "Audit Logs":
         audit_log_page(full=True)
+    elif section == "Database Viewer":
+        database_viewer_page()
     elif section == "Backup / Export":
         backup_export_page()
     elif section == "Settings":
