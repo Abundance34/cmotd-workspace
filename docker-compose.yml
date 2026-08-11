@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${PROCUREFLOW_DB_NAME:-procureflow}
+      POSTGRES_USER: ${PROCUREFLOW_DB_USER:-procureflow}
+      POSTGRES_PASSWORD: ${PROCUREFLOW_DB_PASSWORD:?Set PROCUREFLOW_DB_PASSWORD in .env}
+    volumes:
+      - procureflow_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PROCUREFLOW_DB_USER:-procureflow} -d ${PROCUREFLOW_DB_NAME:-procureflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  procureflow:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      PROCUREFLOW_PRODUCTION: "0"
+      PROCUREFLOW_DATABASE_BACKEND: postgresql
+      PROCUREFLOW_DATABASE_URL: postgresql://${PROCUREFLOW_DB_USER:-procureflow}:${PROCUREFLOW_DB_PASSWORD:?Set PROCUREFLOW_DB_PASSWORD in .env}@postgres:5432/${PROCUREFLOW_DB_NAME:-procureflow}
+      PROCUREFLOW_DB_POOL_MIN: "1"
+      PROCUREFLOW_DB_POOL_MAX: "5"
+      # Existing Docker workflows first migrate the bundled SQLite database,
+      # so startup seeding is disabled by default. Set
+      # PROCUREFLOW_SEED_DEFAULTS=1 explicitly only for a brand-new empty demo
+      # database that has not been populated by the migration tool.
+      PROCUREFLOW_SEED_DEFAULTS: ${PROCUREFLOW_SEED_DEFAULTS:-0}
+      PROCUREFLOW_DATA_DIR: /app/data
+      PROCUREFLOW_UPLOAD_DIR: /app/data/attachments
+      PROCUREFLOW_BACKUP_DIR: /app/data/backups
+      PROCUREFLOW_SESSION_COOKIE_SECRET: ${PROCUREFLOW_SESSION_COOKIE_SECRET:?Set PROCUREFLOW_SESSION_COOKIE_SECRET in .env}
+      PROCUREFLOW_PAYEE_ENCRYPTION_KEY: ${PROCUREFLOW_PAYEE_ENCRYPTION_KEY:?Set PROCUREFLOW_PAYEE_ENCRYPTION_KEY in .env}
+      PROCUREFLOW_AUDIT_SIGNING_KEY: ${PROCUREFLOW_AUDIT_SIGNING_KEY:?Set PROCUREFLOW_AUDIT_SIGNING_KEY in .env}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "scripts/database_healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  procureflow_postgres:

@@ -1,0 +1,27 @@
+{
+  "generated_at": "2026-07-28T08:43:07+00:00",
+  "status": "passed",
+  "summary": {
+    "errors": 0,
+    "warnings": 0,
+    "python_files_scanned": 44,
+    "sql_literals_scanned": 1428,
+    "guarded_sqlite_only_literals": 10,
+    "sqlite_tables": 68,
+    "postgres_application_tables": 68,
+    "migration_files": [
+      "001_initial_schema.sql",
+      "002_e2e_workflow_enhancements.sql",
+      "003_relationship_constraints.sql",
+      "004_sqlite_substr_date_compatibility.sql",
+      "005_audit_immutability.sql"
+    ],
+    "direct_excel_writers_outside_shared_service": []
+  },
+  "schema": {
+    "missing_tables": [],
+    "extra_tables": [],
+    "column_mismatches": {}
+  },
+  "findings": []
+}

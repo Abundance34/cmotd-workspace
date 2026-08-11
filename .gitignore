@@ -1,0 +1,45 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ProcureFlow patch backups
+*.before_*
+*.before_**
+*before_*
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Build/cache
+.pytest_cache/
+.mypy_cache/
+
+# Cloud/local temporary files
+cloudrun-*-image.txt
+cloudrun-prod-rollback-revision.txt
+cloudrun-rollback-revision.txt
+
+# Local migration / operational data
+data/backups/
+sample_imports/
+candidate-vendor-error-log.json

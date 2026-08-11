@@ -1,0 +1,17 @@
+[theme]
+base = "light"
+primaryColor = "#1769E8"
+backgroundColor = "#F7F9FC"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#172033"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
+fileWatcherType = "poll"
+
+[client]
+showErrorDetails = "stacktrace"

@@ -1,0 +1,10635 @@
+from __future__ import annotations
+
+import base64
+import json
+import shutil
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
+from html import escape
+
+import pandas as pd
+import streamlit as st
+
+from core.auth import change_password_panel, has_permission, hash_password
+from core.db import (
+    BACKUP_DIR, DB_PATH, add_workflow_event, active_delegation, create_activity_log,
+    create_notification, df_query, json_dump, log_audit, make_ref, month_key, notify,
+    notify_related_users, now_iso, run_insert, run_query, transition_request_status, transition_gateway_pass_status, email_delivery_ready
+)
+from core.legacy_import import bundled_legacy_zip_path, import_procurement_zip, import_uploaded_zip
+from core.ocr import duplicate_candidates, extract_text, match_invoice_to_po, parse_ocr_text
+from core.ui import badge, dataframe, empty_state, inject_css, money, workflow_progress
+
+EXPENSE_CATEGORIES = ["Diesel/Fuel", "Water", "Office Supplies", "Repairs/Maintenance", "Vehicle Maintenance", "Generator Maintenance", "Plumbing", "Welding/Fabrication", "Grass Cutting", "Transport/Logistics", "Staff Welfare", "ICT/Software", "Utilities", "Construction Materials", "Professional Services", "Operational Purchases", "Other"]
+PR_STATUSES = ["FM Draft", "Submitted to Procurement Manager", "PM Reviewing", "Returned to Facility Manager", "Accepted by Procurement Manager", "Converted to Purchase Request", "Draft", "Submitted", "Procurement Review", "Requires Sourcing", "Vendor Quote Collection", "Vendor Recommendation", "Pending Approval", "Pending Approver/MD Approval", "Approved", "Rejected", "Returned", "PO Created", "PO Approved", "Sent to Vendor", "Awaiting Delivery", "Partially Received", "Fully Received", "Invoice Uploaded", "Invoice Matched to PO", "Finance Review", "Approved for Payment", "Payment Approved", "Paid", "Closed"]
+PO_STATUSES = ["Draft", "Pending Approval", "Approved", "Sent to Vendor", "Awaiting Delivery", "Partially Received", "Fully Received", "Invoiced", "Paid", "Closed", "Cancelled"]
+PAYMENT_STATUSES = ["Pending Approval", "Approved", "Paid", "Rejected", "Returned"]
+PAYMENT_METHODS = ["Cash", "Bank Transfer", "POS/Card", "Cheque", "Mobile Money"]
+PRIORITIES = ["Low", "Normal", "High", "Urgent"]
+RECEIVING_STATUSES = ["Pending Receipt", "Partially Received", "Fully Received", "Disputed", "Returned"]
+
+
+# ---------------------------------------------------------------------------
+# Safety definitions used by role pages
+# ---------------------------------------------------------------------------
+# These constants/helpers keep every role workspace safe when a page is opened
+# directly from navigation. They do not change workflow logic or database data.
+AWAY_ROLES = ["Approver", "Procurement Manager"]
+GATEWAY_MOVEMENT_TYPES = ["Item Movement", "Equipment Movement", "Material Transfer", "Return Movement", "Vehicle Movement", "Other"]
+GATEWAY_UOMS = ["Unit", "Pcs", "Kg", "Tonnes", "Litres", "Meters", "Cartons", "Bags", "Boxes", "Set", "Other"]
+GATEWAY_QUALITY_OPTIONS = ["Good", "New", "Used", "Damaged", "Fragile", "Serviceable", "Other"]
+GATEWAY_FRAGILITY_OPTIONS = ["Normal", "Fragile", "Highly Fragile", "Heavy", "Hazardous", "Other"]
+GATEWAY_PASS_STATUSES = ["Draft", "Submitted", "Pending Procurement Manager / Approver Review", "Returned for Correction", "Approved", "Rejected", "Generated", "Downloaded", "Closed"]
+GATEWAY_COMPANY = "Center for Marine and Offshore Technology Development"
+
+
+def _clean(value: Any, default: str = "") -> str:
+    """Normalize values for display and document generation."""
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except Exception:
+        pass
+    text = str(value).strip()
+    return text if text and text.lower() not in {"none", "nan", "nat"} else default
+
+
+def _fmt_date(value: Any, default: str = "") -> str:
+    text = _clean(value)
+    if not text:
+        return default
+    try:
+        return pd.to_datetime(text).date().isoformat()
+    except Exception:
+        return text
+
+
+def _fmt_dt(value: Any, default: str = "") -> str:
+    text = _clean(value)
+    if not text:
+        return default
+    try:
+        return pd.to_datetime(text).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return text
+
+
+def _row_value(row: Any, key: str, default: Any = "") -> Any:
+    try:
+        if hasattr(row, "index") and key not in row.index:
+            return default
+        if hasattr(row, "get"):
+            return row.get(key, default)
+        return getattr(row, key, default)
+    except Exception:
+        return default
+
+
+def _qty_text(row: Any) -> str:
+    qty = _row_value(row, "quantity", "")
+    unit = _row_value(row, "unit_of_measure", "")
+    return " ".join(part for part in [_clean(qty), _clean(unit)] if part)
+
+
+def _gateway_asset_path(filename: str) -> str | None:
+    for root in (Path("static"), Path("assets"), Path("data")):
+        candidate = root / filename
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _table_exists_local(table: str) -> bool:
+    """Backend-neutral table check retained under the legacy helper name."""
+    try:
+        from core.db import table_exists
+        return bool(table_exists(str(table)))
+    except Exception:
+        return False
+
+
+def _safe_table_df(table: str, limit: int = 500) -> pd.DataFrame:
+    if not _table_exists_local(table):
+        return pd.DataFrame()
+    safe_limit = max(1, min(int(limit or 500), 5000))
+    try:
+        return df_query(f"SELECT * FROM {table} ORDER BY id DESC LIMIT {safe_limit}")
+    except Exception:
+        try:
+            return df_query(f"SELECT * FROM {table} LIMIT {safe_limit}")
+        except Exception:
+            return pd.DataFrame()
+
+
+def activity_history_page(scope: str = "mine"):
+    """Safe activity/history view used by Admin and all role workspaces."""
+    _phase2_bootstrap()
+    st.subheader("Activity & History Logs" if scope == "all" else "My Activity History")
+    if not _table_exists_local("activity_logs"):
+        st.info("No activity log table is available yet.")
+        return
+    params: tuple[Any, ...] = ()
+    where = ""
+    if scope != "all":
+        uid = int(user().get("id") or 0)
+        role = str(user().get("role") or "")
+        where = "WHERE user_id=? OR related_user_id=? OR role=? OR visibility_scope IN ('workflow','role')"
+        params = (uid, uid, role)
+    df = df_query(
+        f"""
+        SELECT id, created_at, role, action, entity_type, entity_id, public_summary, visibility_scope
+        FROM activity_logs
+        {where}
+        ORDER BY created_at DESC, id DESC
+        LIMIT 500
+        """,
+        params,
+    )
+    if df.empty:
+        st.info("No activity history recorded yet.")
+        return
+    dataframe(df)
+    csv_download(df, "activity_history_logs" if scope == "all" else "my_activity_history")
+
+
+def admin_availability_review_page():
+    """Admin review page for away/delegation notices."""
+    _phase2_bootstrap()
+    st.subheader("Availability & Delegation Requests")
+    if not _table_exists_local("user_availability"):
+        st.info("No availability records are available yet.")
+        return
+    try:
+        rows = df_query(
+            """
+            SELECT ua.*, u.full_name, u.username, u.role
+            FROM user_availability ua
+            LEFT JOIN users u ON u.id=ua.user_id
+            ORDER BY ua.created_at DESC
+            LIMIT 500
+            """
+        )
+    except Exception:
+        rows = _safe_table_df("user_availability", 500)
+    if rows.empty:
+        st.success("No availability or delegation requests yet.")
+        return
+    dataframe(rows)
+    csv_download(rows, "availability_delegation_requests")
+
+
+def acting_approval_queue():
+    st.subheader("Acting Approval Queue")
+    pending_approval_page() if "pending_approval_page" in globals() else st.info("No acting approval queue is available yet.")
+
+
+def approval_configuration_page():
+    approval_config_page() if "approval_config_page" in globals() else configuration_page()
+
+
+def budget_command_center():
+    budgets_page() if "budgets_page" in globals() else budget_audit_page()
+
+
+def budget_audit_page():
+    st.subheader("Budget Audit")
+    if _table_exists_local("budgets"):
+        dataframe(_safe_table_df("budgets", 500))
+    else:
+        st.info("No budget records available yet.")
+
+
+def delegated_approval_review_page():
+    st.subheader("Delegated Approval Review")
+    if _table_exists_local("approval_delegations"):
+        dataframe(_safe_table_df("approval_delegations", 500))
+    else:
+        st.info("No delegated approval records available yet.")
+
+
+def facility_handoff_trail_page():
+    st.subheader("Utility / Facility Head Handoff Trail")
+    df = df_query(
+        """
+        SELECT id, request_no, department_project, category, status, requested_by, facility_manager_user_id, assigned_procurement_manager_id, updated_at
+        FROM purchase_requests
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 500
+        """
+    ) if _table_exists_local("purchase_requests") else pd.DataFrame()
+    dataframe(df) if not df.empty else st.info("No handoff records available yet.")
+
+
+def get_pm_for_facility_manager(facility_manager_user_id: int | None = None) -> int | None:
+    """Return a valid active Procurement Manager for automatic routing.
+
+    ``facility_manager_links.is_active`` is a legacy numeric flag, while
+    ``users.is_active`` is a real BOOLEAN in PostgreSQL.  Keep those two types
+    explicit so the SQLite compatibility normalizer cannot mistake the linked
+    numeric flag for a Boolean column.  A broken or stale link must never stop
+    the role-based fallback from finding another active Procurement Manager.
+    The manager does not need a concurrent browser session; the account only
+    needs to be active.
+    """
+    if facility_manager_user_id and _table_exists_local("facility_manager_links"):
+        try:
+            linked = df_query(
+                """
+                SELECT u.id
+                FROM facility_manager_links fml
+                JOIN users u ON u.id=fml.procurement_manager_user_id
+                WHERE fml.facility_manager_user_id=?
+                  AND COALESCE(CAST(fml.is_active AS BIGINT), 1) <> 0
+                  AND lower(trim(u.role))='procurement manager'
+                  AND COALESCE(u.is_active, TRUE) IS TRUE
+                ORDER BY fml.id DESC
+                LIMIT 1
+                """,
+                (int(facility_manager_user_id),),
+            )
+            if not linked.empty:
+                return int(linked.iloc[0]["id"])
+        except Exception:
+            # A malformed/stale link must not suppress the role fallback.
+            pass
+
+    try:
+        rows = df_query(
+            """
+            SELECT id
+            FROM users
+            WHERE lower(trim(role))='procurement manager'
+              AND COALESCE(is_active, TRUE) IS TRUE
+            ORDER BY id
+            LIMIT 1
+            """
+        )
+        return int(rows.iloc[0]["id"]) if not rows.empty else None
+    except Exception:
+        return None
+
+
+def _resolve_active_procurement_manager(
+    candidate_user_id: Any = None,
+    facility_manager_user_id: int | None = None,
+) -> int | None:
+    """Validate a stored assignment and safely fall back to role routing."""
+    try:
+        candidate = int(candidate_user_id or 0)
+    except (TypeError, ValueError, OverflowError):
+        candidate = 0
+    if candidate:
+        try:
+            rows = df_query(
+                """
+                SELECT id
+                FROM users
+                WHERE id=?
+                  AND lower(trim(role))='procurement manager'
+                  AND is_active=?
+                LIMIT 1
+                """,
+                (candidate, True),
+            )
+            if not rows.empty:
+                return int(rows.iloc[0]["id"])
+        except Exception:
+            pass
+    return get_pm_for_facility_manager(facility_manager_user_id)
+
+
+def ensure_thread(entity_type: str, entity_id: int, facility_manager_user_id: int, procurement_manager_user_id: int) -> int | None:
+    _phase2_bootstrap()
+    try:
+        existing = run_query(
+            "SELECT id FROM collaboration_threads WHERE entity_type=? AND entity_id=? AND facility_manager_user_id=? AND procurement_manager_user_id=? LIMIT 1",
+            (entity_type, int(entity_id), int(facility_manager_user_id), int(procurement_manager_user_id)),
+            fetch=True,
+        )
+        if existing:
+            return int(existing[0]["id"])
+        return run_insert(
+            "INSERT INTO collaboration_threads (entity_type, entity_id, facility_manager_user_id, procurement_manager_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (entity_type, int(entity_id), int(facility_manager_user_id), int(procurement_manager_user_id), now_iso(), now_iso()),
+        )
+    except Exception:
+        return None
+
+
+def render_private_thread(entity_type: str, entity_id: int, facility_manager_user_id: int, procurement_manager_user_id: int, key_prefix: str):
+    thread_id = ensure_thread(entity_type, entity_id, facility_manager_user_id, procurement_manager_user_id)
+    if not thread_id:
+        st.info("Shared thread is not available for this record yet.")
+        return
+    st.markdown("#### Shared Thread")
+    messages = df_query(
+        """
+        SELECT cm.created_at, cm.message_text, u.full_name sender
+        FROM collaboration_messages cm
+        LEFT JOIN users u ON u.id=cm.sender_user_id
+        WHERE cm.thread_id=?
+        ORDER BY cm.created_at ASC
+        """,
+        (thread_id,),
+    )
+    if messages.empty:
+        st.caption("No messages yet.")
+    else:
+        for m in messages.itertuples():
+            st.markdown(f"**{escape(str(m.sender or 'User'))}** · {escape(str(m.created_at or ''))}<br>{escape(str(m.message_text or ''))}", unsafe_allow_html=True)
+    msg = st.text_area("Message", key=f"{key_prefix}_message")
+    if st.button("Send message", key=f"{key_prefix}_send", type="primary"):
+        if msg.strip():
+            run_query("INSERT INTO collaboration_messages (thread_id, sender_user_id, message_text, is_private, created_at) VALUES (?, ?, ?, 1, ?)", (thread_id, int(user()["id"]), msg.strip(), now_iso()))
+            st.rerun()
+
+
+def facility_import_documents():
+    st.subheader("Import Documents")
+    import_center()
+
+
+def facility_shared_threads():
+    st.subheader("Shared Threads with Procurement Manager")
+    if not _table_exists_local("collaboration_threads"):
+        st.info("No shared threads are available yet.")
+        return
+    uid = int(user().get("id") or 0)
+    threads = df_query(
+        """
+        SELECT ct.*, pm.full_name procurement_manager
+        FROM collaboration_threads ct
+        LEFT JOIN users pm ON pm.id=ct.procurement_manager_user_id
+        WHERE ct.facility_manager_user_id=?
+        ORDER BY ct.updated_at DESC, ct.created_at DESC
+        LIMIT 100
+        """,
+        (uid,),
+    )
+    dataframe(threads) if not threads.empty else st.info("No shared threads yet.")
+
+
+def render_gateway_pass_preview(gateway_pass_id: int):
+    st.markdown("#### Gateway Pass Preview")
+    gp = df_query("SELECT * FROM gateway_passes WHERE id=?", (gateway_pass_id,)) if _table_exists_local("gateway_passes") else pd.DataFrame()
+    if gp.empty:
+        st.info("Gateway pass preview is not available yet.")
+        return
+    row = gp.iloc[0]
+    st.info(f"Pass: {row.get('pass_number', gateway_pass_id)} | Status: {row.get('status', '')}")
+    items = gateway_pass_items_df(gateway_pass_id) if "gateway_pass_items_df" in globals() else pd.DataFrame()
+    if not items.empty:
+        dataframe(items)
+
+
+
+def _phase2_bootstrap():
+    """Ensure optional enterprise notification/gateway schemas exist before role pages use them.
+
+    This keeps notification rendering safe on Streamlit Cloud reruns without
+    changing app workflows or data. The full database initialization already
+    runs at startup; this helper is a lightweight guard for pages that call it.
+    """
+    if st.session_state.get("_pf_phase2_bootstrap_done"):
+        return
+    try:
+        from core.db import ensure_phase2_schema, seed_phase2_defaults, ensure_command_chain_schema
+        ensure_phase2_schema()
+        seed_phase2_defaults()
+        ensure_command_chain_schema()
+    except Exception:
+        # Keep the UI from crashing while the normal startup initializer handles
+        # schema creation. Downstream queries already surface real data issues.
+        pass
+    st.session_state["_pf_phase2_bootstrap_done"] = True
+
+
+def user() -> dict[str, Any]:
+    return st.session_state["user"]
+
+
+def require(perm: str) -> bool:
+    if has_permission(perm):
+        return True
+    st.warning("You do not have permission to perform this action.")
+    return False
+
+
+def _flash_success(message: str):
+    """Persist a green success message across Streamlit reruns.
+
+    This prevents users from double-clicking create/submit/approve/pay buttons
+    because the confirmation remains visible after the page refreshes.
+    """
+    if message:
+        st.session_state["pf_flash_success"] = str(message)
+    st.success(message)
+
+
+def _rerun_success(message: str):
+    _flash_success(message)
+    st.rerun()
+
+
+def _navigate_procurement_section(section: str, message: str | None = None):
+    """Navigate the Procurement Manager sidebar safely on the next rerun.
+
+    The sidebar radio uses the key ``procurement_section``. Streamlit raises a
+    StreamlitAPIException if action code writes to that widget-backed key after
+    the radio has already been created in the current run. Store the desired
+    destination in a separate pending key; app.py applies it before creating the
+    radio on the next rerun.
+    """
+    st.session_state["_pending_nav_procurement_section"] = section
+    if message:
+        _rerun_success(message)
+    st.rerun()
+
+
+def role_header(title: str, subtitle: str):
+    inject_css()
+    st.markdown(f"""
+    <div class="pf-hero">
+        <h1 style="margin:0;">{title}</h1>
+        <p>{subtitle}</p>
+    </div>
+    """, unsafe_allow_html=True)
+    flash = st.session_state.pop("pf_flash_success", None)
+    if flash:
+        st.success(flash)
+
+
+def metric_row(metrics: list[tuple[str, Any, str | None]], cols: int = 4):
+    columns = st.columns(cols)
+    for i, (label, value, help_text) in enumerate(metrics):
+        columns[i % cols].metric(label, value, help=help_text)
+
+
+def csv_download(df: pd.DataFrame, name: str):
+    if df is None or df.empty:
+        return
+    from core.report_service import build_excel_workbook, excel_mime
+    payload = build_excel_workbook({"Detailed Records": df}, name)
+    st.download_button(f"Download {name.replace('_', ' ').title()} Excel", payload, f"{name}.xlsx", excel_mime())
+
+
+def vendor_options(include_blank: bool = True):
+    df = df_query("SELECT id, name FROM vendors WHERE status != 'Suspended' ORDER BY name")
+    opts = {"No vendor selected": None} if include_blank else {}
+    for _, row in df.iterrows():
+        opts[row["name"]] = int(row["id"])
+    return opts
+
+
+def department_options():
+    df = df_query("SELECT name FROM departments WHERE status='Active' ORDER BY name")
+    return df["name"].tolist() if not df.empty else ["General"]
+
+
+def save_upload(uploaded_file, folder: str):
+    if uploaded_file is None:
+        return None, None
+    import hashlib, re
+    from core.db import ATTACHMENT_DIR
+    data = uploaded_file.getvalue()
+    fhash = hashlib.sha256(data).hexdigest()
+    clean = re.sub(r"[^A-Za-z0-9._ -]+", "_", uploaded_file.name).strip()
+    target_dir = ATTACHMENT_DIR / folder
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / f"{date.today().isoformat()}_{make_ref('FILE')}_{clean}"
+    path.write_bytes(data)
+    return str(path), fhash
+
+
+def render_app():
+    if int(user().get("must_change_password") or 0):
+        role_header("Password Change Required", "An administrator has required a password update before you continue.")
+        change_password_panel()
+        return
+    role = user()["role"]
+    if role == "Admin":
+        admin_console()
+    elif role == "Procurement Manager":
+        procurement_workspace()
+    elif role == "Facility Manager":
+        facility_workspace()
+    elif role == "Finance":
+        finance_workspace()
+    elif role == "Approver":
+        executive_workspace()
+    elif role == "Auditor":
+        audit_workspace()
+    else:
+        role_header("ProcureFlow", "Your role is not configured.")
+        change_password_panel()
+
+# ---------------- Admin ----------------
+
+
+
+def _quote_sqlite_identifier(identifier: str) -> str:
+    """Quote a SQLite identifier from a trusted table/column list."""
+    return '"' + str(identifier).replace('"', '""') + '"'
+
+
+def _redact_database_viewer_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Mask sensitive fields in the read-only Admin database viewer."""
+    if df.empty:
+        return df
+    shown = df.copy()
+    sensitive_terms = (
+        "password", "hash", "secret", "token", "key", "encryption",
+        "signature", "bank", "account_number", "account_no", "payee",
+    )
+    for col in shown.columns:
+        name = str(col).lower()
+        if any(term in name for term in sensitive_terms):
+            shown[col] = shown[col].apply(lambda value: "" if _clean(value) == "" else "••••••••")
+    return shown
+
+
+def database_viewer_page():
+    """Admin-only read-only viewer for the active SQLite or PostgreSQL database."""
+    if str(user().get("role") or "") != "Admin":
+        st.error("Database Viewer is available to Admin users only.")
+        return
+
+    st.subheader("Database Viewer")
+    st.caption("Read-only inspection of the active database. This page does not edit, insert, update, or delete records.")
+
+    tables = _sqlite_table_names()
+    if not tables:
+        st.warning("No application tables were found in the active database.")
+        return
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        table_name = st.selectbox("Table", tables, key="admin_db_viewer_table")
+    columns = _sqlite_table_columns(table_name)
+    column_names = [str(col.get("name")) for col in columns if col.get("name")]
+    with c2:
+        limit = st.number_input("Rows", min_value=10, max_value=5000, value=200, step=50, key="admin_db_viewer_limit")
+    with c3:
+        sort_choice = st.selectbox(
+            "Sort",
+            ["Newest first", "Oldest first", "Default"],
+            key="admin_db_viewer_sort",
+        )
+
+    search_text = st.text_input("Search within this table", placeholder="Type to filter visible rows", key="admin_db_viewer_search")
+
+    count_df = df_query(f"SELECT COUNT(*) AS total_rows FROM {_quote_sqlite_identifier(table_name)}")
+    total_rows = int(count_df.iloc[0]["total_rows"]) if not count_df.empty else 0
+    metric_row([
+        ("Selected Table", table_name, "read-only"),
+        ("Total Rows", total_rows, "active database"),
+        ("Columns", len(column_names), "schema"),
+    ], cols=3)
+
+    st.markdown("#### Table Structure")
+    if columns:
+        structure_df = pd.DataFrame(columns)
+        display_cols = [c for c in ["cid", "name", "type", "notnull", "dflt_value", "pk"] if c in structure_df.columns]
+        dataframe(structure_df[display_cols] if display_cols else structure_df)
+    else:
+        st.info("No column metadata available for this table.")
+
+    where = ""
+    params: list[Any] = []
+    if search_text.strip() and column_names:
+        searchable = [name for name in column_names if name]
+        if searchable:
+            where_parts = [f"CAST({_quote_sqlite_identifier(col)} AS TEXT) LIKE ?" for col in searchable]
+            where = " WHERE " + " OR ".join(where_parts)
+            params = [f"%{search_text.strip()}%" for _ in searchable]
+
+    order_by = ""
+    lowered_cols = {col.lower(): col for col in column_names}
+    order_col = lowered_cols.get("id") or lowered_cols.get("created_at") or lowered_cols.get("updated_at")
+    if order_col and sort_choice != "Default":
+        direction = "DESC" if sort_choice == "Newest first" else "ASC"
+        order_by = f" ORDER BY {_quote_sqlite_identifier(order_col)} {direction}"
+
+    query = f"SELECT * FROM {_quote_sqlite_identifier(table_name)}{where}{order_by} LIMIT ?"
+    params.append(int(limit))
+    data = df_query(query, tuple(params))
+
+    st.markdown("#### Table Data")
+    if data.empty:
+        st.info("No rows matched this view.")
+    else:
+        shown = _redact_database_viewer_df(data)
+        dataframe(shown)
+        csv_download(shown, f"database_view_{table_name}")
+
+    st.info("Sensitive fields such as passwords, hashes, secrets, tokens, bank details, and payee details are masked in this viewer.")
+
+def admin_console():
+    role_header("Admin Console", "System administration, data import, configuration, users, audit and complete procurement visibility.")
+
+    # The Admin Console now uses the left sidebar for navigation instead of
+    # rendering a horizontal tab strip in the main content area.
+    section = st.session_state.get("admin_section", "System Overview")
+
+    if section == "System Overview":
+        admin_metrics()
+        admin_overview()
+    elif section == "Users":
+        user_management()
+    elif section == "Roles & Permissions":
+        roles_permissions_page()
+    elif section == "Import Center":
+        import_center()
+    elif section == "Configuration":
+        configuration_page()
+    elif section == "Backup/Export":
+        backup_export_page()
+    elif section == "Audit Logs":
+        audit_log_page(full=True)
+    elif section == "All Records":
+        all_records_page()
+    elif section == "Settings":
+        settings_page()
+    else:
+        admin_metrics()
+        admin_overview()
+
+
+def admin_metrics():
+    q = lambda sql: df_query(sql).iloc[0, 0]
+    metrics = [
+        ("Total Users", int(q("SELECT COUNT(*) FROM users")), "all accounts"),
+        ("Active Users", int(q("SELECT COUNT(*) FROM users WHERE is_active=1")), "can log in"),
+        ("Pending Approvals", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Pending Approver/MD Approval','Pending Approval')")), "requests"),
+        ("Open Requests", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status NOT IN ('Closed','Rejected','Paid')")), "active pipeline"),
+        ("Total Spend", money(q("SELECT COALESCE(SUM(amount),0) FROM expenses WHERE status='Approved'")), "approved expenses"),
+        ("Imported Documents", int(q("SELECT COUNT(*) FROM imported_legacy_documents")), "legacy archive"),
+        ("Audit Events", int(q("SELECT COUNT(*) FROM audit_logs")), "logged actions"),
+        ("Open POs", int(q("SELECT COUNT(*) FROM purchase_orders WHERE status NOT IN ('Closed','Cancelled','Paid')")), "purchase orders"),
+    ]
+    metric_row(metrics, cols=4)
+
+
+def admin_overview():
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Procurement Pipeline")
+        df = df_query("SELECT status, COUNT(*) count FROM purchase_requests GROUP BY status")
+        if not df.empty: st.bar_chart(df.set_index("status"))
+        st.subheader("Recently Imported Documents")
+        docs = df_query("SELECT id, document_type, department_project, title, total_amount, confidence, import_status FROM imported_legacy_documents ORDER BY created_at DESC LIMIT 10")
+        if not docs.empty:
+            docs["total_amount"] = docs["total_amount"].apply(money)
+            dataframe(docs)
+        else: empty_state("No imports yet", "Use the Import Center to import the PROCUREMENT PROJECT ZIP.")
+    with c2:
+        st.subheader("System Activity")
+        logs = df_query("SELECT created_at, action, entity_type, entity_id, details FROM audit_logs ORDER BY created_at DESC LIMIT 12")
+        dataframe(logs) if not logs.empty else empty_state("No audit events", "System actions will be logged here.")
+        st.subheader("Budget Risk")
+        df = budget_risk_df()
+        if not df.empty: dataframe(df)
+        else: st.success("No budget risk detected.")
+
+
+def user_management():
+    st.subheader("User Management")
+    with st.form("create_user"):
+        c1, c2, c3 = st.columns(3)
+        username = c1.text_input("Username")
+        full_name = c2.text_input("Full name")
+        role = c3.selectbox("Role", ["Admin", "Procurement Manager", "Finance", "Approver", "Auditor"])
+        password = st.text_input("Temporary password", type="password")
+        submitted = st.form_submit_button("Create User", type="primary")
+    if submitted:
+        if not username or not full_name or len(password) < 6:
+            st.error("Username, full name, and password are required.")
+        else:
+            try:
+                uid = run_insert("INSERT INTO users (username, full_name, role, password_hash, must_change_password, is_active, created_at) VALUES (?, ?, ?, ?, 1, 1, ?)", (username.strip(), full_name.strip(), role, hash_password(password), now_iso()))
+                log_audit("USER_CREATED", "User", uid, f"Role {role}", user()["id"], user()["role"])
+                st.success("User created.")
+            except Exception as exc:
+                st.error(f"Could not create user: {exc}")
+    users = df_query("SELECT id, username, full_name, role, is_active, must_change_password, last_login_at, created_at FROM users ORDER BY created_at DESC")
+    dataframe(users)
+    st.markdown("##### Account Actions")
+    if not users.empty:
+        label = st.selectbox("Select user", [f"{r.username} — {r.role}" for r in users.itertuples()])
+        username = label.split(" — ")[0]
+        selected = users[users["username"] == username].iloc[0]
+        c1, c2, c3 = st.columns(3)
+        if c1.button("Activate/Deactivate"):
+            new_status = 0 if int(selected["is_active"]) else 1
+            run_query("UPDATE users SET is_active=? WHERE id=?", (new_status, int(selected["id"])))
+            log_audit("USER_STATUS_CHANGE", "User", int(selected["id"]), f"is_active={new_status}", user()["id"], user()["role"])
+            st.rerun()
+        new_role = c2.selectbox("Assign role", ["Admin", "Procurement Manager", "Finance", "Approver", "Auditor"], key="assign_role")
+        if c2.button("Update Role"):
+            run_query("UPDATE users SET role=? WHERE id=?", (new_role, int(selected["id"])))
+            log_audit("ROLE_CHANGE", "User", int(selected["id"]), {"old": selected["role"], "new": new_role}, user()["id"], user()["role"])
+            st.rerun()
+        reset = c3.text_input("New password", type="password", key="reset_pwd")
+        if c3.button("Reset Password") and reset:
+            run_query("UPDATE users SET password_hash=?, must_change_password=1 WHERE id=?", (hash_password(reset), int(selected["id"])))
+            log_audit("PASSWORD_RESET", "User", int(selected["id"]), "Admin reset password", user()["id"], user()["role"])
+            st.success("Password reset.")
+
+
+def roles_permissions_page():
+    st.subheader("Role and Permission Management")
+    roles = df_query("SELECT * FROM roles ORDER BY name")
+    perms = df_query("SELECT * FROM permissions ORDER BY name")
+    rp = df_query("SELECT * FROM role_permissions ORDER BY role_name, permission_name")
+    c1, c2 = st.columns(2)
+    with c1: dataframe(roles)
+    with c2: dataframe(perms)
+    dataframe(rp)
+    with st.form("role_perm_form"):
+        role = st.selectbox("Role", roles["name"].tolist() if not roles.empty else [])
+        perm = st.selectbox("Permission", perms["name"].tolist() if not perms.empty else [])
+        submitted = st.form_submit_button("Grant Permission")
+    if submitted:
+        run_query("INSERT OR IGNORE INTO role_permissions (role_name, permission_name, created_at) VALUES (?, ?, ?)", (role, perm, now_iso()))
+        log_audit("PERMISSION_GRANTED", "Role", role, perm, user()["id"], user()["role"])
+        st.success("Permission granted.")
+
+
+def import_center():
+    st.subheader("Data Import Center")
+    st.caption("Import the PROCUREMENT PROJECT ZIP. The importer extracts .docx files, ignores Word lock files (~$), parses tables and creates draft purchase requests for review.")
+    bundled = bundled_legacy_zip_path()
+    c1, c2 = st.columns(2)
+    with c1:
+        if bundled.exists():
+            st.success(f"Bundled legacy ZIP found: {bundled.name}")
+            if st.button("Import Bundled PROCUREMENT PROJECT ZIP", type="primary"):
+                with st.spinner("Importing real procurement documents..."):
+                    summary = import_procurement_zip(bundled, user()["id"])
+                st.session_state["last_import_summary"] = summary
+                st.success(f"Import complete. Imported {summary['imported']}, skipped {summary['skipped']}, failed {summary['failed']}, partial {summary['partial']}.")
+        else:
+            st.warning("Bundled legacy ZIP is not present. Upload a ZIP below.")
+    with c2:
+        upload = st.file_uploader("Upload PROCUREMENT PROJECT ZIP", type=["zip"])
+        if st.button("Import Uploaded ZIP"):
+            with st.spinner("Importing uploaded ZIP..."):
+                summary = import_uploaded_zip(upload, user()["id"])
+            st.session_state["last_import_summary"] = summary
+            if "error" in summary: st.error(summary["error"])
+            else: st.success(f"Import complete. Imported {summary['imported']}, skipped {summary['skipped']}, failed {summary['failed']}.")
+    if "last_import_summary" in st.session_state:
+        st.json(st.session_state["last_import_summary"])
+    st.markdown("##### Import Logs")
+    logs = df_query("SELECT created_at, source_zip_name, original_path, action, status, message FROM document_extraction_logs ORDER BY created_at DESC LIMIT 300")
+    dataframe(logs) if not logs.empty else empty_state("No import logs", "Run an import to populate this table.")
+    st.markdown("##### Review Imported Documents")
+    document_archive(editable=True)
+
+
+def configuration_page():
+    st.subheader("Configuration")
+    t1, t2, t3 = st.tabs(["Approval Rules", "Budgets & Categories", "Departments"])
+    with t1:
+        with st.form("rule_form"):
+            c1, c2, c3, c4 = st.columns(4)
+            category = c1.selectbox("Category", EXPENSE_CATEGORIES)
+            threshold = c2.number_input("Threshold amount", min_value=0.0, step=10000.0)
+            approver = c3.selectbox("Approver Role", ["Approver", "Finance", "Admin"])
+            sourcing = c4.checkbox("Requires sourcing")
+            submitted = st.form_submit_button("Save Rule")
+        if submitted:
+            run_query("INSERT INTO approval_rules (category, threshold_amount, approver_role, requires_sourcing, requires_finance, is_active, created_at) VALUES (?, ?, ?, ?, 1, 1, ?)", (category, threshold, approver, int(sourcing), now_iso()))
+            log_audit("APPROVAL_RULE_CREATED", "ApprovalRule", category, f"Threshold {threshold}", user()["id"], user()["role"])
+            st.success("Rule saved.")
+        dataframe(df_query("SELECT * FROM approval_rules ORDER BY created_at DESC"))
+    with t2:
+        budgets_page(show_header=False)
+        st.markdown("##### Categories")
+        with st.form("cat_form"):
+            cat = st.text_input("New category")
+            if st.form_submit_button("Add Category") and cat:
+                run_query("INSERT OR IGNORE INTO categories (name, category_type, status, created_at) VALUES (?, 'Procurement', 'Active', ?)", (cat, now_iso()))
+                st.success("Category added.")
+        dataframe(df_query("SELECT name, category_type, status FROM categories ORDER BY name"))
+    with t3:
+        with st.form("dept_form"):
+            dept = st.text_input("Department / project")
+            desc = st.text_input("Description")
+            if st.form_submit_button("Add Department") and dept:
+                run_query("INSERT OR IGNORE INTO departments (name, description, status, created_at) VALUES (?, ?, 'Active', ?)", (dept, desc, now_iso()))
+                st.success("Department added.")
+        dataframe(df_query("SELECT name, description, status FROM departments ORDER BY name"))
+
+
+def backup_export_page():
+    st.subheader("Database Backup and Export")
+    if st.button("Create SQLite Backup"):
+        target = BACKUP_DIR / f"procureflow_backup_{date.today().isoformat()}_{make_ref('DB')}.db"
+        shutil.copy2(DB_PATH, target)
+        st.success(f"Backup created: {target.name}")
+        with open(target, "rb") as f:
+            st.download_button("Download Backup", f, file_name=target.name)
+    tables = ["users", "vendors", "purchase_requests", "purchase_orders", "receiving_slips", "expenses", "payments", "imported_legacy_documents", "audit_logs"]
+    selected = st.selectbox("Export table", tables)
+    df = df_query(f"SELECT * FROM {selected}")
+    dataframe(df)
+    csv_download(df, selected)
+
+
+def all_records_page():
+    tables = ["purchase_requests", "sourcing_tasks", "vendor_quotes", "purchase_orders", "receiving_slips", "invoices", "expenses", "payments", "cash_advances", "vendors", "imported_legacy_documents"]
+    table = st.selectbox("Record table", tables)
+    df = df_query(f"SELECT * FROM {table} ORDER BY id DESC LIMIT 500")
+    dataframe(df)
+    csv_download(df, table)
+
+# ---------------- Procurement Manager ----------------
+
+def procurement_workspace():
+    role_header("Procurement Workspace", "Operational command center for requests, sourcing, vendor quotes, POs, delivery tracking and procurement documents.")
+    section = st.session_state.get("procurement_section", "Operations Dashboard")
+
+    if section == "Operations Dashboard":
+        procurement_dashboard_metrics()
+        procurement_dashboard()
+    elif section == "Purchase Requests":
+        requests_page(mode="procurement")
+    elif section == "Sourcing":
+        sourcing_page()
+    elif section == "Vendor Quotes":
+        quote_page()
+    elif section == "Purchase Orders":
+        purchase_orders_page()
+    elif section == "Receiving Slips":
+        receiving_page()
+    elif section == "Vendors":
+        vendors_page()
+    elif section == "Procurement Documents":
+        document_archive(editable=True)
+    elif section == "Procurement Reports":
+        procurement_reports()
+    elif section == "Settings":
+        settings_page()
+    else:
+        procurement_dashboard_metrics()
+        procurement_dashboard()
+
+
+def procurement_dashboard_metrics():
+    q = lambda sql: df_query(sql).iloc[0, 0]
+    metrics = [
+        ("Open Requests", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status NOT IN ('Closed','Rejected','Paid')")), "pipeline"),
+        ("Needs Review", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status='Submitted'")), "new submissions"),
+        ("Requires Sourcing", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Requires Sourcing','Vendor Quote Collection')")), "supplier comparison"),
+        ("POs to Create", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status='Approved' AND linked_po_id IS NULL")), "approved requests"),
+        ("Pending Delivery", int(q("SELECT COUNT(*) FROM purchase_orders WHERE receiving_status IN ('Pending Receipt','Partially Received')")), "awaiting goods"),
+        ("Active Vendors", int(q("SELECT COUNT(*) FROM vendors WHERE status='Active'")), "supplier base"),
+    ]
+    metric_row(metrics, cols=3)
+
+
+def procurement_dashboard():
+    quick_action_bar(["New Purchase Request", "Create Sourcing Task", "Create Vendor", "Create PO", "Record Receiving Slip", "Import Documents"])
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Requests Requiring Procurement Action")
+        df = df_query("SELECT request_no, department_project, category, estimated_amount, status, priority FROM purchase_requests WHERE status IN ('Submitted','Procurement Review','Requires Sourcing','Vendor Quote Collection','Approved') ORDER BY updated_at DESC LIMIT 20")
+        if not df.empty:
+            df["estimated_amount"] = df["estimated_amount"].apply(money)
+            dataframe(df)
+        else: st.success("No procurement actions pending.")
+    with c2:
+        st.subheader("Procurement Pipeline by Status")
+        df = df_query("SELECT status, COUNT(*) count FROM purchase_requests GROUP BY status")
+        if not df.empty: st.bar_chart(df.set_index("status"))
+    st.subheader("Vendor Performance")
+    vendor_performance_table()
+
+
+def quick_action_bar(labels: list[str]):
+    cols = st.columns(min(len(labels), 4))
+    for i, label in enumerate(labels):
+        if cols[i % len(cols)].button(label, use_container_width=True, key=f"quick_{label}"):
+            st.toast(f"Open the relevant tab: {label}")
+
+# ---------------- Finance ----------------
+
+def finance_workspace():
+    role_header("Finance Workspace", "Budgets, invoices, payments, expenses, cash advances, reconciliation and financial controls.")
+    section = st.session_state.get("finance_section", "Financial Dashboard")
+
+    if section == "Financial Dashboard":
+        finance_metrics()
+        finance_dashboard()
+    elif section == "Expenses":
+        expenses_page()
+    elif section == "Invoices":
+        invoices_page()
+    elif section == "Payments":
+        payments_page()
+    elif section == "Cash Advances":
+        cash_advances_page()
+    elif section == "Budgets":
+        budgets_page()
+    elif section == "Vendor Payment Records":
+        vendor_payment_records()
+    elif section == "Reconciliation":
+        reconciliation_page()
+    elif section == "Financial Reports":
+        finance_reports()
+    elif section == "Settings":
+        settings_page()
+    else:
+        finance_metrics()
+        finance_dashboard()
+
+
+def finance_metrics():
+    q = lambda sql: df_query(sql).iloc[0, 0]
+    advances = df_query("SELECT ca.amount_collected, COALESCE(SUM(ae.amount),0) spent FROM cash_advances ca LEFT JOIN advance_expenses ae ON ca.id=ae.advance_id WHERE ca.status='Approved' GROUP BY ca.id")
+    outstanding = 0 if advances.empty else (advances["amount_collected"] - advances["spent"]).clip(lower=0).sum()
+    metrics = [
+        ("Pending Payment Approvals", int(q("SELECT COUNT(*) FROM payments WHERE status='Pending Approval'")), "payments"),
+        ("Outstanding Invoices", int(q("SELECT COUNT(*) FROM invoices WHERE status NOT IN ('Paid','Rejected')")), "invoice queue"),
+        ("POs Awaiting Payment", int(q("SELECT COUNT(*) FROM purchase_orders WHERE status IN ('Fully Received','Invoiced') AND payment_status!='Paid'")), "ready for finance"),
+        ("Cash Advances Open", money(outstanding), "unretired balance"),
+        ("Duplicate Warnings", int(q("SELECT COUNT(*) FROM expenses WHERE duplicate_warning=1")), "review required"),
+        ("Spend This Month", money(q(f"SELECT COALESCE(SUM(amount),0) FROM expenses WHERE status='Approved' AND substr(expense_date,1,7)='{month_key()}'")), month_key()),
+    ]
+    metric_row(metrics, cols=3)
+
+
+def finance_dashboard():
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Budget Utilization")
+        df = budget_utilization_df()
+        dataframe(df) if not df.empty else empty_state("No budget data", "Create budgets to monitor utilization.")
+    with c2:
+        st.subheader("Invoice-to-PO Matching Results")
+        df = df_query("SELECT invoice_no, total_amount, match_status, mismatch_reasons, status FROM invoices ORDER BY created_at DESC LIMIT 20")
+        if not df.empty:
+            df["total_amount"] = df["total_amount"].apply(money)
+            dataframe(df)
+        else: st.info("No invoices uploaded.")
+    st.subheader("Spend by Category")
+    df = df_query("SELECT category, SUM(amount) total FROM expenses WHERE status='Approved' GROUP BY category")
+    if not df.empty: st.bar_chart(df.set_index("category"))
+
+# ---------------- Executive Approver ----------------
+
+def executive_workspace():
+    role_header("Executive Approval Workspace", "Decision-focused approvals for high-value requests, sourcing recommendations, purchase orders, payments and budget exceptions.")
+    section = st.session_state.get("executive_section", "Approval Dashboard")
+
+    if section == "Approval Dashboard":
+        executive_metrics()
+        executive_dashboard()
+    elif section == "Pending Approvals":
+        pending_approval_page()
+    elif section == "Quote Comparison":
+        quote_comparison_decision_page()
+    elif section == "PO Approval":
+        po_approval_page()
+    elif section == "Payment Approval":
+        payment_approval_page()
+    elif section == "Executive Reports":
+        executive_reports()
+    elif section == "Settings":
+        settings_page()
+    else:
+        executive_metrics()
+        executive_dashboard()
+
+
+def executive_metrics():
+    q = lambda sql: df_query(sql).iloc[0, 0]
+    metrics = [
+        ("Requests Awaiting Approval", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Pending Approver/MD Approval','Pending Approval')")), "decisions"),
+        ("High-Value Requests", int(q("SELECT COUNT(*) FROM purchase_requests WHERE estimated_amount>=500000 AND status NOT IN ('Closed','Rejected')")), "risk focus"),
+        ("POs Awaiting Approval", int(q("SELECT COUNT(*) FROM purchase_orders WHERE status='Pending Approval'")), "purchase orders"),
+        ("Payments Awaiting Approval", int(q("SELECT COUNT(*) FROM payments WHERE status='Pending Approval'")), "payments"),
+        ("Spend This Month", money(q(f"SELECT COALESCE(SUM(amount),0) FROM expenses WHERE status='Approved' AND substr(expense_date,1,7)='{month_key()}'")), month_key()),
+        ("Budget Exceptions", int(q("SELECT COUNT(*) FROM budgets WHERE override_required=1")), "requires attention"),
+    ]
+    metric_row(metrics, cols=3)
+
+
+def executive_dashboard():
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Immediate Decisions")
+        df = df_query("SELECT id, request_no, department_project, category, estimated_amount, priority, status FROM purchase_requests WHERE status IN ('Pending Approver/MD Approval','Pending Approval') ORDER BY estimated_amount DESC")
+        if not df.empty:
+            df["estimated_amount"] = df["estimated_amount"].apply(money)
+            dataframe(df)
+        else: st.success("No requests awaiting approval.")
+    with c2:
+        st.subheader("Top Vendors by Spend")
+        top = df_query("SELECT name, total_spend, completed_orders, rating FROM vendors ORDER BY total_spend DESC LIMIT 10")
+        if not top.empty:
+            top["total_spend"] = top["total_spend"].apply(money)
+            dataframe(top)
+    st.subheader("Procurement Risk Alerts")
+    alerts = []
+    for label, sql in [("Missing supporting documents", "SELECT COUNT(*) c FROM purchase_requests WHERE attachments_json IS NULL OR attachments_json='[]'"), ("Duplicate expense warnings", "SELECT COUNT(*) c FROM expenses WHERE duplicate_warning=1"), ("Unmatched invoices", "SELECT COUNT(*) c FROM invoices WHERE match_status='Mismatch'"), ("Budget risk categories", "SELECT COUNT(*) c FROM budgets WHERE override_required=1")]:
+        c = int(df_query(sql).iloc[0]["c"])
+        if c: alerts.append((label, c))
+    if alerts:
+        for label, c in alerts: st.warning(f"{label}: {c}")
+    else: st.success("No major risk alerts currently flagged.")
+
+# ---------------- Audit Workspace ----------------
+
+def audit_workspace():
+    role_header("Audit & Compliance Workspace", "Read-only audit trail, imported source documents, approval history, vendor selection and compliance review.")
+    section = st.session_state.get("audit_section", "Audit Dashboard")
+
+    if section == "Audit Dashboard":
+        audit_metrics()
+        audit_dashboard()
+    elif section == "Procurement Records":
+        all_records_page()
+    elif section == "Document Archive":
+        document_archive(editable=False)
+    elif section == "Approval Trails":
+        approval_trails_page()
+    elif section == "Vendor History":
+        vendor_history_page()
+    elif section == "Expense Review":
+        expense_review_page()
+    elif section == "Compliance Reports":
+        compliance_reports()
+    elif section == "Settings":
+        settings_page()
+    else:
+        audit_metrics()
+        audit_dashboard()
+
+
+def audit_metrics():
+    q = lambda sql: df_query(sql).iloc[0, 0]
+    metrics = [
+        ("Audit Events", int(q("SELECT COUNT(*) FROM audit_logs")), "all time"),
+        ("Imported Documents", int(q("SELECT COUNT(*) FROM imported_legacy_documents")), "source archive"),
+        ("Duplicate Warnings", int(q("SELECT COUNT(*) FROM expenses WHERE duplicate_warning=1")), "expenses"),
+        ("Missing Docs", int(q("SELECT COUNT(*) FROM purchase_requests WHERE attachments_json IS NULL OR attachments_json='[]'")), "requests"),
+        ("Rejected Requests", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status='Rejected'")), "review"),
+        ("Vendor Bank Changes", int(q("SELECT COUNT(*) FROM audit_logs WHERE action='VENDOR_BANK_DETAIL_CHANGE'")), "sensitive"),
+    ]
+    metric_row(metrics, cols=3)
+
+
+def audit_dashboard():
+    c1, c2 = st.columns(2)
+    with c1:
+        audit_log_page(full=False)
+    with c2:
+        st.subheader("Missing Document Alerts")
+        df = df_query("SELECT request_no, department_project, category, estimated_amount, status FROM purchase_requests WHERE attachments_json IS NULL OR attachments_json='[]' ORDER BY created_at DESC LIMIT 20")
+        if not df.empty:
+            df["estimated_amount"] = df["estimated_amount"].apply(money)
+            dataframe(df)
+        else: st.success("No missing supporting document alerts.")
+
+# ---------------- Shared Procurement Modules ----------------
+
+def requests_page(mode="procurement"):
+    t1, t2, t3 = st.tabs(["Create Request", "Request Register", "Imported Draft Review"])
+    with t1: create_request_form()
+    with t2: request_register(actions=True)
+    with t3: imported_draft_review()
+
+
+def create_request_form():
+    if not has_permission("create_request"):
+        st.info("Your role can view requests but cannot create requests.")
+        return
+    with st.form("request_form"):
+        c1, c2, c3 = st.columns(3)
+        dept = c1.selectbox("Department / Project", department_options())
+        req_date = c2.date_input("Request date", date.today())
+        req_required = c3.date_input("Required date", date.today() + timedelta(days=7))
+        c4, c5, c6 = st.columns(3)
+        cat = c4.selectbox("Category", EXPENSE_CATEGORIES)
+        priority = c5.selectbox("Priority", PRIORITIES, index=1)
+        vendor_pref = c6.text_input("Vendor preference")
+        justification = st.text_area("Business justification")
+        attachment = st.file_uploader("Supporting document", type=["docx", "pdf", "jpg", "jpeg", "png"])
+        item_count = st.number_input("Line items", 1, 15, 1)
+        items, estimated = [], 0.0
+        for i in range(int(item_count)):
+            c1, c2, c3, c4 = st.columns([1.4, .7, .9, 1])
+            item = c1.text_input("Item", key=f"req_item_{i}")
+            qty = c2.number_input("Qty", 0.0, value=1.0, step=1.0, key=f"req_qty_{i}")
+            unit = c3.number_input("Unit price", 0.0, step=1000.0, key=f"req_unit_{i}")
+            icat = c4.selectbox("Category", EXPENSE_CATEGORIES, index=EXPENSE_CATEGORIES.index(cat), key=f"req_cat_{i}")
+            total = qty * unit
+            estimated += total
+            items.append((item, qty, unit, total, icat))
+        submitted = st.form_submit_button("Create Draft Request", type="primary")
+    if submitted:
+        if not justification or not any(i[0] for i in items):
+            st.error("Business justification and at least one item are required.")
+            return
+        path, _ = save_upload(attachment, "requests")
+        req_no = make_ref("PR")
+        req_id = run_insert("""
+            INSERT INTO purchase_requests (request_no, requested_by, department_project, request_date, required_date, category, justification, priority, estimated_amount, vendor_preference, status, attachments_json, notes, approval_history_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, '', '[]', ?, ?)
+        """, (req_no, user()["id"], dept, req_date.isoformat(), req_required.isoformat(), cat, justification, priority, estimated, vendor_pref, json_dump([path] if path else []), now_iso(), now_iso()))
+        for item, qty, unit, total, icat in items:
+            if item:
+                run_query("INSERT INTO purchase_request_items (request_id, item_name, description, quantity, unit_price, total, category, suggested_vendor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (req_id, item, item, qty, unit, total, icat, vendor_pref, now_iso()))
+        add_workflow_event("Purchase Request", req_id, "Created", "Draft", req_no, user()["id"])
+        _rerun_success(f"Created {req_no}")
+
+
+def request_register(actions=True, approver_mode=False):
+    c1, c2, c3 = st.columns(3)
+    status = c1.selectbox("Status", ["All"] + PR_STATUSES, key=f"status_{approver_mode}")
+    dept = c2.selectbox("Department", ["All"] + department_options(), key=f"dept_{approver_mode}")
+    term = c3.text_input("Search", key=f"req_search_{approver_mode}")
+    sql = """
+        SELECT pr.id, pr.request_no, pr.department_project, pr.category, pr.priority, pr.estimated_amount, pr.status, pr.source_type, pr.import_confidence, u.full_name requested_by, pr.justification
+        FROM purchase_requests pr LEFT JOIN users u ON pr.requested_by=u.id WHERE 1=1
+    """
+    params = []
+    if status != "All": sql += " AND pr.status=?"; params.append(status)
+    if dept != "All": sql += " AND pr.department_project=?"; params.append(dept)
+    if term:
+        sql += " AND (pr.request_no LIKE ? OR pr.justification LIKE ? OR pr.category LIKE ?)"; params += [f"%{term}%"]*3
+    sql += " ORDER BY pr.updated_at DESC, pr.created_at DESC"
+    df = df_query(sql, params)
+    if df.empty:
+        empty_state("No purchase requests", "Create or import purchase requests to begin workflow.")
+        return
+    display = df.drop(columns=["id", "justification"]).copy()
+    display["estimated_amount"] = display["estimated_amount"].apply(money)
+    display["status"] = display["status"].apply(lambda x: badge(x))
+    st.markdown(display.to_html(escape=False, index=False), unsafe_allow_html=True)
+    selected = st.selectbox("Open request", df["request_no"].tolist(), key=f"open_req_{approver_mode}")
+    pr_id = int(df[df["request_no"] == selected].iloc[0]["id"])
+    request_detail(pr_id, actions=actions, key_scope=f"request_register_{approver_mode}")
+    csv_download(df, "purchase_requests")
+
+
+def request_detail(pr_id: int, actions=True, key_scope: str | None = None):
+    pr = df_query("SELECT pr.*, u.full_name requested_by_name FROM purchase_requests pr LEFT JOIN users u ON pr.requested_by=u.id WHERE pr.id=?", (pr_id,)).iloc[0]
+    with st.container(border=True):
+        st.markdown(f"### {pr['request_no']} {badge(pr['status'])}", unsafe_allow_html=True)
+        workflow_progress(pr["status"], _request_workflow_steps_for_status(pr["status"]))
+        metric_row([("Amount", money(pr["estimated_amount"]), None), ("Priority", pr["priority"], None), ("Department", pr["department_project"], None), ("Source", pr["source_type"], None)], cols=4)
+        st.write(f"**Justification:** {pr['justification']}")
+        st.write(f"**Requested by:** {pr['requested_by_name']}")
+    items = df_query("SELECT item_name, quantity, unit_price, total, category, suggested_vendor FROM purchase_request_items WHERE request_id=?", (pr_id,))
+    if not items.empty:
+        show = items.copy(); show["unit_price"] = show["unit_price"].apply(money); show["total"] = show["total"].apply(money); dataframe(show)
+    scope = key_scope or f"request_detail_{pr_id}"
+    record_collaboration("Purchase Request", pr_id, key_scope=scope)
+    if actions:
+        request_actions(pr_id, pr, key_scope=scope)
+
+
+def request_actions(pr_id: int, pr, key_scope: str | None = None):
+    scope = key_scope or "default"
+    prefix = f"{scope}_pr_{pr_id}"
+    cols = st.columns(6)
+    if pr["status"] == "Draft" and has_permission("submit_request") and cols[0].button("Submit", key=f"sub_{prefix}"):
+        update_request_status(pr_id, "Submitted", "Submitted", "Request submitted for procurement review")
+    if pr["status"] == "Submitted" and has_permission("procurement_review") and cols[1].button("Start Review", key=f"rev_{prefix}"):
+        update_request_status(pr_id, "Procurement Review", "Reviewed", "Procurement review started")
+    if pr["status"] in ["Submitted", "Procurement Review"] and has_permission("create_sourcing") and cols[2].button("Requires Sourcing", key=f"need_src_{prefix}"):
+        update_request_status(pr_id, "Requires Sourcing", "Sourcing Required", "Supplier comparison required")
+        create_sourcing_for_request(pr_id)
+    if pr["status"] in ["Submitted", "Procurement Review", "Vendor Recommendation"] and has_permission("procurement_review") and cols[3].button("Send to MD", key=f"to_md_{prefix}"):
+        update_request_status(pr_id, "Pending Approver/MD Approval", "Sent for Approval", "Awaiting MD approval")
+        notify(None, "Approver", "Request pending approval", f"{pr['request_no']} requires approval", "Purchase Request", pr_id)
+    if pr["status"] in ["Pending Approver/MD Approval", "Pending Approval"] and has_permission("approve_request") and cols[4].button("Approve", key=f"app_req_{prefix}"):
+        approval_action("Purchase Request", pr_id, pr["status"], "Approved", "Approved")
+    if pr["status"] in ["Pending Approver/MD Approval", "Pending Approval"] and has_permission("reject_request"):
+        reason = st.text_input("Reject/request more information reason", key=f"reason_{prefix}")
+        if cols[5].button("Reject", key=f"rej_req_{prefix}"):
+            approval_action("Purchase Request", pr_id, pr["status"], "Rejected", "Rejected", reason)
+
+
+def update_request_status(pr_id: int, status: str, event: str, note: str):
+    run_query("UPDATE purchase_requests SET status=?, updated_at=? WHERE id=?", (status, now_iso(), pr_id))
+    add_workflow_event("Purchase Request", pr_id, event, status, note, user()["id"])
+    _rerun_success(f"{event} completed.")
+
+
+def approval_action(entity: str, entity_id: int, old_status: str, new_status: str, action: str, reason: str = ""):
+    table = "purchase_requests" if entity == "Purchase Request" else "purchase_orders" if entity == "Purchase Order" else "payments"
+    run_query(f"UPDATE {table} SET status=?, updated_at=? WHERE id=?", (new_status, now_iso(), entity_id))
+    run_query("INSERT INTO approval_history (entity_type, entity_id, action, status_before, status_after, reason, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (entity, entity_id, action, old_status, new_status, reason, user()["id"], now_iso()))
+    add_workflow_event(entity, entity_id, action, new_status, reason, user()["id"])
+    _rerun_success(f"{entity} {action.lower()}.")
+
+
+def imported_draft_review():
+    docs = df_query("SELECT id, title, document_type, department_project, total_amount, confidence, import_status, linked_request_id FROM imported_legacy_documents ORDER BY created_at DESC LIMIT 300")
+    if docs.empty:
+        empty_state("No imported drafts", "Admin or Procurement Manager can import the PROCUREMENT PROJECT ZIP.")
+        return
+    show = docs.copy(); show["total_amount"] = show["total_amount"].apply(money); dataframe(show)
+    selected = st.selectbox("Review imported document", docs["title"].tolist())
+    doc = docs[docs["title"] == selected].iloc[0]
+    if pd.notna(doc["linked_request_id"]):
+        request_detail(
+            int(doc["linked_request_id"]),
+            actions=True,
+            key_scope=f"imported_draft_doc_{int(doc['id'])}"
+        )
+    if has_permission("procurement_review") and st.button("Mark Imported Document Reviewed", key=f"mark_imported_doc_reviewed_{int(doc['id'])}"):
+        run_query("UPDATE imported_legacy_documents SET import_status='Reviewed', updated_at=? WHERE id=?", (now_iso(), int(doc["id"])))
+        log_audit("IMPORTED_DOCUMENT_REVIEWED", "Imported Document", int(doc["id"]), selected, user()["id"], user()["role"])
+        st.rerun()
+
+# Sourcing and quotes
+
+def create_sourcing_for_request(request_id: int):
+    """Create or reopen the sourcing task for a request and keep it in the PM queue."""
+    existing = df_query("SELECT id FROM sourcing_tasks WHERE request_id=?", (request_id,))
+    pr_rows = df_query("SELECT request_no, justification, status FROM purchase_requests WHERE id=?", (request_id,))
+    if pr_rows.empty:
+        st.error("Request not found for sourcing.")
+        return None
+    pr = pr_rows.iloc[0]
+    if not existing.empty:
+        sid = int(existing.iloc[0]["id"])
+    else:
+        src_no = make_ref("SRC")
+        sid = run_insert(
+            "INSERT INTO sourcing_tasks (sourcing_no, request_id, required_item_service, status, created_at, updated_at) VALUES (?, ?, ?, 'Open', ?, ?)",
+            (src_no, request_id, pr["justification"], now_iso(), now_iso()),
+        )
+        add_workflow_event("Sourcing Task", sid, "Created", "Open", src_no, user()["id"])
+    run_query("UPDATE purchase_requests SET linked_sourcing_task_id=?, next_role='procurement_manager', updated_at=? WHERE id=?", (sid, now_iso(), request_id))
+    if str(pr["status"]) not in ["Vendor Quote Collection", "Vendor Recommendation"]:
+        transition_request_status(
+            request_id,
+            "Vendor Quote Collection",
+            "Sourcing Required",
+            "Procurement Manager opened vendor quote collection for this request.",
+            user()["id"],
+            user()["role"],
+        )
+    create_notification(None, "Procurement Manager", "Sourcing task ready", f"{pr['request_no']} is ready for vendor quote collection.", "Sourcing Task", sid, "Important", ["in_app"], action_label="Open Sourcing")
+    return sid
+
+def sourcing_page():
+    st.subheader("Sourcing Tasks")
+    df = df_query("SELECT st.id, st.sourcing_no, pr.request_no, pr.category, pr.estimated_amount, st.status, st.approval_status, v.name recommended_vendor FROM sourcing_tasks st JOIN purchase_requests pr ON st.request_id=pr.id LEFT JOIN vendors v ON st.recommended_vendor_id=v.id ORDER BY st.created_at DESC")
+    if df.empty:
+        empty_state("No sourcing tasks", "Mark a request as requiring sourcing to create a supplier comparison task.")
+        return
+    show = df.copy(); show["estimated_amount"] = show["estimated_amount"].apply(money); dataframe(show)
+    selected = st.selectbox("Open sourcing task", df["sourcing_no"].tolist())
+    sid = int(df[df["sourcing_no"] == selected].iloc[0]["id"])
+    sourcing_detail(sid)
+
+
+def sourcing_detail(sid: int):
+    task = df_query("SELECT st.*, pr.request_no FROM sourcing_tasks st JOIN purchase_requests pr ON st.request_id=pr.id WHERE st.id=?", (sid,)).iloc[0]
+    st.markdown(f"### {task['sourcing_no']} {badge(task['status'])}", unsafe_allow_html=True)
+    st.write(f"Linked Request: **{task['request_no']}**")
+    if has_permission("manage_quotes"):
+        quote_form(sid)
+    quote_comparison(sid, allow_recommend=has_permission("recommend_vendor"))
+    record_collaboration("Sourcing Task", sid)
+
+
+def quote_page():
+    sourcing_page()
+
+
+def quote_form(sid: int):
+    with st.expander("Add Vendor Quote"):
+        with st.form(f"quote_{sid}"):
+            vendors = vendor_options(True)
+            c1, c2, c3 = st.columns(3)
+            vname = c1.selectbox("Vendor", list(vendors.keys()), key=f"qv_{sid}")
+            manual_vendor = c1.text_input("Or new/manual vendor", key=f"manual_v_{sid}")
+            amount = c2.number_input("Quoted amount", min_value=0.0, step=1000.0, key=f"quote_amt_{sid}")
+            delivery = c3.number_input("Delivery days", min_value=0.0, value=7.0, step=1.0, key=f"quote_del_{sid}")
+            terms = st.text_input("Payment terms")
+            warranty = st.text_input("Warranty / guarantee")
+            rating = st.slider("Vendor rating", 1, 5, 3, key=f"rating_{sid}")
+            notes = st.text_area("Notes")
+            attachment = st.file_uploader("Attachment", type=["pdf", "docx", "jpg", "jpeg", "png"], key=f"quote_att_{sid}")
+            submitted = st.form_submit_button("Save Quote")
+        if submitted:
+            path, _ = save_upload(attachment, "quotes")
+            final_vendor = manual_vendor.strip() or (vname if vendors[vname] else "")
+            run_query("""
+                INSERT INTO vendor_quotes (sourcing_task_id, vendor_id, vendor_name, quoted_amount, delivery_time_days, payment_terms, warranty, vendor_rating, notes, attachment_path, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (sid, vendors[vname], final_vendor, amount, delivery, terms, warranty, rating, notes, path, now_iso()))
+            run_query("UPDATE sourcing_tasks SET status='Collecting Quotes', updated_at=? WHERE id=?", (now_iso(), sid))
+            add_workflow_event("Sourcing Task", sid, "Quote Added", "Collecting Quotes", final_vendor, user()["id"])
+            st.rerun()
+
+
+def quote_comparison(sid: int, allow_recommend=False):
+    quotes = df_query("SELECT vq.*, COALESCE(v.name, vq.vendor_name) vendor FROM vendor_quotes vq LEFT JOIN vendors v ON vq.vendor_id=v.id WHERE sourcing_task_id=?", (sid,))
+    if quotes.empty:
+        st.info("No quotes captured yet.")
+        return
+    q = quotes.copy()
+    max_amt = max(float(q["quoted_amount"].max()), 1)
+    max_del = max(float(q["delivery_time_days"].max()), 1)
+    # Normalize PostgreSQL NUMERIC/Decimal values for pandas scoring.
+    q["quoted_amount"] = pd.to_numeric(
+        q["quoted_amount"].astype(str), errors="coerce"
+    ).fillna(0.0).astype("float64")
+
+    q["delivery_time_days"] = pd.to_numeric(
+        q["delivery_time_days"].astype(str), errors="coerce"
+    ).fillna(0.0).astype("float64")
+
+    q["vendor_rating"] = pd.to_numeric(
+        q["vendor_rating"].astype(str), errors="coerce"
+    ).fillna(0.0).astype("float64")
+
+    q["score"] = ((1 - q["quoted_amount"] / max_amt) * 45 + (1 - q["delivery_time_days"] / max_del) * 25 + (q["vendor_rating"] / 5) * 30).round(1)
+    lowest = q.loc[q["quoted_amount"].idxmin()]
+    fastest = q.loc[q["delivery_time_days"].idxmin()]
+    best = q.loc[q["vendor_rating"].idxmax()]
+    rec = q.loc[q["score"].idxmax()]
+    metric_row([("Lowest Price", lowest["vendor"], money(lowest["quoted_amount"])), ("Fastest Delivery", fastest["vendor"], f"{fastest['delivery_time_days']} days"), ("Best Rated", best["vendor"], f"{best['vendor_rating']}/5"), ("Recommended", rec["vendor"], f"Score {rec['score']}")], cols=4)
+    display = q[["vendor", "quoted_amount", "delivery_time_days", "payment_terms", "warranty", "vendor_rating", "score", "notes"]].copy()
+    display["quoted_amount"] = display["quoted_amount"].apply(money)
+    dataframe(display)
+    if allow_recommend and st.button("Recommend Highest-Scoring Vendor", key=f"rec_{sid}"):
+        run_query("UPDATE vendor_quotes SET score=?, is_recommended=CASE WHEN id=? THEN 1 ELSE 0 END WHERE sourcing_task_id=?", (float(rec["score"]), int(rec["id"]), sid))
+        run_query("UPDATE sourcing_tasks SET recommended_vendor_id=?, reason_for_recommendation=?, status='Vendor Recommendation', approval_status='Recommended', updated_at=? WHERE id=?", (int(rec["vendor_id"]) if pd.notna(rec["vendor_id"]) else None, f"Highest weighted score: {rec['score']}", now_iso(), sid))
+        req = df_query("SELECT request_id FROM sourcing_tasks WHERE id=?", (sid,)).iloc[0]["request_id"]
+        run_query("UPDATE purchase_requests SET status='Vendor Recommendation', next_role='procurement_manager', updated_at=? WHERE id=?", (now_iso(), int(req)))
+        add_workflow_event("Sourcing Task", sid, "Vendor Recommended", "Vendor Recommendation", rec["vendor"], user()["id"])
+        create_notification(None, "Procurement Manager", "Vendor recommendation ready", f"Recommended vendor: {rec['vendor']}. Submit the recommendation to Approver/Admin when ready.", "Sourcing Task", sid, "Important", ["in_app"], action_label="Open Vendor Recommendation")
+        create_notification(None, "Admin", "Vendor recommendation prepared", f"Recommended vendor: {rec['vendor']}.", "Sourcing Task", sid, "Normal", ["in_app"])
+        st.rerun()
+
+# Purchase Orders
+
+def purchase_orders_page():
+    t1, t2 = st.tabs(["Create PO", "PO Register"])
+    with t1: create_po_form()
+    with t2: po_register(actions=True)
+
+
+def create_po_form():
+    if not has_permission("create_po"):
+        st.info("Your role cannot create purchase orders.")
+        return
+    approved = df_query("SELECT id, request_no, estimated_amount FROM purchase_requests WHERE status='Approved' AND linked_po_id IS NULL ORDER BY updated_at DESC")
+    if approved.empty:
+        st.info("No approved requests awaiting PO creation.")
+        return
+    with st.form("po_form"):
+        req_label = st.selectbox("Approved request", [f"{r.request_no} — {money(r.estimated_amount)}" for r in approved.itertuples()])
+        req_id = int(approved[approved["request_no"] == req_label.split(" — ")[0]].iloc[0]["id"])
+        vendors = vendor_options(False)
+        vname = st.selectbox("Vendor", list(vendors.keys()))
+        c1, c2 = st.columns(2)
+        po_date = c1.date_input("PO date", date.today())
+        expected = c2.date_input("Expected delivery date", date.today() + timedelta(days=7))
+        submitted = st.form_submit_button("Create PO", type="primary")
+    if submitted:
+        items = df_query("SELECT item_name, description, quantity, unit_price, total, category FROM purchase_request_items WHERE request_id=?", (req_id,))
+        total = float(items["total"].sum()) if not items.empty else 0.0
+        po_no = make_ref("PO")
+        po_id = run_insert("INSERT INTO purchase_orders (po_no, request_id, vendor_id, po_date, expected_delivery_date, status, total_amount, payment_status, receiving_status, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'Draft', ?, 'Unpaid', 'Pending Receipt', ?, ?, ?)", (po_no, req_id, vendors[vname], po_date.isoformat(), expected.isoformat(), total, user()["id"], now_iso(), now_iso()))
+        for _, it in items.iterrows():
+            run_query("INSERT INTO purchase_order_items (po_id, item_name, description, quantity, unit_price, total, category, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (po_id, it["item_name"], it["description"], it["quantity"], it["unit_price"], it["total"], it["category"], now_iso()))
+        run_query("UPDATE purchase_requests SET linked_po_id=?, status='PO Created', updated_at=? WHERE id=?", (po_id, now_iso(), req_id))
+        add_workflow_event("Purchase Order", po_id, "Created", "Draft", po_no, user()["id"])
+        st.success(f"Created PO {po_no}")
+        st.rerun()
+
+
+def po_register(actions=True):
+    df = df_query("SELECT po.id, po.po_no, pr.request_no, v.name vendor, po.po_date, po.expected_delivery_date, po.status, po.total_amount, po.payment_status, po.receiving_status FROM purchase_orders po LEFT JOIN purchase_requests pr ON po.request_id=pr.id LEFT JOIN vendors v ON po.vendor_id=v.id ORDER BY po.created_at DESC")
+    if df.empty:
+        empty_state("No purchase orders", "Create POs from approved requests.")
+        return
+    show = df.drop(columns=["id"]).copy(); show["total_amount"] = show["total_amount"].apply(money); dataframe(show)
+    selected = st.selectbox("Open PO", df["po_no"].tolist(), key="open_po")
+    po_id = int(df[df["po_no"] == selected].iloc[0]["id"])
+    po_detail(po_id, actions)
+    csv_download(df, "purchase_orders")
+
+
+def po_detail(po_id: int, actions=True):
+    po = df_query("SELECT po.*, v.name vendor FROM purchase_orders po LEFT JOIN vendors v ON po.vendor_id=v.id WHERE po.id=?", (po_id,)).iloc[0]
+    st.markdown(f"### {po['po_no']} {badge(po['status'])}", unsafe_allow_html=True)
+    workflow_progress(po["status"], PO_STATUSES)
+    metric_row([("Vendor", po["vendor"], None), ("Total", money(po["total_amount"]), None), ("Payment", po["payment_status"], None), ("Receiving", po["receiving_status"], None)], cols=4)
+    items = df_query("SELECT item_name, quantity, unit_price, total, category FROM purchase_order_items WHERE po_id=?", (po_id,))
+    if not items.empty:
+        show=items.copy(); show["unit_price"]=show["unit_price"].apply(money); show["total"]=show["total"].apply(money); dataframe(show)
+    record_collaboration("Purchase Order", po_id)
+    if actions:
+        c1, c2, c3 = st.columns(3)
+        if po["status"] == "Draft" and has_permission("create_po") and c1.button("Send for PO Approval", key=f"po_send_{po_id}"):
+            run_query("UPDATE purchase_orders SET status='Pending Approval', updated_at=? WHERE id=?", (now_iso(), po_id))
+            add_workflow_event("Purchase Order", po_id, "Submitted for Approval", "Pending Approval", "PO approval requested", user()["id"])
+            notify(None, "Approver", "PO pending approval", f"{po['po_no']} requires approval", "Purchase Order", po_id)
+            st.rerun()
+        if po["status"] == "Pending Approval" and has_permission("approve_po") and c2.button("Approve PO", key=f"po_app_{po_id}"):
+            run_query("UPDATE purchase_orders SET status='Approved', approved_by=?, updated_at=? WHERE id=?", (user()["id"], now_iso(), po_id))
+            add_workflow_event("Purchase Order", po_id, "Approved", "Approved", "PO approved", user()["id"])
+            st.rerun()
+        if po["status"] == "Approved" and has_permission("create_po") and c3.button("Mark Sent to Vendor", key=f"po_vendor_{po_id}"):
+            run_query("UPDATE purchase_orders SET status='Sent to Vendor', receiving_status='Pending Receipt', sent_to_vendor_date=?, updated_at=? WHERE id=?", (date.today().isoformat(), now_iso(), po_id))
+            add_workflow_event("Purchase Order", po_id, "Sent to Vendor", "Sent to Vendor", "PO sent", user()["id"])
+            st.rerun()
+
+# Receiving
+
+def receiving_page():
+    t1, t2 = st.tabs(["Record Receiving Slip", "Receiving Register"])
+    with t1: create_receiving_form()
+    with t2: receiving_register()
+
+
+def create_receiving_form():
+    if not has_permission("receive_goods"):
+        st.info("Your role cannot record receiving slips.")
+        return
+    pos = df_query("SELECT po.id, po.po_no, v.name vendor, po.vendor_id FROM purchase_orders po LEFT JOIN vendors v ON po.vendor_id=v.id WHERE po.status IN ('Approved','Sent to Vendor','Awaiting Delivery','Partially Received') ORDER BY po.created_at DESC")
+    if pos.empty:
+        st.info("No approved/sent POs available for receiving.")
+        return
+    label = st.selectbox("PO", [f"{r.po_no} — {r.vendor}" for r in pos.itertuples()])
+    po = pos[pos["po_no"] == label.split(" — ")[0]].iloc[0]
+    items = df_query("SELECT id, item_name, quantity FROM purchase_order_items WHERE po_id=?", (int(po["id"]),))
+    with st.form("recv_form"):
+        c1, c2, c3 = st.columns(3)
+        recv_date = c1.date_input("Date received", date.today())
+        delivery_note = c2.text_input("Delivery note number")
+        status = c3.selectbox("Status", RECEIVING_STATUSES, index=2)
+        discrepancy = st.text_area("Discrepancy notes")
+        rows = []
+        for _, it in items.iterrows():
+            c1, c2, c3 = st.columns([1.5, .8, 1])
+            c1.write(it["item_name"])
+            c2.write(f"Ordered {it['quantity']}")
+            qty = c3.number_input("Received", min_value=0.0, value=float(it["quantity"]), key=f"rec_qty_{it['id']}")
+            condition = st.selectbox("Condition", ["Good", "Damaged", "Incomplete", "Wrong Item"], key=f"rec_cond_{it['id']}")
+            rows.append((int(it["id"]), it["item_name"], float(it["quantity"]), qty, condition))
+        attachment = st.file_uploader("Delivery photo/note", type=["pdf", "jpg", "jpeg", "png"])
+        submitted = st.form_submit_button("Save Receiving Slip")
+    if submitted:
+        path, _ = save_upload(attachment, "receiving")
+        slip_no = make_ref("GRN")
+        slip_id = run_insert("INSERT INTO receiving_slips (slip_no, po_id, vendor_id, received_by, date_received, delivery_note_no, discrepancy_notes, attachment_path, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (slip_no, int(po["id"]), int(po["vendor_id"]), user()["id"], recv_date.isoformat(), delivery_note, discrepancy, path, status, now_iso(), now_iso()))
+        for po_item_id, name, ordered, received, condition in rows:
+            run_query("INSERT INTO receiving_slip_items (slip_id, po_item_id, item_name, quantity_ordered, quantity_received, item_condition, discrepancy_notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (slip_id, po_item_id, name, ordered, received, condition, "" if condition=="Good" else condition, now_iso()))
+        po_status = "Fully Received" if status == "Fully Received" else "Partially Received"
+        run_query("UPDATE purchase_orders SET status=?, receiving_status=?, updated_at=? WHERE id=?", (po_status, status, now_iso(), int(po["id"])))
+        add_workflow_event("Receiving Slip", slip_id, "Received", status, slip_no, user()["id"])
+        notify(None, "Finance", "Goods received", f"{po['po_no']} is ready for invoice/payment review", "Receiving Slip", slip_id)
+        st.rerun()
+
+
+def receiving_register():
+    df = df_query("SELECT rs.id, rs.slip_no, po.po_no, v.name vendor, rs.date_received, rs.status, rs.delivery_note_no, rs.discrepancy_notes FROM receiving_slips rs LEFT JOIN purchase_orders po ON rs.po_id=po.id LEFT JOIN vendors v ON rs.vendor_id=v.id ORDER BY rs.created_at DESC")
+    if df.empty: empty_state("No receiving slips", "Record delivery against approved purchase orders."); return
+    dataframe(df.drop(columns=["id"]))
+    selected = st.selectbox("Open slip", df["slip_no"].tolist())
+    sid = int(df[df["slip_no"] == selected].iloc[0]["id"])
+    dataframe(df_query("SELECT item_name, quantity_ordered, quantity_received, item_condition, discrepancy_notes FROM receiving_slip_items WHERE slip_id=?", (sid,)))
+    record_collaboration("Receiving Slip", sid)
+
+# Vendors
+
+def vendors_page():
+    t1, t2, t3 = st.tabs(["Create Vendor", "Vendor Register", "Vendor Intelligence"])
+    with t1: create_vendor_form()
+    with t2: vendor_register()
+    with t3: vendor_intelligence()
+
+
+def create_vendor_form():
+    if not has_permission("manage_vendor"):
+        st.info("Your role cannot create vendors.")
+        return
+    with st.form("vendor_form"):
+        c1,c2,c3 = st.columns(3)
+        name = c1.text_input("Vendor name")
+        category = c2.selectbox("Category", EXPENSE_CATEGORIES)
+        status = c3.selectbox("Status", ["Active", "Under Review", "Suspended"])
+        c4,c5,c6 = st.columns(3)
+        phone = c4.text_input("Phone")
+        email = c5.text_input("Email")
+        tax = c6.text_input("Tax ID")
+        address = st.text_area("Address")
+        c7,c8,c9 = st.columns(3)
+        bank = c7.text_input("Bank")
+        account = c8.text_input("Account number")
+        rating = c9.slider("Rating", 1, 5, 3)
+        submitted = st.form_submit_button("Save Vendor")
+    if submitted:
+        try:
+            vid = run_insert("INSERT INTO vendors (name, category, phone, email, address, bank_name, account_no, tax_id, rating, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (name, category, phone, email, address, bank, account, tax, rating, status, now_iso(), now_iso()))
+            add_workflow_event("Vendor", vid, "Created", status, name, user()["id"])
+            st.success("Vendor created.")
+        except Exception as exc: st.error(f"Could not save vendor: {exc}")
+
+
+def vendor_register():
+    df = df_query("SELECT id, name, category, phone, email, bank_name, account_no, tax_id, rating, completed_orders, total_spend, average_delivery_time, rejection_count, last_purchase_date, status FROM vendors ORDER BY name")
+    if df.empty: empty_state("No vendors", "Create a vendor."); return
+    show = df.copy(); show["total_spend"] = show["total_spend"].apply(money); dataframe(show)
+    if has_permission("manage_vendor"):
+        selected = st.selectbox("Update bank details", df["name"].tolist())
+        row = df[df["name"] == selected].iloc[0]
+        with st.form("bank_update"):
+            bank = st.text_input("Bank", value=row["bank_name"] or "")
+            account = st.text_input("Account", value=row["account_no"] or "")
+            submitted = st.form_submit_button("Update Bank Details")
+        if submitted:
+            before = {"bank_name": row["bank_name"], "account_no": row["account_no"]}
+            after = {"bank_name": bank, "account_no": account}
+            run_query("UPDATE vendors SET bank_name=?, account_no=?, updated_at=? WHERE id=?", (bank, account, now_iso(), int(row["id"])))
+            log_audit("VENDOR_BANK_DETAIL_CHANGE", "Vendor", int(row["id"]), "Bank details updated", user()["id"], user()["role"], before, after)
+            st.warning("Vendor bank detail change recorded in audit log.")
+            st.rerun()
+
+
+def vendor_intelligence():
+    vendor_performance_table()
+    st.subheader("Duplicate Vendor Detection")
+    df = df_query("SELECT lower(trim(name)) normalized_name, COUNT(*) count, GROUP_CONCAT(name, ', ') vendors FROM vendors GROUP BY lower(trim(name)) HAVING COUNT(*)>1")
+    dataframe(df) if not df.empty else st.success("No duplicate vendor names detected.")
+
+
+def vendor_performance_table():
+    # PostgreSQL-safe vendor performance scoring in pandas.
+    df = df_query(
+        """
+        SELECT
+            name,
+            category,
+            status,
+            rating,
+            completed_orders,
+            total_spend,
+            average_delivery_time,
+            rejection_count
+        FROM vendors
+        """
+    )
+
+    if df.empty:
+        return
+
+    rating_numeric = pd.to_numeric(
+        df["rating"].astype(str),
+        errors="coerce",
+    ).fillna(0.0).astype("float64").clip(lower=0.0, upper=5.0)
+
+    completed_orders_numeric = pd.to_numeric(
+        df["completed_orders"].astype(str),
+        errors="coerce",
+    ).fillna(0).astype("int64")
+
+    rejection_count_numeric = pd.to_numeric(
+        df["rejection_count"].astype(str),
+        errors="coerce",
+    ).fillna(0).astype("int64")
+
+    rating_score = (rating_numeric / 5.0) * 45.0
+
+    rejection_score = (
+        30.0 - (rejection_count_numeric.astype("float64") * 5.0)
+    ).clip(lower=0.0)
+
+    completion_score = completed_orders_numeric.apply(
+        lambda value: 25.0 if value > 0 else 5.0
+    )
+
+    df["rating"] = rating_numeric
+    df["completed_orders"] = completed_orders_numeric
+    df["rejection_count"] = rejection_count_numeric
+
+    df["performance_score"] = (
+        rating_score
+        + rejection_score
+        + completion_score
+    ).round(1)
+
+    df = df.sort_values(
+        by=["performance_score", "rating", "completed_orders"],
+        ascending=[False, False, False],
+        kind="stable",
+    )
+
+    df["total_spend"] = df["total_spend"].apply(money)
+
+    dataframe(df)
+
+
+# Expenses/Invoices/Payments/Budgets
+
+def expenses_page():
+    t1, t2 = st.tabs(["Record Expense / OCR", "Expense Register"])
+    with t1: record_expense_ocr()
+    with t2: expense_register()
+
+
+def record_expense_ocr():
+    if not has_permission("record_expense"):
+        st.info("Your role cannot record expenses.")
+        return
+    receipt = st.file_uploader("Upload receipt/invoice image or PDF", type=["png", "jpg", "jpeg", "pdf"], key="receipt_file")
+    vendors_df = df_query("SELECT id, name, bank_name, account_no, rating FROM vendors")
+    if st.button("Extract OCR & Match", disabled=receipt is None):
+        text, meta, error = extract_text(receipt)
+        parsed = parse_ocr_text(text, vendors_df)
+        parsed["file_meta"] = meta; parsed["error"] = error
+        st.session_state["expense_ocr"] = parsed
+        if error: st.warning(error)
+        else: st.success("OCR extraction complete.")
+    parsed = st.session_state.get("expense_ocr", {})
+    if parsed:
+        st.json(parsed)
+    fields = parsed.get("fields", {}) if parsed else {}
+    with st.form("expense_form"):
+        vendors = vendor_options(True)
+        vendor_name = fields.get("matched_vendor_name") or "No vendor selected"
+        vendor_index = list(vendors.keys()).index(vendor_name) if vendor_name in vendors else 0
+        c1,c2,c3 = st.columns(3)
+        expense_date = c1.date_input("Date", date.today())
+        category = c2.selectbox("Category", EXPENSE_CATEGORIES, index=EXPENSE_CATEGORIES.index(fields.get("category") if fields.get("category") in EXPENSE_CATEGORIES else "Other"))
+        vendor = c3.selectbox("Vendor", list(vendors.keys()), index=vendor_index)
+        c4,c5,c6 = st.columns(3)
+        amount = c4.number_input("Amount", min_value=0.0, value=float(fields.get("total_amount") or 0), step=1000.0)
+        tax = c5.number_input("VAT/Tax", min_value=0.0, value=float(fields.get("tax_amount") or 0), step=100.0)
+        method = c6.selectbox("Payment method", PAYMENT_METHODS)
+        c7,c8,c9 = st.columns(3)
+        invoice_no = c7.text_input("Invoice No", value=fields.get("invoice_no") or "")
+        receipt_no = c8.text_input("Receipt No", value=fields.get("receipt_no") or "")
+        dept = c9.selectbox("Department", department_options())
+        po_df = df_query("SELECT po.id, po.po_no, v.name vendor, po.total_amount FROM purchase_orders po LEFT JOIN vendors v ON po.vendor_id=v.id ORDER BY po.created_at DESC")
+        po_options = ["No PO selected"] + [f"{r.po_no} — {r.vendor} — {money(r.total_amount)}" for r in po_df.itertuples()]
+        po_label = st.selectbox("Match PO", po_options)
+        desc = st.text_area("Description", value=fields.get("description") or "")
+        submitted = st.form_submit_button("Submit for Finance Review")
+    if submitted:
+        path, fhash = save_upload(receipt, "expenses")
+        po_id = None
+        if po_label != "No PO selected":
+            po_id = int(po_df[po_df["po_no"] == po_label.split(" — ")[0]].iloc[0]["id"])
+        vendor_id = vendors[vendor]
+        match_status, mismatch = match_invoice_to_po(po_id, vendor_id, amount)
+        dup = duplicate_candidates(fhash, amount, expense_date.isoformat(), vendor_id)
+        exp_no = make_ref("EXP")
+        eid = run_insert("""INSERT INTO expenses (expense_no, expense_date, category, description, vendor_id, amount, payment_method, project_department, status, receipt_path, receipt_hash, receipt_no, invoice_no, tax_amount, linked_po_id, invoice_match_status, duplicate_warning, requested_by, ocr_text, ocr_json, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (exp_no, expense_date.isoformat(), category, desc, vendor_id, amount, method, dept, path, fhash, receipt_no, invoice_no, tax, po_id, match_status, 0 if dup.empty else 1, user()["id"], parsed.get("raw_text", ""), json_dump(parsed), "; ".join(mismatch), now_iso()))
+        inv_id = run_insert("INSERT INTO invoices (invoice_no, receipt_no, po_id, vendor_id, invoice_date, amount, tax_amount, total_amount, file_path, file_hash, ocr_text, ocr_json, match_status, mismatch_reasons, status, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Uploaded', ?, ?)", (invoice_no, receipt_no, po_id, vendor_id, expense_date.isoformat(), amount-tax, tax, amount, path, fhash, parsed.get("raw_text", ""), json_dump(parsed), match_status, "; ".join(mismatch), user()["id"], now_iso()))
+        add_workflow_event("Expense", eid, "Created", "Pending", match_status, user()["id"])
+        notify(None, "Finance", "Invoice needs review", f"{exp_no} match status: {match_status}", "Expense", eid)
+        st.success(f"Submitted {exp_no}; invoice record created.")
+        if not dup.empty: st.warning("Duplicate warning detected.")
+
+
+def expense_register():
+    df = df_query("SELECT e.id, e.expense_no, e.expense_date, e.category, v.name vendor, e.amount, e.status, e.invoice_match_status, e.duplicate_warning, e.invoice_no, e.receipt_no FROM expenses e LEFT JOIN vendors v ON e.vendor_id=v.id ORDER BY e.created_at DESC")
+    if df.empty: empty_state("No expenses", "Record expenses and invoices."); return
+    show=df.drop(columns=["id"]).copy(); show["amount"]=show["amount"].apply(money); dataframe(show)
+    selected = st.selectbox("Open expense", df["expense_no"].tolist())
+    exp_id = int(df[df["expense_no"] == selected].iloc[0]["id"])
+    row = df_query("SELECT * FROM expenses WHERE id=?", (exp_id,)).iloc[0]
+    with st.expander("OCR / notes"):
+        try: st.json(json.loads(row["ocr_json"] or "{}"))
+        except Exception: st.text(row["ocr_text"] or "")
+        st.write(row["notes"] or "")
+    if has_permission("approve_expense") and row["status"] == "Pending":
+        c1,c2=st.columns(2)
+        if c1.button("Approve Expense", key=f"app_exp_{exp_id}"):
+            run_query("UPDATE expenses SET status='Approved', approved_by=?, approved_at=? WHERE id=?", (user()["id"], now_iso(), exp_id))
+            if pd.notna(row["vendor_id"]):
+                run_query("UPDATE vendors SET total_spend=COALESCE(total_spend,0)+?, completed_orders=COALESCE(completed_orders,0)+1, last_purchase_date=?, updated_at=? WHERE id=?", (float(row["amount"]), row["expense_date"], now_iso(), int(row["vendor_id"])))
+            add_workflow_event("Expense", exp_id, "Approved", "Approved", "Expense approved", user()["id"])
+            st.rerun()
+        reason = c2.text_input("Rejection reason", key=f"exp_reason_{exp_id}")
+        if c2.button("Reject/Return", key=f"rej_exp_{exp_id}"):
+            run_query("UPDATE expenses SET status='Rejected', rejection_reason=?, approved_by=?, approved_at=? WHERE id=?", (reason, user()["id"], now_iso(), exp_id))
+            add_workflow_event("Expense", exp_id, "Rejected", "Rejected", reason, user()["id"])
+            st.rerun()
+    record_collaboration("Expense", exp_id)
+    csv_download(df, "expenses")
+
+
+def invoices_page():
+    st.subheader("Invoices")
+    df = df_query("SELECT inv.id, inv.invoice_no, po.po_no, v.name vendor, inv.invoice_date, inv.total_amount, inv.match_status, inv.mismatch_reasons, inv.status FROM invoices inv LEFT JOIN purchase_orders po ON inv.po_id=po.id LEFT JOIN vendors v ON inv.vendor_id=v.id ORDER BY inv.created_at DESC")
+    if df.empty: empty_state("No invoices", "Upload invoices through Expenses/OCR."); return
+    show=df.drop(columns=["id"]).copy(); show["total_amount"]=show["total_amount"].apply(money); dataframe(show)
+    if has_permission("review_invoice"):
+        selected = st.selectbox("Select invoice", df["id"].astype(str).tolist())
+        inv = df[df["id"].astype(str)==selected].iloc[0]
+        c1,c2=st.columns(2)
+        if c1.button("Mark Finance Review Complete"):
+            run_query("UPDATE invoices SET status='Finance Review' WHERE id=?", (int(inv["id"]),))
+            add_workflow_event("Invoice", int(inv["id"]), "Finance Review", "Finance Review", "Invoice reviewed", user()["id"])
+            st.rerun()
+        if c2.button("Create Payment Request"):
+            pno=make_ref("PAY")
+            run_query("INSERT INTO payments (payment_no, invoice_id, po_id, vendor_id, amount, payment_method, status, created_by, created_at, updated_at) SELECT ?, id, po_id, vendor_id, total_amount, 'Bank Transfer', 'Pending Approval', ?, ?, ? FROM invoices WHERE id=?", (pno, user()["id"], now_iso(), now_iso(), int(inv["id"])))
+            notify(None, "Approver", "Payment pending approval", f"{pno} requires approval", "Payment", int(inv["id"]))
+            st.success(f"Payment request {pno} created.")
+
+
+def payments_page():
+    st.subheader("Payments")
+    df = df_query("SELECT p.id, p.payment_no, v.name vendor, p.amount, p.payment_method, p.payment_date, p.status, p.notes FROM payments p LEFT JOIN vendors v ON p.vendor_id=v.id ORDER BY p.created_at DESC")
+    if df.empty: st.info("No payment requests yet.")
+    else:
+        show=df.drop(columns=["id"]).copy(); show["amount"]=show["amount"].apply(money); dataframe(show)
+    if has_permission("manage_payments"):
+        st.markdown("##### Manual Payment Request")
+        with st.form("manual_payment"):
+            vendors=vendor_options(False)
+            v=st.selectbox("Vendor", list(vendors.keys()))
+            amount=st.number_input("Amount", min_value=0.0, step=1000.0)
+            method=st.selectbox("Method", PAYMENT_METHODS)
+            notes=st.text_area("Notes")
+            submitted=st.form_submit_button("Create Payment Request")
+        if submitted:
+            pno=make_ref("PAY")
+            run_query("INSERT INTO payments (payment_no, vendor_id, amount, payment_method, status, notes, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, 'Pending Approval', ?, ?, ?, ?)", (pno, vendors[v], amount, method, notes, user()["id"], now_iso(), now_iso()))
+            add_workflow_event("Payment", int(df_query("SELECT last_insert_rowid()" ).iloc[0,0]) if False else 0, "Created", "Pending Approval", pno, user()["id"])
+            st.success("Payment request created.")
+            st.rerun()
+    if not df.empty and has_permission("approve_payment"):
+        selected = st.selectbox("Approve/Pay", df["payment_no"].tolist())
+        row = df[df["payment_no"]==selected].iloc[0]
+        c1,c2=st.columns(2)
+        if row["status"] == "Pending Approval" and c1.button("Approve Payment"):
+            run_query("UPDATE payments SET status='Approved', approved_by=?, updated_at=? WHERE id=?", (user()["id"], now_iso(), int(row["id"])))
+            add_workflow_event("Payment", int(row["id"]), "Approved", "Approved", selected, user()["id"])
+            st.rerun()
+        if row["status"] == "Approved" and c2.button("Mark Paid"):
+            run_query("UPDATE payments SET status='Paid', paid_by=?, payment_date=?, updated_at=? WHERE id=?", (user()["id"], date.today().isoformat(), now_iso(), int(row["id"])))
+            add_workflow_event("Payment", int(row["id"]), "Paid", "Paid", selected, user()["id"])
+            st.rerun()
+
+
+def cash_advances_page():
+    st.subheader("Cash Advances")
+    t1,t2,t3=st.tabs(["Create", "Retire", "Register"])
+    with t1:
+        with st.form("cash_adv"):
+            c1,c2,c3=st.columns(3)
+            emp=c1.text_input("Employee", value=user()["full_name"])
+            collected=c2.date_input("Date collected", date.today())
+            due=c3.date_input("Due date", date.today()+timedelta(days=7))
+            amount=st.number_input("Amount", min_value=0.0, step=1000.0)
+            purpose=st.text_area("Purpose")
+            submitted=st.form_submit_button("Submit Advance")
+        if submitted:
+            adv_no=make_ref("ADV")
+            aid=run_insert("INSERT INTO cash_advances (advance_no, date_collected, employee_name, amount_collected, purpose, status, created_by, due_date, created_at) VALUES (?, ?, ?, ?, ?, 'Pending', ?, ?, ?)", (adv_no, collected.isoformat(), emp, amount, purpose, user()["id"], due.isoformat(), now_iso()))
+            add_workflow_event("Cash Advance", aid, "Created", "Pending", adv_no, user()["id"])
+            notify(None, "Finance", "Cash advance pending", adv_no, "Cash Advance", aid)
+            st.success("Advance submitted.")
+    with t2:
+        df = df_query("SELECT ca.id, ca.advance_no, ca.employee_name, ca.amount_collected, COALESCE(SUM(ae.amount),0) AS spent, ca.amount_collected-COALESCE(SUM(ae.amount),0) AS balance FROM cash_advances ca LEFT JOIN advance_expenses ae ON ca.id=ae.advance_id WHERE ca.status='Approved' GROUP BY ca.id, ca.advance_no, ca.employee_name, ca.amount_collected HAVING ca.amount_collected-COALESCE(SUM(ae.amount),0)>0")
+        if df.empty: st.info("No approved advances with balance.")
+        else:
+            label=st.selectbox("Advance", [f"{r.advance_no} — {r.employee_name} — {money(r.balance)}" for r in df.itertuples()])
+            aid=int(df[df["advance_no"]==label.split(" — ")[0]].iloc[0]["id"])
+            with st.form("retire"):
+                amt=st.number_input("Amount spent", min_value=0.0, step=1000.0)
+                cat=st.selectbox("Category", EXPENSE_CATEGORIES)
+                desc=st.text_area("Description")
+                submitted=st.form_submit_button("Add Retirement")
+            if submitted:
+                run_query("INSERT INTO advance_expenses (advance_id, spent_date, description, category, amount, created_at) VALUES (?, ?, ?, ?, ?, ?)", (aid, date.today().isoformat(), desc, cat, amt, now_iso()))
+                add_workflow_event("Cash Advance", aid, "Retirement Added", "Approved", desc, user()["id"])
+                st.rerun()
+    with t3:
+        df = df_query("SELECT ca.id, ca.advance_no, ca.employee_name, ca.date_collected, ca.due_date, ca.amount_collected, COALESCE(SUM(ae.amount),0) spent, ca.amount_collected-COALESCE(SUM(ae.amount),0) balance, ca.status FROM cash_advances ca LEFT JOIN advance_expenses ae ON ca.id=ae.advance_id GROUP BY ca.id ORDER BY ca.created_at DESC")
+        if not df.empty:
+            show=df.copy();
+            for c in ["amount_collected", "spent", "balance"]: show[c]=show[c].apply(money)
+            dataframe(show)
+            if has_permission("approve_expense") or has_permission("manage_payments"):
+                pending=df[df["status"]=="Pending"]
+                if not pending.empty:
+                    selected=st.selectbox("Approve pending advance", pending["advance_no"].tolist())
+                    aid=int(pending[pending["advance_no"]==selected].iloc[0]["id"])
+                    if st.button("Approve Advance"):
+                        run_query("UPDATE cash_advances SET status='Approved', approved_by=?, approved_at=? WHERE id=?", (user()["id"], now_iso(), aid))
+                        add_workflow_event("Cash Advance", aid, "Approved", "Approved", selected, user()["id"])
+                        st.rerun()
+
+
+def budgets_page(show_header=True):
+    if show_header: st.subheader("Budgets")
+    if has_permission("manage_budget") or user()["role"] == "Admin":
+        with st.form("budget"):
+            c1,c2,c3,c4=st.columns(4)
+            m=c1.text_input("Month", month_key())
+            cat=c2.selectbox("Category", EXPENSE_CATEGORIES)
+            dept=c3.selectbox("Department", department_options())
+            limit=c4.number_input("Limit", min_value=0.0, step=10000.0)
+            submitted=st.form_submit_button("Save Budget")
+        if submitted:
+            run_query("INSERT INTO budgets (budget_month, category, department_project, limit_amount, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(budget_month, category, department_project) DO UPDATE SET limit_amount=excluded.limit_amount", (m, cat, dept, limit, now_iso()))
+            log_audit("BUDGET_UPDATED", "Budget", f"{m}-{cat}-{dept}", f"{money(limit)}", user()["id"], user()["role"])
+            st.success("Budget saved.")
+    df = budget_utilization_df()
+    dataframe(df) if not df.empty else empty_state("No budgets", "Create monthly budgets by category/department.")
+
+
+def budget_utilization_df():
+    m=month_key()
+    df = df_query("""
+        SELECT b.budget_month, b.category, b.department_project, b.limit_amount,
+        COALESCE((SELECT SUM(amount) FROM expenses e WHERE e.status='Approved' AND substr(e.expense_date,1,7)=b.budget_month AND e.category=b.category),0) spent,
+        COALESCE((SELECT SUM(total_amount) FROM purchase_orders po WHERE po.status IN ('Approved','Sent to Vendor','Partially Received','Fully Received','Invoiced')),0) committed,
+        COALESCE((SELECT SUM(estimated_amount) FROM purchase_requests pr WHERE pr.status IN ('Submitted','Procurement Review','Requires Sourcing','Vendor Quote Collection','Pending Approver/MD Approval') AND pr.category=b.category),0) pending
+        FROM budgets b ORDER BY b.budget_month DESC, b.category
+    """)
+    if df.empty: return df
+    df["remaining"] = df["limit_amount"] - df["spent"] - df["committed"] - df["pending"]
+    df["usage_percent"] = (((df["spent"]+df["committed"]+df["pending"])/df["limit_amount"])*100).round(1)
+    out=df.copy()
+    for c in ["limit_amount","spent","committed","pending","remaining"]: out[c]=out[c].apply(money)
+    return out
+
+
+def budget_risk_df():
+    raw = budget_utilization_df()
+    if raw.empty: return raw
+    # usage_percent is numeric before formatting only in raw? function formatted. Recompute compact.
+    df=df_query("SELECT category, department_project, limit_amount FROM budgets")
+    return raw[raw["usage_percent"].astype(float) >= 80] if "usage_percent" in raw else raw
+
+# Approval pages
+
+def pending_approval_page():
+    request_register(actions=True, approver_mode=True)
+
+
+def quote_comparison_decision_page():
+    df = df_query("SELECT st.id, st.sourcing_no, pr.request_no, st.status, st.approval_status, st.reason_for_recommendation FROM sourcing_tasks st JOIN purchase_requests pr ON st.request_id=pr.id WHERE st.status='Vendor Recommendation' OR st.approval_status='Recommended'")
+    if df.empty: empty_state("No sourcing recommendations", "Recommended vendor decisions appear here."); return
+    dataframe(df)
+    selected=st.selectbox("Open recommendation", df["sourcing_no"].tolist())
+    sid=int(df[df["sourcing_no"]==selected].iloc[0]["id"])
+    quote_comparison(sid, allow_recommend=False)
+    c1,c2=st.columns(2)
+    if c1.button("Approve Recommended Vendor"):
+        task=df_query("SELECT request_id FROM sourcing_tasks WHERE id=?", (sid,)).iloc[0]
+        run_query("UPDATE sourcing_tasks SET approval_status='Approved', updated_at=? WHERE id=?", (now_iso(), sid))
+        run_query("UPDATE purchase_requests SET status='Approved', updated_at=? WHERE id=?", (now_iso(), int(task["request_id"])))
+        add_workflow_event("Sourcing Task", sid, "Approved", "Approved", "Recommendation approved", user()["id"])
+        st.rerun()
+    if c2.button("Return for More Information"):
+        run_query("UPDATE sourcing_tasks SET approval_status='Returned', updated_at=? WHERE id=?", (now_iso(), sid))
+        add_workflow_event("Sourcing Task", sid, "Returned", "Returned", "More info requested", user()["id"])
+        st.rerun()
+
+
+def po_approval_page():
+    df=df_query("SELECT id, po_no, total_amount, status FROM purchase_orders WHERE status='Pending Approval'")
+    if df.empty: st.success("No POs awaiting approval."); return
+    for _, row in df.iterrows():
+        po_detail(int(row["id"]), actions=True)
+
+
+def payment_approval_page():
+    payments_page()
+
+# Reports/Search/Audit
+
+def global_search():
+    st.subheader("Global Search")
+    term=st.text_input("Search request numbers, PO numbers, vendors, item names, document text, invoice numbers, status, department")
+    if not term: return
+    like=f"%{term}%"
+    blocks=[]
+    queries=[
+        ("Requests", "SELECT request_no ref, status, department_project context, justification text FROM purchase_requests WHERE request_no LIKE ? OR status LIKE ? OR department_project LIKE ? OR justification LIKE ?", (like,like,like,like)),
+        ("POs", "SELECT po_no ref, status, receiving_status context, payment_status text FROM purchase_orders WHERE po_no LIKE ? OR status LIKE ?", (like,like)),
+        ("Vendors", "SELECT name ref, status, category context, email text FROM vendors WHERE name LIKE ? OR category LIKE ?", (like,like)),
+        ("Documents", "SELECT file_name ref, import_status status, department_project context, title text FROM imported_legacy_documents WHERE title LIKE ? OR extracted_text LIKE ? OR original_path LIKE ?", (like,like,like)),
+        ("Invoices", "SELECT invoice_no ref, status, match_status context, mismatch_reasons text FROM invoices WHERE invoice_no LIKE ? OR receipt_no LIKE ? OR match_status LIKE ?", (like,like,like)),
+    ]
+    for module, sql, params in queries:
+        df=df_query(sql, params)
+        if not df.empty:
+            df.insert(0,"module",module); blocks.append(df)
+    if blocks: dataframe(pd.concat(blocks, ignore_index=True))
+    else: st.info("No results found.")
+
+
+def procurement_reports():
+    global_search(); st.divider(); analytics(); csv_download(df_query("SELECT * FROM purchase_requests"), "purchase_requests_export")
+
+def finance_reports():
+    global_search(); st.divider(); analytics(); csv_download(df_query("SELECT * FROM expenses"), "expenses_export"); csv_download(df_query("SELECT * FROM payments"), "payments_export")
+
+def executive_reports():
+    analytics(); st.subheader("Executive Summary"); dataframe(df_query("SELECT status, COUNT(*) count, COALESCE(SUM(estimated_amount),0) value FROM purchase_requests GROUP BY status"))
+
+def compliance_reports():
+    global_search(); st.divider(); st.subheader("Compliance Flags"); expense_review_page(); st.subheader("Audit Export"); df=df_query("SELECT * FROM audit_logs ORDER BY created_at DESC"); dataframe(df); csv_download(df,"audit_report")
+
+
+def analytics():
+    c1,c2=st.columns(2)
+    with c1:
+        df=df_query("SELECT category, SUM(amount) total FROM expenses WHERE status='Approved' GROUP BY category")
+        if not df.empty: st.caption("Spend by Category"); st.bar_chart(df.set_index("category"))
+    with c2:
+        df=df_query("SELECT COALESCE(v.name,'No vendor') vendor, SUM(e.amount) total FROM expenses e LEFT JOIN vendors v ON e.vendor_id=v.id WHERE e.status='Approved' GROUP BY vendor")
+        if not df.empty: st.caption("Spend by Vendor"); st.bar_chart(df.set_index("vendor"))
+    c3,c4=st.columns(2)
+    with c3:
+        df=df_query("SELECT status, COUNT(*) count FROM purchase_requests GROUP BY status")
+        if not df.empty: st.caption("Requests by Status"); st.bar_chart(df.set_index("status"))
+    with c4:
+        df=df_query("SELECT receiving_status, COUNT(*) count FROM purchase_orders GROUP BY receiving_status")
+        if not df.empty: st.caption("PO Delivery Status"); st.bar_chart(df.set_index("receiving_status"))
+
+
+def audit_log_page(full=False):
+    st.subheader("Audit Log")
+    limit=1000 if full else 100
+    df=df_query(f"SELECT a.created_at, u.full_name user, a.role, a.action, a.entity_type, a.entity_id, a.details, a.before_values, a.after_values FROM audit_logs a LEFT JOIN users u ON a.user_id=u.id ORDER BY a.created_at DESC LIMIT {limit}")
+    dataframe(df) if not df.empty else empty_state("No audit logs", "Sensitive actions will appear here.")
+    csv_download(df,"audit_logs")
+
+
+def approval_trails_page():
+    df=df_query("SELECT ah.created_at, ah.entity_type, ah.entity_id, ah.action, ah.status_before, ah.status_after, u.full_name user, ah.reason FROM approval_history ah LEFT JOIN users u ON ah.user_id=u.id ORDER BY ah.created_at DESC")
+    dataframe(df) if not df.empty else empty_state("No approval history", "Approvals and rejections will appear here.")
+
+
+def vendor_history_page():
+    vendor_register(); st.subheader("Vendor Related Audit")
+    df=df_query("SELECT * FROM audit_logs WHERE entity_type='Vendor' OR action LIKE 'VENDOR%' ORDER BY created_at DESC")
+    dataframe(df)
+
+
+def expense_review_page():
+    st.subheader("Expense Review")
+    df=df_query("SELECT e.expense_no, e.expense_date, v.name vendor, e.amount, e.status, e.duplicate_warning, e.invoice_match_status, e.receipt_path FROM expenses e LEFT JOIN vendors v ON e.vendor_id=v.id WHERE e.duplicate_warning=1 OR e.receipt_path IS NULL OR e.invoice_match_status='Mismatch' ORDER BY e.created_at DESC")
+    if not df.empty:
+        df["amount"]=df["amount"].apply(money); dataframe(df)
+    else: st.success("No expense compliance flags detected.")
+
+
+def reconciliation_page():
+    st.subheader("Reconciliation")
+    df=df_query("SELECT po.po_no, v.name AS vendor, po.total_amount AS po_amount, po.payment_status, po.receiving_status, COALESCE(SUM(p.amount),0) AS payments FROM purchase_orders po LEFT JOIN vendors v ON po.vendor_id=v.id LEFT JOIN payments p ON po.id=p.po_id GROUP BY po.id, po.po_no, v.name, po.total_amount, po.payment_status, po.receiving_status")
+    if not df.empty:
+        for c in ["po_amount","payments"]: df[c]=df[c].apply(money)
+        dataframe(df)
+    else: st.info("No POs to reconcile.")
+
+
+def vendor_payment_records():
+    df=df_query("SELECT v.name vendor, COUNT(p.id) payments, COALESCE(SUM(p.amount),0) total_paid FROM vendors v LEFT JOIN payments p ON v.id=p.vendor_id AND p.status='Paid' GROUP BY v.id ORDER BY total_paid DESC")
+    if not df.empty: df["total_paid"]=df["total_paid"].apply(money); dataframe(df)
+
+
+def document_archive(editable=False):
+    st.subheader("Document Archive")
+    c1,c2,c3=st.columns(3)
+    dtype=c1.selectbox("Document type", ["All"] + sorted(df_query("SELECT DISTINCT document_type FROM imported_legacy_documents WHERE document_type IS NOT NULL")["document_type"].dropna().tolist() or []), key=f"doc_type_{editable}")
+    status=c2.selectbox("Status", ["All", "Imported - Needs Review", "Reviewed", "Approved Historical", "Rejected Import"], key=f"doc_status_{editable}")
+    term=c3.text_input("Search documents", key=f"doc_search_{editable}")
+    sql="SELECT id, file_name, document_type, department_project, title, likely_date, total_amount, confidence, import_status, original_path, linked_request_id FROM imported_legacy_documents WHERE 1=1"
+    params=[]
+    if dtype!="All": sql+=" AND document_type=?"; params.append(dtype)
+    if status!="All": sql+=" AND import_status=?"; params.append(status)
+    if term: sql+=" AND (title LIKE ? OR extracted_text LIKE ? OR original_path LIKE ?)"; params += [f"%{term}%"]*3
+    sql += " ORDER BY created_at DESC"
+    df=df_query(sql, params)
+    if df.empty:
+        empty_state("No imported documents", "Use the Admin Import Center to import the PROCUREMENT PROJECT ZIP.")
+        return
+    show=df.copy(); show["total_amount"]=show["total_amount"].apply(money); dataframe(show)
+    selected=st.selectbox("Open document", df["id"].astype(str).tolist(), key=f"open_doc_{editable}")
+    doc_id=int(selected)
+    doc=df_query("SELECT * FROM imported_legacy_documents WHERE id=?", (doc_id,)).iloc[0]
+    with st.expander("Extracted text and parsed JSON", expanded=False):
+        st.write(doc["extracted_text"][:5000] if doc["extracted_text"] else "No text extracted")
+        try: st.json(json.loads(doc["parsed_json"] or "{}"))
+        except Exception: pass
+    items=df_query("SELECT row_number, item_name, quantity, unit_price, total_price, category, status_of_purchase FROM parsed_document_line_items WHERE imported_doc_id=?", (doc_id,))
+    if not items.empty:
+        it=items.copy(); it["unit_price"]=it["unit_price"].apply(money); it["total_price"]=it["total_price"].apply(money); dataframe(it)
+    if doc["file_path"] and Path(doc["file_path"]).exists():
+        with open(doc["file_path"], "rb") as f: st.download_button("Download Source Word Document", f, file_name=doc["file_name"])
+    if editable:
+        c1,c2,c3=st.columns(3)
+        if c1.button("Mark Reviewed", key=f"doc_rev_{doc_id}"):
+            run_query("UPDATE imported_legacy_documents SET import_status='Reviewed', updated_at=? WHERE id=?", (now_iso(), doc_id)); log_audit("IMPORT_REVIEWED","Imported Document",doc_id,doc["title"],user()["id"],user()["role"]); st.rerun()
+        if c2.button("Approve Historical", key=f"doc_hist_{doc_id}"):
+            run_query("UPDATE imported_legacy_documents SET import_status='Approved Historical', updated_at=? WHERE id=?", (now_iso(), doc_id)); log_audit("IMPORT_APPROVED_HISTORICAL","Imported Document",doc_id,doc["title"],user()["id"],user()["role"]); st.rerun()
+        if c3.button("Reject Import", key=f"doc_rej_{doc_id}"):
+            run_query("UPDATE imported_legacy_documents SET import_status='Rejected Import', updated_at=? WHERE id=?", (now_iso(), doc_id)); log_audit("IMPORT_REJECTED","Imported Document",doc_id,doc["title"],user()["id"],user()["role"]); st.rerun()
+
+
+def record_collaboration(entity_type: str, entity_id: int, key_scope: str | None = None):
+    """Render timeline/comments for a record.
+
+    Streamlit requires every widget key to be unique in a single script run.
+    The same procurement record can be shown in multiple sections at once
+    because Streamlit evaluates all tabs. key_scope separates each rendered
+    instance while keeping the key deterministic across reruns.
+    """
+    safe_entity = entity_type.lower().replace(" ", "_").replace("/", "_")
+    if key_scope is None:
+        st.session_state["_collab_render_seq"] = st.session_state.get("_collab_render_seq", 0) + 1
+        key_scope = f"auto_{st.session_state['_collab_render_seq']}"
+    scope = key_scope.lower().replace(" ", "_").replace("/", "_")
+    form_key = f"comment_{scope}_{safe_entity}_{entity_id}"
+
+    with st.expander("Timeline, Comments & Internal Notes"):
+        events=df_query("SELECT we.created_at, we.event, we.status, u.full_name user, we.note FROM workflow_events we LEFT JOIN users u ON we.user_id=u.id WHERE entity_type=? AND entity_id=? ORDER BY we.created_at", (entity_type, entity_id))
+        if not events.empty: dataframe(events)
+        comments=df_query("SELECT c.created_at, u.full_name user, c.comment_text, c.is_internal FROM comments c LEFT JOIN users u ON c.user_id=u.id WHERE entity_type=? AND entity_id=? ORDER BY c.created_at DESC", (entity_type, entity_id))
+        if not comments.empty: dataframe(comments)
+        if user()["role"] != "Auditor" or has_permission("audit"):
+            with st.form(form_key):
+                text=st.text_area("Add comment or audit note", key=f"{form_key}_text")
+                internal=st.checkbox("Internal note", key=f"{form_key}_internal")
+                submitted=st.form_submit_button("Post")
+            if submitted and text:
+                run_query("INSERT INTO comments (entity_type, entity_id, comment_text, is_internal, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)", (entity_type, entity_id, text, int(internal), user()["id"], now_iso()))
+                add_workflow_event(entity_type, entity_id, "Comment Added", None, text[:120], user()["id"])
+                st.rerun()
+
+
+def settings_page():
+    st.subheader("Settings")
+    change_password_panel()
+    st.caption("Production mode: set PROCUREFLOW_PRODUCTION=1 to hide demo credentials and require operational password practices.")
+
+# ============================================================================
+# Enterprise extension layer
+# Later definitions intentionally override the compact MVP pages above while
+# reusing its forms, registers, imports, OCR, vendor and PO modules.
+# ============================================================================
+
+FM_STATUSES = [
+    "FM Draft", "Submitted to Procurement Manager", "PM Reviewing",
+    "Returned to Facility Manager", "Accepted by Procurement Manager",
+    "Converted to Purchase Request", "Rejected by Procurement Manager",
+]
+BUDGET_RISK_THRESHOLDS = [(100, "Exceeded"), (85, "Warning"), (70, "Watch"), (0, "Safe")]
+APPROVER_ROLE_OPTIONS = ["Approver", "Procurement Manager", "Finance", "Admin"]
+
+
+def risk_label(percent: float) -> str:
+    try:
+        pct = float(percent)
+    except Exception:
+        pct = 0.0
+    for threshold, label in BUDGET_RISK_THRESHOLDS:
+        if pct >= threshold:
+            return label
+    return "Safe"
+
+
+def render_notification_panel(current: dict):
+    """Render high-contrast, readable sidebar notifications for all roles."""
+    _phase2_bootstrap()
+    uid = int(current["id"])
+    role = current["role"]
+    unread = df_query(
+        """
+        SELECT * FROM notifications
+        WHERE is_read=0 AND (user_id=? OR role=? OR role='All')
+        ORDER BY CASE importance WHEN 'Critical' THEN 0 WHEN 'High' THEN 1 WHEN 'Important' THEN 2 ELSE 3 END,
+                 created_at DESC
+        LIMIT 30
+        """,
+        (uid, role),
+    )
+
+    pending_popups = pd.DataFrame()
+    if not unread.empty and "popup_shown" in unread.columns:
+        pending_popups = unread[unread["popup_shown"].fillna(0).astype(int) == 0].head(5)
+    if not pending_popups.empty:
+        popup_ids: list[int] = []
+        for _, n in pending_popups.iterrows():
+            msg = f"{n['title']}: {n['message']}"
+            if str(n.get("importance", "Normal")) in ["Critical", "High", "Important"]:
+                st.toast(msg, icon="🔔")
+            popup_ids.append(int(n["id"]))
+        if popup_ids:
+            placeholders = ",".join("?" for _ in popup_ids)
+            run_query(f"UPDATE notifications SET popup_shown=1 WHERE id IN ({placeholders})", tuple(popup_ids))
+
+    st.markdown(
+        """
+        <style>
+        section[data-testid="stSidebar"] .pf-notification-heading {
+            display:flex; align-items:center; gap:9px; margin:0 0 12px;
+            color:#ffffff; font-size:19px; font-weight:900; letter-spacing:-.02em;
+        }
+        section[data-testid="stSidebar"] .pf-notification-count {
+            display:inline-flex; align-items:center; justify-content:center;
+            min-width:22px; height:22px; padding:0 7px; border-radius:999px;
+            background:#ef4444; color:#fff; font-size:12px; font-weight:900;
+            box-shadow:0 5px 13px rgba(127,29,29,.32);
+        }
+        section[data-testid="stSidebar"] .pf-notification-empty {
+            background:#050b18; color:#ffffff; border-radius:16px;
+            padding:14px 16px; font-size:13px; font-weight:850;
+            border:1px solid rgba(255,255,255,.22);
+            box-shadow:0 10px 24px rgba(0,0,0,.18);
+        }
+        section[data-testid="stSidebar"] [data-testid="stExpander"],
+        section[data-testid="stSidebar"] [data-testid="stExpander"] details {
+            background:#050b18 !important;
+            border:1px solid rgba(255,255,255,.20) !important;
+            border-radius:16px !important;
+            color:#ffffff !important;
+            box-shadow:0 14px 30px rgba(0,0,0,.20) !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stExpander"] summary,
+        section[data-testid="stSidebar"] [data-testid="stExpander"] summary *,
+        section[data-testid="stSidebar"] [data-testid="stExpander"] p,
+        section[data-testid="stSidebar"] [data-testid="stExpander"] span {
+            color:#ffffff !important;
+            font-weight:850 !important;
+        }
+        section[data-testid="stSidebar"] .pf-notification-card {
+            background:#070f20; color:#ffffff; border:1px solid rgba(255,255,255,.18);
+            border-left:5px solid #ef4444; border-radius:15px; padding:13px 14px;
+            margin:0 0 10px; box-shadow:0 12px 28px rgba(0,0,0,.24);
+        }
+        section[data-testid="stSidebar"] .pf-notification-card.normal { border-left-color:#60a5fa; }
+        section[data-testid="stSidebar"] .pf-notification-card strong {
+            display:block; color:#ffffff !important; font-size:14px; line-height:1.25;
+            font-weight:950; margin-bottom:6px;
+        }
+        section[data-testid="stSidebar"] .pf-notification-card p {
+            margin:0 0 8px; color:#e5eefc !important; font-size:12.5px; line-height:1.45;
+            font-weight:800; white-space:normal; overflow-wrap:anywhere;
+        }
+        section[data-testid="stSidebar"] .pf-notification-meta {
+            display:flex; align-items:center; justify-content:space-between; gap:8px;
+            color:#cbd5e1 !important; font-size:10.5px; font-weight:850;
+        }
+        section[data-testid="stSidebar"] .pf-notification-pill {
+            display:inline-flex; align-items:center; padding:3px 7px; border-radius:999px;
+            background:#fee2e2; color:#991b1b !important; font-size:10px; font-weight:950;
+        }
+        section[data-testid="stSidebar"] .pf-notification-pill.normal { background:#dbeafe; color:#1d4ed8 !important; }
+        section[data-testid="stSidebar"] details[open] summary,
+        section[data-testid="stSidebar"] details summary { color:#ffffff !important; font-weight:950 !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(f'<div class="pf-notification-heading">🔔 Notifications <span class="pf-notification-count">{len(unread)}</span></div>', unsafe_allow_html=True)
+    if unread.empty:
+        st.markdown('<div class="pf-notification-empty">No unread notifications.</div>', unsafe_allow_html=True)
+        return
+
+    with st.expander("Unread notifications", expanded=True):
+        for _, n in unread.head(10).iterrows():
+            importance = str(n.get("importance", "Normal") or "Normal")
+            severity_class = "normal" if importance not in ["Critical", "High", "Important"] else "important"
+            title = escape(str(n.get("title") or "Notification"))
+            message = escape(str(n.get("message") or ""))
+            created_at = escape(str(n.get("created_at") or ""))
+            action_label = escape(str(n.get("action_label") or ""))
+            action_line = f"<span>Action: {action_label}</span>" if action_label else "<span>Unread</span>"
+            pill_class = "normal" if severity_class == "normal" else ""
+            st.markdown(
+                f"""
+                <div class="pf-notification-card {severity_class}">
+                    <strong>{title}</strong>
+                    <p>{message}</p>
+                    <div class="pf-notification-meta">
+                        {action_line}
+                        <span class="pf-notification-pill {pill_class}">{escape(importance)}</span>
+                    </div>
+                    <div class="pf-notification-meta" style="margin-top:6px;"><span>{created_at}</span></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        if st.button("Mark all as read", key=f"notif_mark_all_phase2_{uid}_{role}", use_container_width=True):
+            run_query("UPDATE notifications SET is_read=1 WHERE is_read=0 AND (user_id=? OR role=? OR role='All')", (uid, role))
+            st.rerun()
+
+def availability_panel(compact: bool = False):
+    _phase2_bootstrap()
+    if user()["role"] not in AWAY_ROLES:
+        st.info("Availability notices are available to Approver/MD and Procurement Manager roles.")
+        return
+    st.subheader("Availability / Away Notice" if not compact else "My Availability")
+    uid = int(user()["id"])
+    active = df_query(
+        """
+        SELECT * FROM user_availability
+        WHERE user_id=? AND status NOT IN ('Returned','Cancelled')
+        ORDER BY created_at DESC LIMIT 5
+        """,
+        (uid,),
+    )
+    if not active.empty:
+        st.markdown("#### Current away/delegation status")
+        dataframe(active[["id", "status", "away_start_date", "away_end_date", "urgency", "admin_review_status", "linked_delegation_id", "created_at"]])
+        latest = active.iloc[0]
+        if st.button("I am back", key=f"i_am_back_{uid}_{int(latest['id'])}"):
+            run_query("UPDATE user_availability SET status='Returned', updated_at=? WHERE id=?", (now_iso(), int(latest["id"])))
+            create_notification(None, "Admin", "User returned from away notice", f"{user()['full_name']} has marked themselves back. Review any active delegation.", "Availability", int(latest["id"]), "High", ["in_app", "browser_push"])
+            create_activity_log(uid, user()["role"], "USER_RETURNED", "Availability", int(latest["id"]), "User marked themselves back", visibility_scope="workflow")
+            log_audit("USER_RETURNED_FROM_AWAY", "Availability", int(latest["id"]), "User clicked I am back", uid, user()["role"])
+            st.success("Admin has been notified that you are back.")
+            st.rerun()
+    else:
+        st.success("You are currently marked as available.")
+
+    with st.expander("Mark Myself Away", expanded=not compact):
+        with st.form(f"mark_away_form_{uid}"):
+            c1, c2, c3 = st.columns(3)
+            start = c1.date_input("Away start date", date.today(), key=f"away_start_{uid}")
+            end = c2.date_input("Away end date", date.today() + timedelta(days=1), key=f"away_end_{uid}")
+            urgency = c3.selectbox("Urgency level", ["Normal", "High", "Critical"], key=f"away_urgency_{uid}")
+            reason = st.text_area("Reason", key=f"away_reason_{uid}")
+            note = st.text_area("Optional handover note", key=f"away_note_{uid}")
+            c4, c5 = st.columns(2)
+            default_delegate = "Procurement Manager" if user()["role"] == "Approver" else "Admin"
+            delegate_role = c4.selectbox("Recommended delegate role", ["Procurement Manager", "Admin", "Approver", "Finance"], index=["Procurement Manager", "Admin", "Approver", "Finance"].index(default_delegate), key=f"away_delegate_role_{uid}")
+            users_for_role = df_query("SELECT id, full_name, username FROM users WHERE role=? AND is_active=1 ORDER BY full_name", (delegate_role,))
+            delegate_labels = ["No specific user"] + [f"{r.full_name} ({r.username}) #{int(r.id)}" for r in users_for_role.itertuples()]
+            delegate_label = c5.selectbox("Recommended delegate user", delegate_labels, key=f"away_delegate_user_{uid}")
+            submitted = st.form_submit_button("Submit Away Notice", type="primary")
+        if submitted:
+            if end < start:
+                st.error("Away end date cannot be before away start date.")
+            elif not reason.strip():
+                st.error("Reason is required.")
+            else:
+                delegate_user_id = None if delegate_label == "No specific user" else int(delegate_label.rsplit("#", 1)[1])
+                availability_id = run_insert(
+                    """
+                    INSERT INTO user_availability (user_id, role, status, away_start_date, away_end_date, reason, handover_note, recommended_delegate_role, recommended_delegate_user_id, urgency, admin_review_status, created_at, updated_at)
+                    VALUES (?, ?, 'Away Requested', ?, ?, ?, ?, ?, ?, ?, 'Pending Review', ?, ?)
+                    """,
+                    (uid, user()["role"], start.isoformat(), end.isoformat(), reason.strip(), note.strip(), delegate_role, delegate_user_id, urgency, now_iso(), now_iso()),
+                )
+                create_notification(None, "Admin", f"{user()['role']} marked away", f"{user()['full_name']} will be away from {start.isoformat()} to {end.isoformat()}. Admin delegation review is needed.", "Availability", availability_id, "High" if urgency != "Critical" else "Critical", ["in_app", "browser_push"])
+                add_workflow_event("Availability", availability_id, "Away Notice Submitted", "Away Requested", reason, uid)
+                create_activity_log(uid, user()["role"], "AWAY_NOTICE_SUBMITTED", "Availability", availability_id, f"Away notice submitted for {start.isoformat()} to {end.isoformat()}", note, "workflow")
+                log_audit("AWAY_NOTICE_SUBMITTED", "Availability", availability_id, {"reason": reason, "delegate_role": delegate_role}, uid, user()["role"])
+                st.success("Away notice submitted. Admin has been notified.")
+                st.rerun()
+
+
+def availability_delegation_requests_page():
+    _phase2_bootstrap()
+    st.subheader("Availability & Delegation Requests")
+    pending = df_query(
+        """
+        SELECT ua.*, u.full_name, u.username, du.full_name recommended_delegate_name
+        FROM user_availability ua
+        LEFT JOIN users u ON u.id=ua.user_id
+        LEFT JOIN users du ON du.id=ua.recommended_delegate_user_id
+        ORDER BY CASE ua.admin_review_status WHEN 'Pending Review' THEN 0 ELSE 1 END, ua.created_at DESC
+        """
+    )
+    if pending.empty:
+        st.success("No availability or delegation requests yet.")
+        return
+    display = pending[["id", "full_name", "role", "status", "away_start_date", "away_end_date", "urgency", "admin_review_status", "recommended_delegate_role", "recommended_delegate_name", "linked_delegation_id"]].copy()
+    dataframe(display)
+    csv_download(display, "availability_delegation_requests")
+    labels = [f"#{int(r.id)} — {r.full_name} — {r.role} — {r.admin_review_status}" for r in pending.itertuples()]
+    selected = st.selectbox("Open request", labels, key="admin_availability_select")
+    av_id = int(selected.split("—", 1)[0].strip().lstrip("#"))
+    row = pending[pending["id"] == av_id].iloc[0]
+    st.info(f"Reason: {row['reason']}\n\nHandover note: {row['handover_note'] or 'None'}")
+    delegate_roles = ["Procurement Manager", "Admin", "Approver", "Finance"]
+    with st.form(f"admin_availability_action_{av_id}"):
+        c1, c2, c3 = st.columns(3)
+        action = c1.selectbox("Admin action", ["Approve away notice", "Reject away notice", "Activate delegation", "Close delegation / mark reviewed"], key=f"av_action_{av_id}")
+        chosen_role = c2.selectbox("Delegate role", delegate_roles, index=delegate_roles.index(row["recommended_delegate_role"]) if row["recommended_delegate_role"] in delegate_roles else 0, key=f"av_delegate_role_{av_id}")
+        delegate_users = df_query("SELECT id, full_name, username FROM users WHERE role=? AND is_active=1 ORDER BY full_name", (chosen_role,))
+        user_labels = ["No specific user"] + [f"{r.full_name} ({r.username}) #{int(r.id)}" for r in delegate_users.itertuples()]
+        chosen_user_label = c3.selectbox("Delegate user", user_labels, key=f"av_delegate_user_{av_id}")
+        c4, c5 = st.columns(2)
+        start = c4.date_input("Delegation start date", pd.to_datetime(row["away_start_date"]).date(), key=f"av_start_{av_id}")
+        end = c5.date_input("Delegation end date", pd.to_datetime(row["away_end_date"]).date(), key=f"av_end_{av_id}")
+        admin_note = st.text_area("Admin note", key=f"av_note_{av_id}")
+        submit = st.form_submit_button("Apply Admin Action", type="primary")
+    if submit:
+        delegate_user_id = None if chosen_user_label == "No specific user" else int(chosen_user_label.rsplit("#", 1)[1])
+        if action == "Reject away notice":
+            run_query("UPDATE user_availability SET admin_review_status='Rejected', status='Cancelled', reviewed_by_admin_id=?, reviewed_at=?, admin_note=?, updated_at=? WHERE id=?", (user()["id"], now_iso(), admin_note, now_iso(), av_id))
+            create_notification(int(row["user_id"]), None, "Away notice rejected", admin_note or "Admin rejected the away notice.", "Availability", av_id, "High", ["in_app", "browser_push"])
+            log_audit("AWAY_NOTICE_REJECTED", "Availability", av_id, admin_note, user()["id"], user()["role"])
+        elif action == "Approve away notice":
+            run_query("UPDATE user_availability SET admin_review_status='Approved', status='Away Approved', reviewed_by_admin_id=?, reviewed_at=?, admin_note=?, updated_at=? WHERE id=?", (user()["id"], now_iso(), admin_note, now_iso(), av_id))
+            create_notification(int(row["user_id"]), None, "Away notice approved", admin_note or "Admin approved your away notice.", "Availability", av_id, "High", ["in_app", "browser_push"])
+            log_audit("AWAY_NOTICE_APPROVED", "Availability", av_id, admin_note, user()["id"], user()["role"])
+        elif action == "Activate delegation":
+            primary_role = row["role"]
+            if primary_role == "Approver":
+                delegate_role = "Procurement Manager" if chosen_role not in ["Admin", "Approver"] else chosen_role
+            else:
+                delegate_role = chosen_role
+            delegation_id = run_insert(
+                """
+                INSERT INTO approval_delegations (primary_role, delegate_role, enabled, start_date, end_date, reason, created_by, created_at, updated_at, source_availability_id, source_reason, activated_by_admin_id, activation_note)
+                VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (primary_role, delegate_role, start.isoformat(), end.isoformat(), f"Delegation active due to away notice: {row['reason']}", user()["id"], now_iso(), now_iso(), av_id, row["reason"], user()["id"], admin_note),
+            )
+            run_query("UPDATE user_availability SET admin_review_status='Delegation Active', status='Away Active', linked_delegation_id=?, reviewed_by_admin_id=?, reviewed_at=?, admin_note=?, updated_at=? WHERE id=?", (delegation_id, user()["id"], now_iso(), admin_note, now_iso(), av_id))
+            create_notification(int(row["user_id"]), None, "Delegation activated", f"Admin activated {delegate_role} as delegate during your away period.", "Availability", av_id, "High", ["in_app", "browser_push"])
+            if delegate_user_id:
+                create_notification(delegate_user_id, None, "Delegation assigned", f"You were selected as delegate for {row['full_name']} during their away period.", "Availability", av_id, "High", ["in_app", "browser_push"])
+            else:
+                create_notification(None, delegate_role, "Delegation activated", f"{delegate_role} delegation is active due to away notice.", "Availability", av_id, "High", ["in_app", "browser_push"])
+            log_audit("DELEGATION_ACTIVATED_FROM_AWAY", "ApprovalDelegation", delegation_id, {"availability_id": av_id, "delegate_role": delegate_role, "delegate_user_id": delegate_user_id}, user()["id"], user()["role"])
+        else:
+            if row.get("linked_delegation_id"):
+                run_query("UPDATE approval_delegations SET enabled=0, updated_at=?, activation_note=COALESCE(activation_note,'') || ? WHERE id=?", (now_iso(), f"\nClosed by Admin: {admin_note}", int(row["linked_delegation_id"])))
+            run_query("UPDATE user_availability SET admin_review_status='Closed', status='Returned', reviewed_by_admin_id=?, reviewed_at=?, admin_note=?, updated_at=? WHERE id=?", (user()["id"], now_iso(), admin_note, now_iso(), av_id))
+            create_notification(int(row["user_id"]), None, "Delegation reviewed/closed", admin_note or "Admin reviewed or closed the delegation linked to your away notice.", "Availability", av_id, "Normal", ["in_app"])
+            log_audit("AWAY_DELEGATION_CLOSED", "Availability", av_id, admin_note, user()["id"], user()["role"])
+        create_activity_log(user()["id"], user()["role"], action.upper().replace(" ", "_"), "Availability", av_id, f"Admin action: {action}", admin_note, "admin", int(row["user_id"]))
+        st.success("Admin action applied.")
+        st.rerun()
+
+
+def log_gateway_event(gateway_pass_id: int, event: str, status: str | None = None, note: str | None = None):
+    run_query("INSERT INTO gateway_pass_events (gateway_pass_id, event, status, note, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)", (gateway_pass_id, event, status, note, user()["id"], now_iso()))
+    create_activity_log(user()["id"], user()["role"], event.upper().replace(" ", "_"), "Gateway Pass", gateway_pass_id, f"Gateway pass {event.lower()}", note, "workflow")
+    log_audit(event.upper().replace(" ", "_"), "Gateway Pass", gateway_pass_id, note, user()["id"], user()["role"])
+
+
+def gateway_pass_items_df(gateway_pass_id: int) -> pd.DataFrame:
+    return df_query("SELECT * FROM gateway_pass_items WHERE gateway_pass_id=? ORDER BY id", (gateway_pass_id,))
+
+
+def gateway_pass_summary_df(where_sql: str = "", params: tuple | list = ()) -> pd.DataFrame:
+    sql = """
+        SELECT gp.*, fm.full_name facility_manager, approver.full_name approved_by
+        FROM gateway_passes gp
+        LEFT JOIN users fm ON fm.id=gp.facility_manager_user_id
+        LEFT JOIN users approver ON approver.id=gp.approved_by_user_id
+    """
+    if where_sql:
+        sql += " WHERE " + where_sql
+    sql += " ORDER BY gp.updated_at DESC, gp.created_at DESC"
+    return df_query(sql, params)
+
+
+def _series_value(row: Any, key: str, default: str = "") -> str:
+    """Safely read a field from a pandas Series/dict and normalize empty values."""
+    try:
+        if hasattr(row, "index") and key not in row.index:
+            return default
+        return _clean(row.get(key), default)
+    except Exception:
+        return default
+
+
+def _date_or_default(value: Any, default_value: date | None = None) -> date:
+    default_value = default_value or date.today()
+    try:
+        text = _clean(value)
+        return pd.to_datetime(text).date() if text else default_value
+    except Exception:
+        return default_value
+
+
+def _html_line_value(value: Any) -> str:
+    """Return only the typed value; CSS draws the signing line so no double underline appears."""
+    return escape(_clean(value, ""))
+
+
+def gateway_pass_return_security_form(gateway_pass_id: int, key_prefix: str = "gp_security"):
+    """Allow the Facility/Utility owner to fill return-date and gate security fields.
+
+    These fields replace the blank dashes in the generated gate-pass template.
+    The form is intentionally available after approval/generation so gate/security
+    information can be completed without reopening the main draft workflow.
+    """
+    if not _is_utility():
+        return
+    row_df = df_query("SELECT * FROM gateway_passes WHERE id=?", (gateway_pass_id,))
+    if row_df.empty:
+        return
+    row = row_df.iloc[0]
+    if int(row.get("facility_manager_user_id") or 0) != int(user()["id"]):
+        return
+
+    with st.expander("Return Date & Security Verification Inputs", expanded=False):
+        st.caption("Use these tabs to fill the empty return/security lines before generating or re-generating the gateway pass.")
+        with st.form(f"{key_prefix}_form_{gateway_pass_id}"):
+            return_tab, security_tab = st.tabs(["Return Date", "Security Verification"])
+            with return_tab:
+                has_expected_return = bool(_series_value(row, "expected_return_date"))
+                return_required = st.checkbox("Return date applies", value=has_expected_return, key=f"{key_prefix}_return_required_{gateway_pass_id}")
+                expected_return = st.date_input(
+                    "Return date",
+                    value=_date_or_default(row.get("expected_return_date"), date.today() + timedelta(days=1)),
+                    key=f"{key_prefix}_expected_return_{gateway_pass_id}",
+                    disabled=not return_required,
+                )
+                has_actual_return = bool(_series_value(row, "actual_return_date"))
+                actual_return_applies = st.checkbox("Actual return date available", value=has_actual_return, key=f"{key_prefix}_actual_return_applies_{gateway_pass_id}")
+                actual_return = st.date_input(
+                    "Actual return date",
+                    value=_date_or_default(row.get("actual_return_date"), date.today()),
+                    key=f"{key_prefix}_actual_return_{gateway_pass_id}",
+                    disabled=not actual_return_applies,
+                )
+            with security_tab:
+                c1, c2 = st.columns(2)
+                security_officer = c1.text_input("Security Officer Name", value=_series_value(row, "security_officer_name"), key=f"{key_prefix}_security_name_{gateway_pass_id}")
+                gate_time = c2.text_input("Gate Verification Time", value=_series_value(row, "gate_verification_time"), placeholder="e.g. 04:30 PM", key=f"{key_prefix}_gate_time_{gateway_pass_id}")
+                c3, c4 = st.columns(2)
+                exit_entry = c3.text_input("Exit / Entry Confirmation", value=_series_value(row, "exit_entry_confirmation"), placeholder="e.g. Exit confirmed", key=f"{key_prefix}_exit_entry_{gateway_pass_id}")
+                security_signature = c4.text_input("Security Signature / Name", value=_series_value(row, "security_signature"), key=f"{key_prefix}_security_signature_{gateway_pass_id}")
+            saved = st.form_submit_button("Save Return/Security Details", type="primary")
+        if saved:
+            run_query(
+                """
+                UPDATE gateway_passes
+                SET expected_return_date=?, actual_return_date=?, security_officer_name=?, gate_verification_time=?, exit_entry_confirmation=?, security_signature=?, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    expected_return.isoformat() if return_required else None,
+                    actual_return.isoformat() if actual_return_applies else None,
+                    security_officer.strip() or None,
+                    gate_time.strip() or None,
+                    exit_entry.strip() or None,
+                    security_signature.strip() or None,
+                    now_iso(),
+                    gateway_pass_id,
+                ),
+            )
+            log_gateway_event(gateway_pass_id, "Gateway Pass Return/Security Details Updated", row.get("status"), "Return date and security verification fields updated")
+            _rerun_success("Return date and security verification details saved.")
+
+
+def gateway_pass_detail(gateway_pass_id: int):
+    gp = gateway_pass_summary_df("gp.id=?", (gateway_pass_id,))
+    if gp.empty:
+        st.error("Gateway pass not found.")
+        return None
+    row = gp.iloc[0]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Pass No.", row["pass_number"])
+    c2.metric("Status", row["status"])
+    c3.metric("Movement", row["movement_type"])
+    c4.metric("Destination", row["destination"] or "-")
+    info_cols = ["facility_manager", "department", "purpose", "origin_location", "destination", "expected_movement_date", "expected_return_date", "actual_return_date", "vehicle_number", "driver_name", "driver_phone", "receiver_name", "receiver_organization", "security_checkpoint", "security_officer_name", "gate_verification_time", "exit_entry_confirmation", "security_signature", "approved_by", "approved_by_role", "approved_at"]
+    st.dataframe(pd.DataFrame([{k: row.get(k, "") for k in info_cols if k in row.index}]), use_container_width=True)
+    items = gateway_pass_items_df(gateway_pass_id)
+    st.markdown("#### Item lines — quality, quantity and fragility")
+    if items.empty:
+        st.warning("No item lines have been added yet.")
+    else:
+        show_cols = ["item_description", "item_category", "colour", "quantity", "unit_of_measure", "quality_condition", "fragility_status", "serial_number", "asset_tag", "handling_instruction", "remarks"]
+        show = items[[c for c in show_cols if c in items.columns]].copy()
+        dataframe(show)
+        if (items["fragility_status"] == "Fragile").any():
+            st.warning("This gateway pass contains fragile item(s). Review handling instructions before approval.")
+    return row
+
+
+def create_gateway_pass_form():
+    _phase2_bootstrap()
+    st.subheader("Create Gateway Pass Draft")
+    with st.form("create_gateway_pass_form"):
+        c1, c2, c3 = st.columns(3)
+        dept = c1.selectbox("Department", department_options(), key="gp_create_dept")
+        movement_type = c2.selectbox("Movement type", GATEWAY_MOVEMENT_TYPES, key="gp_create_movement")
+        expected_movement = c3.date_input("Expected movement date", date.today(), key="gp_create_move_date")
+        purpose = st.text_area("Purpose of movement", key="gp_create_purpose")
+        c4, c5 = st.columns(2)
+        origin = c4.text_input("Origin location", key="gp_create_origin")
+        destination = c5.text_input("Destination", key="gp_create_destination")
+        c6, c7, c8 = st.columns(3)
+        return_required = c6.checkbox("Expected return date applies", value=False, key="gp_create_return_applies")
+        expected_return = c6.date_input("Expected return date", date.today() + timedelta(days=1), key="gp_create_return") if return_required else None
+        vehicle = c7.text_input("Vehicle number, optional", key="gp_create_vehicle")
+        checkpoint = c8.text_input("Security checkpoint, optional", key="gp_create_checkpoint")
+        c9, c10, c11 = st.columns(3)
+        driver = c9.text_input("Driver name, optional", key="gp_create_driver")
+        driver_phone = c10.text_input("Driver phone, optional", key="gp_create_driver_phone")
+        receiver = c11.text_input("Receiver name", key="gp_create_receiver")
+        receiver_org = st.text_input("Receiver organization, optional", key="gp_create_receiver_org")
+        item_count = st.number_input("Number of item lines", min_value=1, max_value=20, value=1, step=1, key="gp_item_count")
+        items = []
+        st.markdown("##### Item details")
+        for i in range(int(item_count)):
+            st.markdown(f"**Item {i+1}**")
+            a, b, c, d0 = st.columns([1.6, 1, .7, .8])
+            desc = a.text_input("Item description", key=f"gp_item_desc_{i}")
+            category = b.text_input("Item category", key=f"gp_item_cat_{i}")
+            qty = c.number_input("Quantity", min_value=0.0, step=1.0, value=1.0, key=f"gp_item_qty_{i}")
+            colour = d0.text_input("Colour", key=f"gp_item_colour_{i}")
+            d, e, f = st.columns(3)
+            uom = d.selectbox("Unit of measure", GATEWAY_UOMS, key=f"gp_item_uom_{i}")
+            quality = e.selectbox("Quality / condition", GATEWAY_QUALITY_OPTIONS, key=f"gp_item_quality_{i}")
+            fragile = f.selectbox("Fragility status", GATEWAY_FRAGILITY_OPTIONS, key=f"gp_item_fragile_{i}")
+            g, h, k = st.columns(3)
+            value = g.number_input("Estimated value, optional", min_value=0.0, step=1000.0, key=f"gp_item_value_{i}")
+            serial = h.text_input("Serial number", key=f"gp_item_serial_{i}")
+            asset = k.text_input("Asset tag", key=f"gp_item_asset_{i}")
+            handling = st.text_input("Handling instruction", key=f"gp_item_handling_{i}")
+            remarks = st.text_input("Remarks", key=f"gp_item_remarks_{i}")
+            items.append({"desc": desc, "category": category, "qty": qty, "colour": colour, "uom": uom, "quality": quality, "fragile": fragile, "value": value, "serial": serial, "asset": asset, "handling": handling, "remarks": remarks})
+        submitted = st.form_submit_button("Create Gateway Pass Draft", type="primary")
+    if submitted:
+        valid_items = [x for x in items if x["desc"].strip()]
+        if not purpose.strip() or not receiver.strip():
+            st.error("Purpose of movement and receiver name are required.")
+            return
+        if not valid_items:
+            st.error("At least one item line is required before saving.")
+            return
+        bad_qty = [x for x in valid_items if float(x["qty"] or 0) <= 0 or not x["uom"]]
+        if bad_qty:
+            st.error("Each item quantity must be greater than 0 and unit of measure is required.")
+            return
+        pass_no = make_ref("GP")
+        gp_id = run_insert(
+            """
+            INSERT INTO gateway_passes (pass_number, facility_manager_user_id, department, movement_type, purpose, origin_location, destination, expected_movement_date, expected_return_date, vehicle_number, driver_name, driver_phone, receiver_name, receiver_organization, security_checkpoint, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, ?)
+            """,
+            (pass_no, user()["id"], dept, movement_type, purpose.strip(), origin, destination, expected_movement.isoformat(), expected_return.isoformat() if expected_return else None, vehicle, driver, driver_phone, receiver, receiver_org, checkpoint, now_iso(), now_iso()),
+        )
+        for item in valid_items:
+            run_query(
+                """
+                INSERT INTO gateway_pass_items (gateway_pass_id, item_description, item_category, colour, quantity, unit_of_measure, quality_condition, estimated_value, serial_number, asset_tag, fragility_status, handling_instruction, remarks, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (gp_id, item["desc"].strip(), item["category"], item["colour"], float(item["qty"]), item["uom"], item["quality"], float(item["value"] or 0), item["serial"], item["asset"], item["fragile"], item["handling"], item["remarks"], now_iso()),
+            )
+        log_gateway_event(gp_id, "Gateway Pass Draft Created", "Draft", pass_no)
+        _rerun_success(f"Gateway pass draft created: {pass_no}")
+
+
+def submit_gateway_pass(gateway_pass_id: int):
+    items = gateway_pass_items_df(gateway_pass_id)
+    if items.empty:
+        st.error("At least one item line is required before submission.")
+        return
+    if (items["quantity"].fillna(0) <= 0).any() or items["unit_of_measure"].fillna("").eq("").any():
+        st.error("Every item must have quantity greater than 0 and a unit of measure.")
+        return
+    row = df_query("SELECT * FROM gateway_passes WHERE id=?", (gateway_pass_id,)).iloc[0]
+    if row["status"] not in ["Draft", "Returned for Correction"]:
+        st.warning("Only Draft or Returned gateway passes can be submitted.")
+        return
+    run_query("UPDATE gateway_passes SET status='Submitted', submitted_at=?, updated_at=? WHERE id=?", (now_iso(), now_iso(), gateway_pass_id))
+    log_gateway_event(gateway_pass_id, "Gateway Pass Submitted", "Submitted", "Submitted for Procurement Manager / Approver review")
+    from core.db import notify_gateway_pass_reviewers
+    notify_gateway_pass_reviewers(gateway_pass_id, "Gateway Pass Submitted", f"{row['pass_number']} has been submitted and requires review.")
+    create_notification(int(row["facility_manager_user_id"]), None, "Gateway pass submitted", f"{row['pass_number']} was submitted for approval.", "Gateway Pass", gateway_pass_id, "Normal", ["in_app"])
+    st.success("Gateway pass submitted for approval.")
+    st.rerun()
+
+
+def _gateway_approve(gateway_pass_id: int, decision: str, note: str):
+    row = df_query("SELECT * FROM gateway_passes WHERE id=?", (gateway_pass_id,)).iloc[0]
+    if user()["role"] not in ["Procurement Manager", "Approver", "Admin"]:
+        st.error("You are not authorized to approve gateway passes.")
+        return
+    if decision == "Approved" and row["status"] in ["Approved", "Generated", "Downloaded"]:
+        st.warning("This gateway pass has already been approved.")
+        return
+    if decision in ["Rejected", "Returned for Correction"] and not note.strip():
+        st.error("A rejection or return reason is required.")
+        return
+    if decision == "Approved":
+        run_query("UPDATE gateway_passes SET status='Approved', approved_at=?, approved_by_user_id=?, approved_by_role=?, approval_note=?, updated_at=? WHERE id=?", (now_iso(), user()["id"], user()["role"], note, now_iso(), gateway_pass_id))
+        decision_label = "Approved"
+        title = "Gateway Pass Approved"
+        msg = f"{row['pass_number']} has been approved. You can now generate and download the final gateway pass."
+    elif decision == "Rejected":
+        run_query("UPDATE gateway_passes SET status='Rejected', rejected_at=?, rejected_by_user_id=?, rejection_reason=?, updated_at=? WHERE id=?", (now_iso(), user()["id"], note, now_iso(), gateway_pass_id))
+        decision_label = "Rejected"
+        title = "Gateway Pass Rejected"
+        msg = f"{row['pass_number']} was rejected. Reason: {note}"
+    else:
+        run_query("UPDATE gateway_passes SET status='Returned for Correction', rejection_reason=?, updated_at=? WHERE id=?", (note, now_iso(), gateway_pass_id))
+        decision_label = "Returned for Correction"
+        title = "Gateway Pass Returned"
+        msg = f"{row['pass_number']} was returned for correction. Reason: {note}"
+    run_query("INSERT INTO gateway_pass_approvals (gateway_pass_id, approver_user_id, approver_role, decision, note, created_at) VALUES (?, ?, ?, ?, ?, ?)", (gateway_pass_id, user()["id"], user()["role"], decision_label, note, now_iso()))
+    _notify_gateway_event({**row.to_dict(), "id": gateway_pass_id}, title, msg, target="facility", importance="High")
+    _rerun_success(f"Gateway pass {decision_label.lower()}.")
+
+
+def _gateway_cancel_or_reopen(gateway_pass_id: int, action: str, note: str):
+    if user()["role"] != "Admin":
+        st.error("Only Admin can cancel or reopen gateway passes.")
+        return
+    if not note.strip():
+        st.error("Admin reason is required.")
+        return
+    new_status = "Cancelled" if action == "Cancel" else "Returned for Correction"
+    run_query("UPDATE gateway_passes SET status=?, rejection_reason=?, updated_at=? WHERE id=?", (new_status, note, now_iso(), gateway_pass_id))
+    log_gateway_event(gateway_pass_id, f"Gateway Pass {action}", new_status, note)
+    row = df_query("SELECT * FROM gateway_passes WHERE id=?", (gateway_pass_id,)).iloc[0]
+    create_notification(int(row["facility_manager_user_id"]), None, f"Gateway Pass {action}", f"{row['pass_number']} was {action.lower()}ed by Admin. {note}", "Gateway Pass", gateway_pass_id, "High", ["in_app", "browser_push"])
+    st.success(f"Gateway pass {action.lower()}ed.")
+    st.rerun()
+
+
+def generate_gateway_pass_document(gateway_pass_id: int) -> str | None:
+    gp = gateway_pass_summary_df("gp.id=?", (gateway_pass_id,))
+    if gp.empty:
+        st.error("Gateway pass not found.")
+        return None
+    row = gp.iloc[0]
+    if row["status"] not in ["Approved", "Generated", "Downloaded"]:
+        st.error("Generate is disabled until the gateway pass is approved.")
+        return None
+    items = gateway_pass_items_df(gateway_pass_id)
+    if items.empty:
+        st.error("Cannot generate a gateway pass without item lines.")
+        return None
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import mm
+        from reportlab.platypus import Image as RLImage
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+        from core.db import ATTACHMENT_DIR
+
+        target_dir = ATTACHMENT_DIR / "gateway_passes"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        path = target_dir / f"{row['pass_number'].replace('/', '-')}_gateway_pass.pdf"
+
+        page_w, page_h = A4
+        doc = SimpleDocTemplate(
+            str(path),
+            pagesize=A4,
+            leftMargin=18 * mm,
+            rightMargin=18 * mm,
+            topMargin=12 * mm,
+            bottomMargin=12 * mm,
+            title=f"Gateway Pass {row['pass_number']}",
+            author="ProcureFlow",
+        )
+        styles = getSampleStyleSheet()
+        body = ParagraphStyle("GPBody", parent=styles["BodyText"], fontName="Times-Roman", fontSize=9.2, leading=11.6, alignment=TA_LEFT, spaceAfter=8)
+        small = ParagraphStyle("GPSmall", parent=styles["BodyText"], fontName="Helvetica", fontSize=6.5, leading=7.6)
+        section = ParagraphStyle("GPSection", parent=styles["Heading3"], fontName="Times-Bold", fontSize=10.8, leading=12.5, spaceBefore=5, spaceAfter=3)
+        center_title = ParagraphStyle("GPCenterTitle", parent=styles["Heading1"], fontName="Times-Bold", fontSize=14.5, leading=16.5, alignment=TA_CENTER, spaceAfter=2)
+        center_sub = ParagraphStyle("GPCenterSub", parent=styles["Heading2"], fontName="Times-Bold", fontSize=12.5, leading=15, alignment=TA_CENTER, spaceAfter=2)
+        motto = ParagraphStyle("GPMotto", parent=styles["BodyText"], fontName="Times-BoldItalic", fontSize=8.8, leading=10.5, alignment=TA_CENTER)
+        doc_title = ParagraphStyle("GPDocTitle", parent=styles["Heading2"], fontName="Times-Bold", fontSize=12.5, leading=14, alignment=TA_LEFT, spaceBefore=6, spaceAfter=6)
+        note_style = ParagraphStyle("GPNote", parent=styles["BodyText"], fontName="Helvetica", fontSize=7.2, leading=8.4, textColor=colors.HexColor("#0f172a"))
+
+        def P(txt: Any, style=body):
+            return Paragraph(str(txt), style)
+
+        def safe(v: Any, default: str = "") -> str:
+            return escape(_clean(v, default)).replace("\n", "<br/>")
+
+        def logo_flow(path: Path, w: float = 18 * mm, h: float = 18 * mm):
+            if path.exists():
+                img = RLImage(str(path), width=w, height=h)
+                img.hAlign = "CENTER"
+                return img
+            return P("<b>LOGO</b>", motto)
+
+        def page_frame(canvas, _doc):
+            canvas.saveState()
+            canvas.setStrokeColor(colors.HexColor("#0f766e"))
+            canvas.setLineWidth(1.1)
+            canvas.roundRect(14 * mm, 12 * mm, page_w - 28 * mm, page_h - 24 * mm, 5 * mm, stroke=1, fill=0)
+            canvas.setFillColor(colors.HexColor("#0f766e"))
+            canvas.rect(14 * mm, page_h - 14 * mm, page_w - 28 * mm, 2 * mm, stroke=0, fill=1)
+            canvas.setFillColor(colors.HexColor("#64748b"))
+            canvas.setFont("Helvetica", 7.4)
+            footer = f"{GATEWAY_COMPANY['address']} | Email: {GATEWAY_COMPANY['email']} | Phone NO.: {GATEWAY_COMPANY['phone']}"
+            canvas.drawCentredString(page_w / 2, 8 * mm, footer[:170])
+            canvas.restoreState()
+
+        story = []
+        header_table = Table(
+            [[
+                logo_flow(_gateway_asset_path("cmotd_logo.png")),
+                [
+                    P(safe(GATEWAY_COMPANY["center_name"]), center_title),
+                    P(safe(GATEWAY_COMPANY["unit_name"]), center_sub),
+                    P(f"<u>{safe(GATEWAY_COMPANY['motto'])}</u>", motto),
+                ],
+                logo_flow(_gateway_asset_path("rsu_logo.png")),
+            ]],
+            colWidths=[23 * mm, 128 * mm, 23 * mm],
+        )
+        header_table.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN", (0, 0), (0, 0), "LEFT"),
+            ("ALIGN", (2, 0), (2, 0), "RIGHT"),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(header_table)
+        story.append(P("PROPERTY MOVEMENT GATE PASS", doc_title))
+
+        ref_table = Table([
+            [P(f"<b>Reference No.:</b> {safe(row.get('pass_number'))}", body), P(f"<b>Date:</b> {_fmt_date(row.get('generated_at') or row.get('created_at'))}", body)],
+            [P(f"<b>Status:</b> {safe(row.get('status'))}", body), P(f"<b>System Reference:</b> GP-{gateway_pass_id}", body)],
+        ], colWidths=[87 * mm, 87 * mm])
+        ref_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+            ("BOX", (0, 0), (-1, -1), .6, colors.HexColor("#cbd5e1")),
+            ("INNERGRID", (0, 0), (-1, -1), .3, colors.HexColor("#e2e8f0")),
+            ("PADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(ref_table)
+        story.append(Spacer(1, 8))
+        story.append(P("This Gate Pass serves as official authorization for the movement of the underlisted company asset(s) from the premises of the Centre for Marine and Offshore Technology Development (CMOTD).", body))
+
+        story.append(P("PROPERTY DETAILS", section))
+        first_item = items.iloc[0] if not items.empty else {}
+        item_sentence = _row_value(first_item, "item_description", "listed company asset") if len(items) <= 1 else f"{len(items)} listed company assets"
+        summary_rows = [
+            [P("<b>Item Description:</b>", body), P(safe(item_sentence), body), P("<b>Department:</b>", body), P(safe(row.get("department"), "N/A"), body)],
+            [P("<b>Colour:</b>", body), P(safe(_row_value(first_item, "colour", "See item table") if len(items) == 1 else "See item table"), body), P("<b>Quantity:</b>", body), P(safe(_qty_text(_row_value(first_item, "quantity", "0")) if len(items) == 1 else f"{len(items)} item line(s)"), body)],
+            [P("<b>Condition:</b>", body), P(safe(_row_value(first_item, "quality_condition", "See item table") if len(items) == 1 else "See item table"), body), P("<b>Fragility:</b>", body), P(safe(_row_value(first_item, "fragility_status", "See item table") if len(items) == 1 else ("Contains fragile item(s)" if (items["fragility_status"] == "Fragile").any() else "Non-Fragile items")), body)],
+        ]
+        summary_table = Table(summary_rows, colWidths=[28 * mm, 58 * mm, 28 * mm, 60 * mm])
+        summary_table.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), .45, colors.HexColor("#cbd5e1")),
+            ("INNERGRID", (0, 0), (-1, -1), .25, colors.HexColor("#e2e8f0")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f1f5f9")),
+            ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#f1f5f9")),
+            ("PADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(summary_table)
+        story.append(Spacer(1, 8))
+
+        item_rows = [[
+            P("<b>No.</b>", small), P("<b>Item Description / Category</b>", small), P("<b>Colour</b>", small),
+            P("<b>Quantity</b>", small), P("<b>Unit</b>", small), P("<b>Quality / Condition</b>", small),
+            P("<b>Fragile?</b>", small), P("<b>Serial / Asset Tag</b>", small), P("<b>Handling / Remarks</b>", small),
+        ]]
+        for no, item in enumerate(items.itertuples(), start=1):
+            desc_cat = f"{safe(getattr(item, 'item_description', ''))}<br/><font color='#64748b'>{safe(getattr(item, 'item_category', ''))}</font>"
+            serial_asset = " / ".join([x for x in [_clean(getattr(item, "serial_number", "")), _clean(getattr(item, "asset_tag", ""))] if x]) or "-"
+            handling = "<br/>".join([x for x in [safe(getattr(item, "handling_instruction", "")), safe(getattr(item, "remarks", ""))] if x]) or "-"
+            item_rows.append([
+                P(no, small), P(desc_cat, small), P(safe(getattr(item, "colour", "-")), small),
+                P(_qty_text(getattr(item, "quantity", "")), small), P(safe(getattr(item, "unit_of_measure", "")), small),
+                P(safe(getattr(item, "quality_condition", "")), small), P(safe(getattr(item, "fragility_status", "")), small),
+                P(safe(serial_asset), small), P(handling, small),
+            ])
+        item_table = Table(item_rows, repeatRows=1, colWidths=[7 * mm, 42 * mm, 14 * mm, 14 * mm, 11 * mm, 22 * mm, 16 * mm, 25 * mm, 23 * mm])
+        item_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("BOX", (0, 0), (-1, -1), .55, colors.HexColor("#94a3b8")),
+            ("INNERGRID", (0, 0), (-1, -1), .25, colors.HexColor("#cbd5e1")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ALIGN", (0, 1), (0, -1), "CENTER"),
+            ("ALIGN", (3, 1), (4, -1), "CENTER"),
+            ("PADDING", (0, 0), (-1, -1), 3.5),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+        ]))
+        story.append(item_table)
+
+        story.append(P("PURPOSE OF MOVEMENT", section))
+        story.append(P(f"The above-mentioned {safe(item_sentence)} is/are being moved for: <b>{safe(row.get('purpose'), 'N/A')}</b>. Security personnel are hereby requested to permit the approved movement from <b>{safe(row.get('origin_location'), 'N/A')}</b> to <b>{safe(row.get('destination'), 'N/A')}</b>.", body))
+
+        story.append(P("TRANSPORT DETAILS", section))
+        transport_rows = [
+            [P("<b>Movement Type:</b>", body), P(safe(row.get("movement_type"), "N/A"), body), P("<b>Movement Date:</b>", body), P(_fmt_date(row.get("expected_movement_date")), body)],
+            [P("<b>Expected Return:</b>", body), P(_fmt_date(row.get("expected_return_date")), body), P("<b>Vehicle Number:</b>", body), P(safe(row.get("vehicle_number"), "________________"), body)],
+            [P("<b>Driver's Name:</b>", body), P(safe(row.get("driver_name"), "________________"), body), P("<b>Driver's Phone Number:</b>", body), P(safe(row.get("driver_phone"), "________________"), body)],
+            [P("<b>Receiver Name:</b>", body), P(safe(row.get("receiver_name"), "________________"), body), P("<b>Security Checkpoint:</b>", body), P(safe(row.get("security_checkpoint"), "Main Gate"), body)],
+        ]
+        transport_table = Table(transport_rows, colWidths=[32 * mm, 55 * mm, 34 * mm, 53 * mm])
+        transport_table.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), .45, colors.HexColor("#cbd5e1")),
+            ("INNERGRID", (0, 0), (-1, -1), .25, colors.HexColor("#e2e8f0")),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f1f5f9")),
+            ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#f1f5f9")),
+            ("PADDING", (0, 0), (-1, -1), 4),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        story.append(transport_table)
+
+        story.append(P("AUTHORIZATION", section))
+        story.append(P("I hereby certify that the movement of the above company property has been duly approved and authorized.", body))
+        auth_rows = [
+            [P("<b>Authorizing Officer:</b>", body), P(safe(row.get("approved_by"), "____________________________"), body)],
+            [P("<b>Designation:</b>", body), P(safe(row.get("approved_by_role"), "____________________________"), body)],
+            [P("<b>Signature:</b>", body), P("____________________________", body)],
+            [P("<b>Date:</b>", body), P(_fmt_date(row.get("approved_at")), body)],
+        ]
+        auth_table = Table(auth_rows, colWidths=[45 * mm, 129 * mm])
+        auth_table.setStyle(TableStyle([
+            ("LINEBELOW", (1, 0), (1, -1), .45, colors.HexColor("#334155")),
+            ("PADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(auth_table)
+
+        security_box = Table([[
+            P("<b>SECURITY VERIFICATION</b><br/>Security Officer Name: ______________________________ &nbsp;&nbsp; Gate Verification Time: ______________________________<br/>Exit/Entry Confirmation: ______________________________ &nbsp;&nbsp; Signature: ______________________________", note_style)
+        ]], colWidths=[174 * mm])
+        security_box.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), .65, colors.HexColor("#94a3b8")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+            ("PADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(Spacer(1, 3))
+        story.append(security_box)
+
+        validity = Table([[
+            P("<b>Validity Notice:</b> This gateway pass is valid only for the listed items and approved movement date.", note_style),
+            P(f"<b>Generated:</b><br/>{_fmt_dt(now_iso())}<br/><b>System Ref:</b> GP-{gateway_pass_id}", note_style),
+        ]], colWidths=[123 * mm, 51 * mm])
+        validity.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), .65, colors.HexColor("#86efac")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#ecfdf5")),
+            ("PADDING", (0, 0), (-1, -1), 4),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+        story.append(Spacer(1, 3))
+        story.append(validity)
+
+        doc.build(story, onFirstPage=page_frame, onLaterPages=page_frame)
+        run_query("UPDATE gateway_passes SET status='Generated', next_role=NULL, generated_at=?, generated_file_path=?, updated_at=? WHERE id=?", (now_iso(), str(path), now_iso(), gateway_pass_id))
+        log_gateway_event(gateway_pass_id, "Gateway Pass Generated", "Generated", str(path))
+        return str(path)
+    except Exception as exc:
+        st.error(f"Could not generate PDF gateway pass: {exc}")
+        return None
+
+
+def gateway_pass_download_button(row: pd.Series):
+    path = row.get("generated_file_path") if hasattr(row, "get") else row["generated_file_path"]
+    if not path:
+        st.info("Generate the approved gateway pass before downloading.")
+        return
+    p = Path(path)
+    if not p.exists():
+        st.warning("Generated file path was recorded but the file is missing. Generate again.")
+        return
+    data = p.read_bytes()
+    mime = "application/pdf" if p.suffix.lower() == ".pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    label = "Download Final Gateway Pass PDF" if p.suffix.lower() == ".pdf" else "Download Generated Gateway Pass"
+    if st.download_button(label, data=data, file_name=p.name, mime=mime, key=f"download_gp_{int(row['id'])}"):
+        run_query("UPDATE gateway_passes SET downloaded_at=?, status='Downloaded', updated_at=? WHERE id=?", (now_iso(), now_iso(), int(row["id"])))
+        log_gateway_event(int(row["id"]), "Gateway Pass Downloaded", "Downloaded", p.name)
+
+
+def gateway_pass_register(where_sql: str, params: tuple | list, title: str, allow_submit: bool = False, allow_generate: bool = False, key_prefix: str = "gp_register"):
+    st.subheader(title)
+    df = gateway_pass_summary_df(where_sql, params)
+    if df.empty:
+        empty_state("No gateway passes", "Gateway pass records will appear here.")
+        return
+    show_cols = ["id", "pass_number", "facility_manager", "department", "movement_type", "destination", "expected_movement_date", "status", "approved_by", "updated_at"]
+    show = df[[c for c in show_cols if c in df.columns]].copy()
+    dataframe(show.drop(columns=["id"]) if "id" in show.columns else show)
+    selected = st.selectbox("Open gateway pass", [f"{r.pass_number} — {r.status} — #{int(r.id)}" for r in df.itertuples()], key=f"{key_prefix}_select")
+    gp_id = int(selected.rsplit("#", 1)[1])
+    row = df[df["id"] == gp_id].iloc[0]
+    gateway_pass_detail(gp_id)
+    events = df_query("SELECT event, status, note, user_id, created_at FROM gateway_pass_events WHERE gateway_pass_id=? ORDER BY created_at DESC", (gp_id,))
+    with st.expander("Gateway pass history", expanded=False):
+        dataframe(events) if not events.empty else st.info("No events yet.")
+    if allow_submit and row["status"] in ["Draft", "Returned for Correction"]:
+        if st.button("Submit Gateway Pass for Approval", type="primary", key=f"{key_prefix}_submit_{gp_id}"):
+            submit_gateway_pass(gp_id)
+    if allow_generate:
+        ready = row["status"] in ["Approved", "Generated", "Downloaded"]
+        if ready:
+            render_gateway_pass_preview(gp_id)
+        else:
+            st.info("The final company-format preview and Generate button unlock after approval by Procurement Manager, Approver/MD, or Admin.")
+        if st.button("Generate Final Gateway Pass PDF", type="primary", key=f"{key_prefix}_generate_{gp_id}", disabled=not ready):
+            path = generate_gateway_pass_document(gp_id)
+            if path:
+                st.success("Gateway pass PDF generated. Review the preview above, then download the final PDF below.")
+                st.rerun()
+        if not ready:
+            st.caption("Generate is disabled until the gateway pass is approved by Procurement Manager, Approver/MD, or Admin.")
+        refreshed = gateway_pass_summary_df("gp.id=?", (gp_id,)).iloc[0]
+        if refreshed["status"] in ["Generated", "Downloaded"] or refreshed.get("generated_file_path"):
+            st.markdown("#### Download")
+            st.caption("Preview is shown before download so the Facility Manager can verify company details, logos, quality, quantity and fragile/non-fragile status.")
+            gateway_pass_download_button(refreshed)
+
+
+def facility_gateway_pass_page():
+    _phase2_bootstrap()
+    st.subheader("Gateway Pass")
+    st.caption("Create, submit, generate and download passes for items moved out, moved in, transferred, returned or released. Final generation is disabled until approval.")
+    fm_id = int(user()["id"])
+    counts = {
+        "Draft Gateway Passes": int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE facility_manager_user_id=? AND status='Draft'", (fm_id,)).iloc[0, 0]),
+        "Submitted Gateway Passes": int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE facility_manager_user_id=? AND status IN ('Submitted','Pending Procurement Manager / Approver Review')", (fm_id,)).iloc[0, 0]),
+        "Approved Gateway Passes": int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE facility_manager_user_id=? AND status='Approved'", (fm_id,)).iloc[0, 0]),
+        "Returned Gateway Passes": int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE facility_manager_user_id=? AND status='Returned for Correction'", (fm_id,)).iloc[0, 0]),
+        "Ready to Generate": int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE facility_manager_user_id=? AND status='Approved'", (fm_id,)).iloc[0, 0]),
+    }
+    metric_row([(k, v, None) for k, v in counts.items()], cols=5)
+    gp_sections = ["Dashboard", "Create Draft", "My Drafts", "Submitted", "Approved / Download", "Returned / Rejected", "History"]
+    section = st.radio("Gateway Pass Sections", gp_sections, horizontal=True, key="fm_gp_local_section")
+
+    # Use radio-driven sections instead of st.tabs. Streamlit renders every
+    # st.tabs body on every click, which made Gateway Pass navigation slow.
+    # This pattern renders only the selected section and opens on the first click.
+    if section == "Dashboard":
+        if st.button("Create Gateway Pass", type="primary", key="fm_gp_big_create"):
+            st.session_state["fm_gp_local_section"] = "Create Draft"
+            st.rerun()
+        recent = gateway_pass_summary_df("gp.facility_manager_user_id=?", (fm_id,)).head(15)
+        dataframe(recent[["pass_number", "department", "movement_type", "destination", "status", "updated_at"]]) if not recent.empty else st.info("No gateway pass records yet.")
+    elif section == "Create Draft":
+        create_gateway_pass_form()
+    elif section == "My Drafts":
+        gateway_pass_register("gp.facility_manager_user_id=? AND gp.status IN ('Draft','Returned for Correction','Returned')", (fm_id,), "My Gateway Pass Drafts", allow_submit=True, key_prefix="fm_gp_drafts")
+    elif section == "Submitted":
+        gateway_pass_register("gp.facility_manager_user_id=? AND gp.status IN ('Submitted','Pending Procurement Manager / Approver Review')", (fm_id,), "Submitted Gateway Passes", key_prefix="fm_gp_submitted")
+    elif section == "Approved / Download":
+        gateway_pass_register("gp.facility_manager_user_id=? AND gp.status IN ('Approved','Generated','Downloaded')", (fm_id,), "Approved Gateway Passes", allow_generate=True, key_prefix="fm_gp_approved")
+    elif section == "Returned / Rejected":
+        gateway_pass_register("gp.facility_manager_user_id=? AND gp.status IN ('Rejected','Returned for Correction','Cancelled')", (fm_id,), "Rejected / Returned Gateway Passes", allow_submit=True, key_prefix="fm_gp_returned")
+    elif section == "History":
+        gateway_pass_register("gp.facility_manager_user_id=?", (fm_id,), "Gateway Pass History", allow_generate=True, key_prefix="fm_gp_history")
+
+
+def gateway_pass_review_queue(title: str, admin_mode: bool = False):
+    _phase2_bootstrap()
+    st.subheader(title)
+    df = gateway_pass_summary_df("gp.status IN ('Submitted','Pending Procurement Manager / Approver Review')", ())
+    if df.empty:
+        st.success("No gateway passes are awaiting review.")
+        return
+    show = df[["id", "pass_number", "facility_manager", "department", "movement_type", "destination", "expected_movement_date", "status", "submitted_at"]].copy()
+    dataframe(show.drop(columns=["id"]))
+    selected = st.selectbox("Open gateway pass for review", [f"{r.pass_number} — {r.facility_manager} — #{int(r.id)}" for r in df.itertuples()], key=f"gp_review_select_{user()['role']}_{admin_mode}")
+    gp_id = int(selected.rsplit("#", 1)[1])
+    gateway_pass_detail(gp_id)
+    note = st.text_area("Review note / reason", key=f"gp_review_note_{gp_id}_{user()['role']}_{admin_mode}")
+    c1, c2, c3 = st.columns(3)
+    if c1.button("Approve Gateway Pass", type="primary", key=f"gp_approve_{gp_id}_{user()['role']}"):
+        _gateway_approve(gp_id, "Approved", note or "Approved.")
+    if c2.button("Return for Correction", key=f"gp_return_{gp_id}_{user()['role']}"):
+        _gateway_approve(gp_id, "Returned for Correction", note)
+    if c3.button("Reject Gateway Pass", key=f"gp_reject_{gp_id}_{user()['role']}"):
+        _gateway_approve(gp_id, "Rejected", note)
+    reviewed = gateway_pass_summary_df("gp.approved_by_user_id=?", (user()["id"],))
+    with st.expander("My reviewed gateway passes", expanded=False):
+        dataframe(reviewed[["pass_number", "status", "approval_note", "approved_at", "updated_at"]]) if not reviewed.empty else st.info("No reviewed gateway passes yet.")
+
+
+def gateway_pass_management_page():
+    _phase2_bootstrap()
+    st.subheader("Gateway Pass Management")
+    metric_row([
+        ("Pending gateway pass approvals", int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE status IN ('Submitted','Pending Procurement Manager / Approver Review')").iloc[0, 0]), None),
+        ("Gateway pass activity this month", int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE substr(created_at,1,7)=?", (month_key(),)).iloc[0, 0]), None),
+        ("Fragile items moved", int(df_query("SELECT COUNT(*) c FROM gateway_pass_items WHERE fragility_status='Fragile'").iloc[0, 0]), None),
+        ("Cancelled/rejected passes", int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE status IN ('Cancelled','Rejected')").iloc[0, 0]), None),
+    ], cols=4)
+    admin_gp_sections = ["Awaiting Approval", "All Gateway Passes", "Admin Actions", "History"]
+    section = st.radio("Gateway Pass Management Sections", admin_gp_sections, horizontal=True, key="admin_gp_local_section")
+
+    if section == "Awaiting Approval":
+        gateway_pass_review_queue("Gateway Pass Oversight / Approval", admin_mode=True)
+    elif section == "All Gateway Passes":
+        gateway_pass_register("1=1", (), "All Gateway Passes", allow_generate=False, key_prefix="admin_gp_all")
+    elif section == "Admin Actions":
+        df = gateway_pass_summary_df("1=1", ())
+        if df.empty:
+            st.info("No gateway pass records.")
+        else:
+            selected = st.selectbox("Select pass for admin action", [f"{r.pass_number} — {r.status} — #{int(r.id)}" for r in df.itertuples()], key="admin_gp_action_select")
+            gp_id = int(selected.rsplit("#", 1)[1])
+            gateway_pass_detail(gp_id)
+            reason = st.text_area("Mandatory admin reason", key=f"admin_gp_reason_{gp_id}")
+            c1, c2 = st.columns(2)
+            if c1.button("Cancel Incorrect Pass", key=f"admin_gp_cancel_{gp_id}"):
+                _gateway_cancel_or_reopen(gp_id, "Cancel", reason)
+            if c2.button("Reopen / Return for Correction", key=f"admin_gp_reopen_{gp_id}"):
+                _gateway_cancel_or_reopen(gp_id, "Reopen", reason)
+    elif section == "History":
+        events = df_query("""
+            SELECT ge.*, gp.pass_number, u.full_name user_name
+            FROM gateway_pass_events ge
+            LEFT JOIN gateway_passes gp ON gp.id=ge.gateway_pass_id
+            LEFT JOIN users u ON u.id=ge.user_id
+            ORDER BY ge.created_at DESC LIMIT 1000
+        """)
+        dataframe(events) if not events.empty else st.info("No gateway pass events yet.")
+        csv_download(events, "gateway_pass_events")
+
+
+def gateway_pass_audit_page():
+    _phase2_bootstrap()
+    st.subheader("Gateway Pass Audit")
+    c1, c2, c3, c4 = st.columns(4)
+    start = c1.date_input("From", date.today() - timedelta(days=30), key="gp_audit_from")
+    end = c2.date_input("To", date.today(), key="gp_audit_to")
+    statuses = ["All"] + GATEWAY_PASS_STATUSES
+    status = c3.selectbox("Status", statuses, key="gp_audit_status")
+    movement = c4.selectbox("Movement type", ["All"] + GATEWAY_MOVEMENT_TYPES, key="gp_audit_movement")
+    c5, c6, c7, c8 = st.columns(4)
+    fm_users = df_query("SELECT id, full_name FROM users WHERE role='Facility Manager' ORDER BY full_name")
+    fm_label = c5.selectbox("Facility Manager", ["All"] + [f"{r.full_name} #{int(r.id)}" for r in fm_users.itertuples()], key="gp_audit_fm")
+    approvers = df_query("SELECT DISTINCT u.id, u.full_name FROM gateway_passes gp JOIN users u ON u.id=gp.approved_by_user_id ORDER BY u.full_name")
+    approver_label = c6.selectbox("Approved by", ["All"] + [f"{r.full_name} #{int(r.id)}" for r in approvers.itertuples()], key="gp_audit_approver")
+    dept = c7.selectbox("Department", ["All"] + department_options(), key="gp_audit_dept")
+    fragile_only = c8.checkbox("Fragile items only", key="gp_audit_fragile")
+    # created_at is stored as an ISO timestamp on both SQLite and PostgreSQL;
+    # comparing its YYYY-MM-DD prefix keeps this filter backend-neutral.
+    where = ["substr(gp.created_at,1,10) BETWEEN ? AND ?"]
+    params: list[Any] = [start.isoformat(), end.isoformat()]
+    if status != "All": where.append("gp.status=?"); params.append(status)
+    if movement != "All": where.append("gp.movement_type=?"); params.append(movement)
+    if fm_label != "All": where.append("gp.facility_manager_user_id=?"); params.append(int(fm_label.rsplit("#",1)[1]))
+    if approver_label != "All": where.append("gp.approved_by_user_id=?"); params.append(int(approver_label.rsplit("#",1)[1]))
+    if dept != "All": where.append("gp.department=?"); params.append(dept)
+    if fragile_only:
+        where.append("EXISTS (SELECT 1 FROM gateway_pass_items gpi WHERE gpi.gateway_pass_id=gp.id AND gpi.fragility_status='Fragile')")
+    df = gateway_pass_summary_df(" AND ".join(where), params)
+    metric_row([
+        ("Gateway pass audit count", len(df), None),
+        ("Approved passes", int((df["status"] == "Approved").sum()) if not df.empty else 0, None),
+        ("Generated passes", int(df["status"].isin(["Generated", "Downloaded"]).sum()) if not df.empty else 0, None),
+        ("Fragile item movements", int(df_query("SELECT COUNT(DISTINCT gateway_pass_id) c FROM gateway_pass_items WHERE fragility_status='Fragile'").iloc[0,0]), None),
+    ], cols=4)
+    if df.empty:
+        st.info("No gateway pass records match the selected filters.")
+        return
+    dataframe(df[["pass_number", "facility_manager", "department", "movement_type", "destination", "status", "approved_by", "approved_by_role", "approved_at", "generated_at", "downloaded_at", "created_at"]])
+    csv_download(df, "gateway_pass_audit_report")
+    selected = st.selectbox("Open audit record", [f"{r.pass_number} — {r.status} — #{int(r.id)}" for r in df.itertuples()], key="gp_audit_select")
+    gp_id = int(selected.rsplit("#",1)[1])
+    gateway_pass_detail(gp_id)
+    events = df_query("SELECT * FROM gateway_pass_events WHERE gateway_pass_id=? ORDER BY created_at DESC", (gp_id,))
+    approvals = df_query("SELECT * FROM gateway_pass_approvals WHERE gateway_pass_id=? ORDER BY created_at DESC", (gp_id,))
+    st.markdown("#### Lifecycle events")
+    dataframe(events)
+    st.markdown("#### Approval decisions")
+    dataframe(approvals)
+
+
+def admin_phase2_alerts():
+    today_iso = date.today().isoformat()
+    ending_soon_iso = (date.today() + timedelta(days=3)).isoformat()
+    pending_away = int(df_query("SELECT COUNT(*) c FROM user_availability WHERE admin_review_status='Pending Review'").iloc[0, 0])
+    active_deleg = int(df_query("SELECT COUNT(*) c FROM approval_delegations WHERE enabled=1").iloc[0, 0])
+    ending_soon = int(df_query(
+        "SELECT COUNT(*) c FROM approval_delegations WHERE enabled=1 AND end_date IS NOT NULL AND end_date <= ?",
+        (ending_soon_iso,),
+    ).iloc[0, 0])
+    users_away = int(df_query(
+        "SELECT COUNT(*) c FROM user_availability WHERE status IN ('Away Approved','Away Active') AND away_start_date <= ? AND away_end_date >= ?",
+        (today_iso, today_iso),
+    ).iloc[0, 0])
+    affected_queue = int(df_query("SELECT COUNT(*) c FROM purchase_requests WHERE status IN ('Pending Approval','Pending Approver/MD Approval')").iloc[0, 0])
+    pending_gp = int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE status IN ('Submitted','Pending Procurement Manager / Approver Review')").iloc[0, 0])
+    if pending_away or active_deleg or pending_gp or users_away or ending_soon:
+        st.markdown("### What needs Admin attention?")
+        metric_row([
+            ("Pending away notices", pending_away, "availability"),
+            ("Active delegations", active_deleg, "approval continuity"),
+            ("Delegations ending soon", ending_soon, "next 3 days"),
+            ("Users currently away", users_away, "active period"),
+            ("Approval queues affected", affected_queue, "pending approvals"),
+            ("Gateway Pass Oversight", pending_gp, "awaiting review"),
+        ], cols=3)
+
+
+def all_records_page():
+    _phase2_bootstrap()
+    tables = [
+        "users", "roles", "permissions", "role_permissions", "purchase_requests", "purchase_request_items",
+        "sourcing_tasks", "vendor_quotes", "purchase_orders", "purchase_order_items", "receiving_slips",
+        "invoices", "expenses", "payments", "cash_advances", "vendors", "imported_legacy_documents",
+        "annual_budgets", "budgets", "budget_adjustments", "budget_history", "approval_rules",
+        "approval_delegations", "approval_history", "facility_manager_links", "collaboration_threads",
+        "collaboration_messages", "activity_logs", "workflow_events", "notifications", "notification_preferences",
+        "push_subscriptions", "notification_outbox", "user_availability", "gateway_passes", "gateway_pass_items",
+        "gateway_pass_approvals", "gateway_pass_events", "audit_logs",
+    ]
+    tables = [t for t in tables if _table_exists_local(t)]
+    st.subheader("All Procurement Records")
+    table = st.selectbox("Record table", tables, key="all_records_table_phase2")
+    df = _safe_table_df(table, 1000)
+    dataframe(df)
+    csv_download(df, table)
+
+
+def notifications_monitor_page():
+    _phase2_bootstrap()
+    st.subheader("Notifications Monitor")
+    df = df_query("SELECT n.*, u.username, u.full_name FROM notifications n LEFT JOIN users u ON n.user_id=u.id ORDER BY n.created_at DESC LIMIT 500")
+    dataframe(df) if not df.empty else st.info("No notifications yet.")
+    csv_download(df, "notifications")
+    st.markdown("#### External notification outbox")
+    outbox = _safe_table_df("notification_outbox", 500)
+    dataframe(outbox) if not outbox.empty else st.info("No external notification outbox items yet.")
+    st.markdown("#### User notification preferences")
+    prefs = df_query("SELECT np.*, u.username, u.full_name, u.role FROM notification_preferences np LEFT JOIN users u ON u.id=np.user_id ORDER BY u.role, u.username")
+    dataframe(prefs) if not prefs.empty else st.info("No preferences yet.")
+
+
+def admin_console():
+    role_header("Admin Console", "Highest-authority workspace for users, budgets, workflow rules, imports, audit control, availability, notifications and gateway passes.")
+    section = st.session_state.get("admin_section", "Admin Dashboard")
+    if section == "Admin Dashboard":
+        admin_metrics(); admin_phase2_alerts(); admin_overview()
+    elif section == "Budget Tracker":
+        budget_command_center()
+    elif section == "User Management":
+        user_management()
+    elif section == "Roles & Permissions":
+        roles_permissions_page()
+    elif section == "Approval Configuration":
+        approval_configuration_page()
+    elif section == "Import Center":
+        import_center()
+    elif section == "All Procurement Records":
+        all_records_page()
+    elif section == "Notifications Monitor":
+        notifications_monitor_page()
+    elif section == "Availability & Delegation Requests":
+        availability_delegation_requests_page()
+    elif section == "Gateway Pass Management":
+        gateway_pass_management_page()
+    elif section == "Activity & History Logs":
+        activity_history_page(scope="admin")
+    elif section == "Audit Logs":
+        audit_log_page(full=True)
+    elif section == "Database Viewer":
+        database_viewer_page()
+    elif section == "Backup / Export":
+        backup_export_page()
+    elif section == "Settings":
+        settings_page()
+    else:
+        admin_metrics(); admin_phase2_alerts(); admin_overview()
+
+
+def procurement_dashboard():
+    st.subheader("What needs my attention?")
+    c1, c2, c3 = st.columns(3)
+    fm_inbox = int(df_query("SELECT COUNT(*) c FROM purchase_requests WHERE status='Submitted to Procurement Manager'").iloc[0, 0])
+    gp_waiting = int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE status IN ('Submitted','Pending Procurement Manager / Approver Review')").iloc[0, 0])
+    away = df_query("SELECT * FROM user_availability WHERE user_id=? AND status NOT IN ('Returned','Cancelled') ORDER BY created_at DESC LIMIT 1", (user()["id"],))
+    c1.metric("Facility Manager Inbox", fm_inbox)
+    c2.metric("Gateway Passes Awaiting Review", gp_waiting)
+    c3.metric("Availability", "Away/Delegated" if not away.empty else "Available")
+    if gp_waiting:
+        st.warning(f"{gp_waiting} gateway pass(es) are awaiting review.")
+    df = df_query("SELECT request_no, department_project, category, estimated_amount, status, updated_at FROM purchase_requests WHERE status NOT IN ('Closed','Rejected','Paid') ORDER BY updated_at DESC LIMIT 20")
+    if not df.empty:
+        df["estimated_amount"] = df["estimated_amount"].apply(money); dataframe(df)
+    else:
+        st.success("No open procurement requests.")
+
+
+def procurement_workspace():
+    role_header("Procurement Manager Workspace", "Operational command center for procurement, Facility Manager handoffs, sourcing, POs, delegated approvals, away notices and gateway pass reviews.")
+    section = st.session_state.get("procurement_section", "Operations Dashboard")
+    if section == "Operations Dashboard":
+        procurement_dashboard_metrics(); procurement_dashboard()
+    elif section == "Purchase Requests":
+        requests_page(mode="procurement")
+    elif section == "Facility Manager Inbox":
+        facility_manager_inbox()
+    elif section == "Import Center":
+        import_center()
+    elif section == "Sourcing":
+        sourcing_page()
+    elif section == "Vendor Quotes":
+        quote_page()
+    elif section == "Vendor Recommendation":
+        sourcing_page()
+    elif section == "Purchase Orders":
+        purchase_orders_page()
+    elif section == "Receiving Slips":
+        receiving_page()
+    elif section == "Vendors":
+        vendors_page()
+    elif section == "Gateway Pass Review":
+        gateway_pass_review_queue("Gateway Pass Review")
+    elif section == "Acting Approval Queue":
+        acting_approval_queue()
+    elif section == "Availability / Away Notice":
+        availability_panel()
+    elif section == "Procurement Documents":
+        document_archive(editable=True)
+    elif section == "Procurement Reports":
+        procurement_reports()
+    elif section == "My Activity History":
+        activity_history_page(scope="mine")
+    elif section == "Settings":
+        settings_page()
+    else:
+        procurement_dashboard_metrics(); procurement_dashboard()
+
+
+def facility_dashboard():
+    fm_id = user()["id"]
+    pm_id = get_pm_for_facility_manager(fm_id)
+    pm = df_query("SELECT full_name FROM users WHERE id=?", (pm_id,)) if pm_id else pd.DataFrame()
+    st.info(f"Assigned Procurement Manager: {pm.iloc[0]['full_name'] if not pm.empty else 'Not assigned yet'}")
+    q = lambda status: int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE facility_manager_user_id=? AND status=?", (fm_id, status)).iloc[0,0])
+    gp_ready = int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE facility_manager_user_id=? AND status='Approved'", (fm_id,)).iloc[0,0])
+    gp_returned = int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE facility_manager_user_id=? AND status='Returned for Correction'", (fm_id,)).iloc[0,0])
+    metric_row([
+        ("FM Drafts", q("FM Draft"), None),
+        ("Submitted", q("Submitted to Procurement Manager"), None),
+        ("Returned", q("Returned to Facility Manager"), None),
+        ("Accepted", q("Accepted by Procurement Manager"), None),
+        ("Gateway Ready to Generate", gp_ready, None),
+        ("Gateway Returned", gp_returned, None),
+    ], cols=3)
+    st.subheader("What needs my attention?")
+    if gp_ready:
+        st.success(f"{gp_ready} approved gateway pass(es) are ready to generate/download.")
+    if gp_returned:
+        st.warning(f"{gp_returned} gateway pass(es) were returned for correction.")
+    df = df_query("""
+        SELECT request_no, department_project, category, estimated_amount, status, updated_at
+        FROM purchase_requests
+        WHERE facility_manager_user_id=? AND status IN ('FM Draft','Returned to Facility Manager','Submitted to Procurement Manager','Accepted by Procurement Manager')
+        ORDER BY updated_at DESC LIMIT 20
+    """, (fm_id,))
+    if not df.empty:
+        df["estimated_amount"] = df["estimated_amount"].apply(money); dataframe(df)
+    else:
+        st.success("No Facility Manager procurement actions pending.")
+    recent_gp = gateway_pass_summary_df("gp.facility_manager_user_id=?", (fm_id,)).head(10)
+    st.markdown("#### Recent Gateway Passes")
+    dataframe(recent_gp[["pass_number", "movement_type", "destination", "status", "updated_at"]]) if not recent_gp.empty else st.info("No gateway pass records yet.")
+
+
+def facility_workspace():
+    role_header("Facility Manager Workspace", "Create draft requests, import supporting documents, submit to Procurement Manager, collaborate privately, and manage gateway passes.")
+    section = st.session_state.get("facility_section", "Facility Dashboard")
+    if section == "Facility Dashboard":
+        facility_dashboard()
+    elif section == "Create Request Draft":
+        create_fm_draft_form()
+    elif section == "My Draft Requests":
+        facility_draft_register(status_filter=None)
+    elif section == "Submit to Procurement Manager":
+        facility_draft_register(status_filter=["FM Draft", "Returned to Facility Manager"])
+    elif section == "Import Documents":
+        facility_import_documents()
+    elif section == "Gateway Pass":
+        facility_gateway_pass_page()
+    elif section == "Shared Thread with Procurement Manager":
+        facility_shared_threads()
+    elif section == "Returned Requests":
+        facility_draft_register(status_filter=["Returned to Facility Manager"])
+    elif section == "Approved / Accepted Requests":
+        facility_draft_register(status_filter=["Accepted by Procurement Manager", "Converted to Purchase Request", "Approved", "Paid", "Closed"])
+    elif section == "My Activity History":
+        activity_history_page(scope="mine")
+    elif section == "Settings":
+        settings_page()
+    else:
+        facility_dashboard()
+
+
+def executive_dashboard():
+    st.subheader("What needs my attention?")
+    pending = int(df_query("SELECT COUNT(*) c FROM purchase_requests WHERE status IN ('Pending Approval','Pending Approver/MD Approval')").iloc[0, 0])
+    gp_waiting = int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE status IN ('Submitted','Pending Procurement Manager / Approver Review')").iloc[0, 0])
+    away = df_query("SELECT * FROM user_availability WHERE user_id=? AND status NOT IN ('Returned','Cancelled') ORDER BY created_at DESC LIMIT 1", (user()["id"],))
+    metric_row([
+        ("Pending approvals", pending, None),
+        ("Gateway Passes Awaiting Review", gp_waiting, None),
+        ("Availability", "Away/Delegated" if not away.empty else "Available", None),
+    ], cols=3)
+    if gp_waiting:
+        st.warning(f"{gp_waiting} gateway pass(es) require Procurement Manager or Approver/MD review.")
+    df = df_query("SELECT request_no, department_project, category, estimated_amount, status, updated_at FROM purchase_requests WHERE status IN ('Pending Approval','Pending Approver/MD Approval') ORDER BY estimated_amount DESC LIMIT 20")
+    if not df.empty:
+        df["estimated_amount"] = df["estimated_amount"].apply(money); dataframe(df)
+    else:
+        st.success("No pending request approvals.")
+
+
+def executive_workspace():
+    role_header("Approver Workspace", "Simple decision workspace for requests, POs, payments, availability continuity, and gateway pass approvals.")
+    section = st.session_state.get("executive_section", "Approval Dashboard")
+    if section == "Approval Dashboard":
+        executive_metrics(); executive_dashboard()
+    elif section == "Pending Approvals":
+        pending_approval_page()
+    elif section == "Quote Comparison":
+        quote_comparison_decision_page()
+    elif section == "PO Approval":
+        po_approval_page()
+    elif section == "Payment Approval":
+        payment_approval_page()
+    elif section == "Gateway Pass Approval":
+        gateway_pass_review_queue("Gateway Pass Approval")
+    elif section == "Availability / Away Notice":
+        availability_panel()
+    elif section == "My Approval History":
+        my_approval_history_page()
+    elif section == "Settings":
+        settings_page()
+    else:
+        executive_metrics(); executive_dashboard()
+
+
+def audit_dashboard():
+    st.subheader("Compliance Snapshot")
+    recent_notifs = df_query("SELECT title, message, entity_type, entity_id, created_at FROM notifications WHERE role='Auditor' OR user_id=? ORDER BY created_at DESC LIMIT 25", (user()["id"],))
+    if not recent_notifs.empty:
+        st.markdown("#### Recent activity notifications")
+        dataframe(recent_notifs)
+    metric_row([
+        ("Gateway pass audit count", int(df_query("SELECT COUNT(*) c FROM gateway_passes").iloc[0,0]), None),
+        ("Approved passes", int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE status='Approved'").iloc[0,0]), None),
+        ("Generated passes", int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE status IN ('Generated','Downloaded')").iloc[0,0]), None),
+        ("Fragile item movements", int(df_query("SELECT COUNT(DISTINCT gateway_pass_id) c FROM gateway_pass_items WHERE fragility_status='Fragile'").iloc[0,0]), None),
+    ], cols=4)
+    logs = df_query("SELECT created_at, action, entity_type, entity_id, details FROM audit_logs ORDER BY created_at DESC LIMIT 20")
+    dataframe(logs) if not logs.empty else st.info("No audit logs yet.")
+
+
+def audit_workspace():
+    role_header("Audit & Compliance Workspace", "Read-only review of lifecycles, approvals, delegated approvals, budgets, imports, handoffs, gateway passes, vendors and finance status changes.")
+    section = st.session_state.get("audit_section", "Audit Dashboard")
+    if section == "Audit Dashboard":
+        audit_metrics(); audit_dashboard()
+    elif section == "Procurement Records":
+        all_records_page()
+    elif section == "Document Archive":
+        document_archive(editable=False)
+    elif section == "Approval Trails":
+        approval_trails_page()
+    elif section == "Delegated Approval Review":
+        delegated_approval_review_page()
+    elif section == "Budget Audit":
+        budget_audit_page()
+    elif section == "Facility Manager Handoff Trail":
+        facility_handoff_trail_page()
+    elif section == "Gateway Pass Audit":
+        gateway_pass_audit_page()
+    elif section == "Vendor History":
+        vendor_history_page()
+    elif section == "Expense Review":
+        expense_review_page()
+    elif section == "Compliance Reports":
+        compliance_reports()
+    elif section == "Settings":
+        settings_page()
+    else:
+        audit_metrics(); audit_dashboard()
+
+# ============================================================================
+# Phase 3 hardening overrides: safe audit views, gateway ownership, separated receipts/invoices
+# ============================================================================
+
+def _ensure_finance_doc_schema_ui():
+    from core.db import ensure_finance_document_schema, ensure_hardening_schema
+    ensure_hardening_schema()
+    ensure_finance_document_schema()
+
+
+def _redact_ui_df(df: pd.DataFrame, table: str | None = None) -> pd.DataFrame:
+    try:
+        from core.db import redact_dataframe
+        return redact_dataframe(df, table)
+    except Exception:
+        if df is None or df.empty:
+            return df
+        safe = df.copy()
+        for col in safe.columns:
+            if col in {"password_hash", "endpoint", "p256dh_key", "auth_key", "file_hash", "receipt_hash"}:
+                safe[col] = "[hidden]"
+            if col in {"message_text", "private_details"}:
+                safe[col] = "[private]"
+        return safe
+
+
+def all_records_page():
+    _phase2_bootstrap()
+    _ensure_finance_doc_schema_ui()
+    tables = [
+        "users", "roles", "permissions", "role_permissions", "purchase_requests", "purchase_request_items",
+        "sourcing_tasks", "vendor_quotes", "purchase_orders", "purchase_order_items", "receiving_slips",
+        "invoices", "invoice_items", "receipt_records", "receipt_items", "expenses", "payments", "cash_advances", "vendors",
+        "imported_legacy_documents", "annual_budgets", "budgets", "budget_adjustments", "budget_history", "approval_rules",
+        "approval_delegations", "approval_history", "facility_manager_links", "collaboration_threads", "collaboration_messages",
+        "activity_logs", "workflow_events", "notifications", "notification_preferences", "push_subscriptions", "notification_outbox",
+        "user_availability", "gateway_passes", "gateway_pass_items", "gateway_pass_approvals", "gateway_pass_events", "audit_logs",
+    ]
+    tables = [t for t in tables if _table_exists_local(t)]
+    st.subheader("All Procurement Records")
+    st.caption("Sensitive values such as password hashes, push keys, file hashes and private message text are hidden in the UI/export.")
+    table = st.selectbox("Record table", tables, key="all_records_table_phase3")
+    df = _safe_table_df(table, 1000)
+    safe = _redact_ui_df(df, table)
+    dataframe(safe)
+    csv_download(safe, table)
+
+
+def auditor_records_page():
+    _phase2_bootstrap()
+    _ensure_finance_doc_schema_ui()
+    st.subheader("Procurement Records — Auditor Safe View")
+    st.caption("Read-only compliance views. Private message content, passwords, push keys and internal user secrets are intentionally not shown.")
+    views = {
+        "Purchase Requests": """
+            SELECT pr.request_no, requester.full_name requester, pr.department_project, pr.category, pr.estimated_amount,
+                   pr.status, pr.payment_status, pr.created_at, pr.updated_at
+            FROM purchase_requests pr LEFT JOIN users requester ON requester.id=pr.requested_by
+            ORDER BY pr.updated_at DESC LIMIT 1000
+        """,
+        "Purchase Orders": """
+            SELECT po.po_no, pr.request_no, v.name vendor, po.total_amount, po.status, po.payment_status,
+                   po.receiving_status, po.created_at, po.updated_at
+            FROM purchase_orders po
+            LEFT JOIN purchase_requests pr ON pr.id=po.request_id
+            LEFT JOIN vendors v ON v.id=po.vendor_id
+            ORDER BY po.updated_at DESC LIMIT 1000
+        """,
+        "Invoices": """
+            SELECT inv.invoice_no, inv.invoice_type, po.po_no, v.name vendor, inv.invoice_date, inv.due_date,
+                   inv.total_amount, inv.balance_due, inv.match_status, inv.status, inv.created_at
+            FROM invoices inv
+            LEFT JOIN purchase_orders po ON po.id=inv.po_id
+            LEFT JOIN vendors v ON v.id=inv.vendor_id
+            ORDER BY inv.created_at DESC LIMIT 1000
+        """,
+        "Receipts": """
+            SELECT rr.receipt_no, rr.receipt_type, rr.payment_method, rr.payment_date, v.name vendor,
+                   rr.amount, rr.status, rr.department_project, rr.created_at
+            FROM receipt_records rr LEFT JOIN vendors v ON v.id=rr.vendor_id
+            ORDER BY rr.created_at DESC LIMIT 1000
+        """,
+        "Gateway Passes": """
+            SELECT gp.pass_number, fm.full_name facility_manager, gp.department, gp.movement_type, gp.destination,
+                   gp.status, gp.approved_by_role, approver.full_name approved_by, gp.approved_at, gp.generated_at, gp.downloaded_at
+            FROM gateway_passes gp
+            LEFT JOIN users fm ON fm.id=gp.facility_manager_user_id
+            LEFT JOIN users approver ON approver.id=gp.approved_by_user_id
+            ORDER BY gp.updated_at DESC LIMIT 1000
+        """,
+        "Private Handoff Metadata": """
+            SELECT ct.entity_type, ct.entity_id, fm.full_name facility_manager, pm.full_name procurement_manager,
+                   COUNT(cm.id) message_count, MAX(cm.created_at) last_message_at
+            FROM collaboration_threads ct
+            LEFT JOIN collaboration_messages cm ON cm.thread_id=ct.id
+            LEFT JOIN users fm ON fm.id=ct.facility_manager_user_id
+            LEFT JOIN users pm ON pm.id=ct.procurement_manager_user_id
+            GROUP BY ct.id, ct.entity_type, ct.entity_id, fm.full_name, pm.full_name
+            ORDER BY last_message_at DESC LIMIT 1000
+        """,
+        "Audit Logs": "SELECT created_at, action, entity_type, entity_id, user_id, role, details FROM audit_logs ORDER BY created_at DESC LIMIT 1000",
+    }
+    label = st.selectbox("Compliance view", list(views.keys()), key="auditor_safe_view")
+    df = df_query(views[label])
+    if "amount" in df.columns:
+        df["amount"] = df["amount"].apply(money)
+    if "estimated_amount" in df.columns:
+        df["estimated_amount"] = df["estimated_amount"].apply(money)
+    if "total_amount" in df.columns:
+        df["total_amount"] = df["total_amount"].apply(money)
+    dataframe(_redact_ui_df(df, None)) if not df.empty else st.info("No records in this compliance view.")
+    csv_download(_redact_ui_df(df, None), f"auditor_{label.lower().replace(' ', '_')}")
+
+
+def record_collaboration(entity_type: str, entity_id: int, key_scope: str | None = None):
+    safe_entity = entity_type.lower().replace(" ", "_").replace("/", "_")
+    if key_scope is None:
+        st.session_state["_collab_render_seq"] = st.session_state.get("_collab_render_seq", 0) + 1
+        key_scope = f"auto_{st.session_state['_collab_render_seq']}"
+    scope = key_scope.lower().replace(" ", "_").replace("/", "_")
+    form_key = f"comment_{scope}_{safe_entity}_{entity_id}"
+    with st.expander("Timeline, Comments & Internal Notes"):
+        events = df_query("SELECT we.created_at, we.event, we.status, u.full_name user, we.note FROM workflow_events we LEFT JOIN users u ON we.user_id=u.id WHERE entity_type=? AND entity_id=? ORDER BY we.created_at", (entity_type, entity_id))
+        dataframe(events) if not events.empty else st.info("No workflow events yet.")
+        comments = df_query("SELECT c.created_at, u.full_name user, c.comment_text, c.is_internal FROM comments c LEFT JOIN users u ON c.user_id=u.id WHERE entity_type=? AND entity_id=? ORDER BY c.created_at DESC", (entity_type, entity_id))
+        dataframe(comments) if not comments.empty else st.info("No comments yet.")
+        if user()["role"] == "Auditor":
+            st.caption("Auditor access is read-only. Private comments are reviewed through metadata and official audit trails only.")
+            return
+        with st.form(form_key):
+            text = st.text_area("Add comment or internal note", key=f"{form_key}_text")
+            internal = st.checkbox("Internal note", key=f"{form_key}_internal")
+            submitted = st.form_submit_button("Post")
+        if submitted and text:
+            run_query("INSERT INTO comments (entity_type, entity_id, comment_text, is_internal, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)", (entity_type, entity_id, text, int(internal), user()["id"], now_iso()))
+            add_workflow_event(entity_type, entity_id, "Comment Added", None, text[:120], user()["id"])
+            st.rerun()
+
+
+RECEIPT_PAYMENT_METHODS = ["Cash", "Bank Transfer", "Card", "POS/Card", "Cheque", "Mobile Money"]
+INVOICE_TYPES = ["Supplier Invoice", "Pro Forma Invoice", "Tax Invoice", "Service Invoice", "Recurring Invoice", "Credit Note", "Debit Note"]
+
+
+def _ocr_upload_panel(upload_key: str, doc_kind: str):
+    vendors_df = df_query("SELECT id, name, bank_name, account_no, rating FROM vendors")
+    uploaded = st.file_uploader(f"Upload {doc_kind} image/PDF for OCR", type=["png", "jpg", "jpeg", "pdf"], key=upload_key)
+    if st.button(f"Extract {doc_kind} OCR", disabled=uploaded is None, key=f"{upload_key}_extract"):
+        text, meta, error = extract_text(uploaded)
+        parsed = parse_ocr_text(text, vendors_df)
+        parsed["file_meta"] = meta
+        parsed["error"] = error
+        st.session_state[f"{upload_key}_parsed"] = parsed
+        if error:
+            st.warning(error)
+        elif len(text) < 20:
+            st.warning("OCR ran but extracted very little text. Use manual entry or upload a clearer scan.")
+        else:
+            st.success(f"OCR extraction complete: {len(text)} characters detected.")
+    parsed = st.session_state.get(f"{upload_key}_parsed", {})
+    if parsed:
+        fields = parsed.get("fields", {})
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Detected", fields.get("document_type", "Unknown"))
+        c2.metric("Payment", fields.get("payment_method", "Unknown"))
+        c3.metric("Amount", money(fields.get("total_amount") or 0))
+        c4.metric("OCR chars", parsed.get("file_meta", {}).get("extracted_chars", 0))
+        with st.expander("OCR text and extracted fields", expanded=False):
+            st.json(parsed)
+    return uploaded, parsed
+
+
+def _save_ocr_attempt(doc_type: str, entity_id: int | None, parsed: dict):
+    _ensure_finance_doc_schema_ui()
+    meta = parsed.get("file_meta", {}) if parsed else {}
+    run_query(
+        "INSERT INTO document_ocr_attempts (document_type, entity_id, file_hash, engine, success, extracted_chars, error_message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (doc_type, entity_id, meta.get("file_hash"), meta.get("engine") or meta.get("ocr_engine"), 0 if parsed.get("error") else 1, int(meta.get("extracted_chars") or 0), parsed.get("error"), now_iso()),
+    )
+
+
+def receipts_page():
+    _ensure_finance_doc_schema_ui()
+    st.subheader("Receipts")
+    st.caption("Receipts are proof of payment. Choose the payment method and the form changes to capture the right evidence: cash acknowledgement, transfer reference, card/POS details, cheque, or mobile money.")
+    section = st.radio("Receipt sections", ["Record Receipt", "Receipt Register", "OCR Attempts"], horizontal=True, key="receipt_sections")
+    if section == "Record Receipt":
+        uploaded, parsed = _ocr_upload_panel("receipt_ocr_upload", "receipt")
+        fields = parsed.get("fields", {}) if parsed else {}
+        receipt_details = parsed.get("receipt_details", {}) if parsed else {}
+        bank_details = parsed.get("bank_details", {}) if parsed else {}
+        vendors = vendor_options(True)
+        vendor_name = fields.get("matched_vendor_name") or "No vendor selected"
+        vendor_index = list(vendors.keys()).index(vendor_name) if vendor_name in vendors else 0
+        method_default = fields.get("payment_method") if fields.get("payment_method") in RECEIPT_PAYMENT_METHODS else "Cash"
+        with st.form("receipt_record_form"):
+            c1, c2, c3 = st.columns(3)
+            receipt_type = c1.selectbox("Receipt type", ["Payment Receipt", "Cash Receipt", "Transfer Receipt", "Card Receipt", "POS Receipt", "Cheque Receipt", "Mobile Money Receipt", "Refund Receipt"], key="receipt_type")
+            payment_method = c2.selectbox("Payment method", RECEIPT_PAYMENT_METHODS, index=RECEIPT_PAYMENT_METHODS.index(method_default), key="receipt_method")
+            payment_date = c3.date_input("Payment date", date.today(), key="receipt_payment_date")
+            c4, c5, c6 = st.columns(3)
+            receipt_no = c4.text_input("Receipt / transaction reference", value=fields.get("receipt_no") or "", key="receipt_no")
+            vendor_label = c5.selectbox("Vendor / Payee", list(vendors.keys()), index=vendor_index, key="receipt_vendor")
+            amount = c6.number_input("Amount paid", min_value=0.0, value=float(fields.get("total_amount") or 0), step=1000.0, key="receipt_amount")
+            c7, c8, c9 = st.columns(3)
+            tax = c7.number_input("VAT/Tax included", min_value=0.0, value=float(fields.get("tax_amount") or 0), step=100.0, key="receipt_tax")
+            dept = c8.selectbox("Department / Project", department_options(), key="receipt_dept")
+            currency = c9.selectbox("Currency", ["NGN", "USD", "EUR", "GBP"], key="receipt_currency")
+            purpose = st.text_area("Purpose / what was paid for", value=fields.get("description") or "", key="receipt_purpose")
+
+            method_data = {}
+            st.markdown(f"##### {payment_method} receipt details")
+            if payment_method == "Cash":
+                c1, c2, c3 = st.columns(3)
+                method_data["cash_received_by"] = c1.text_input("Cash received by", key="cash_received_by")
+                method_data["cash_collected_from"] = c2.text_input("Cash collected from", value=user()["full_name"], key="cash_collected_from")
+                method_data["cash_denominations"] = c3.text_input("Denomination breakdown", placeholder="e.g. 10x ₦1,000 + 5x ₦500", key="cash_denominations")
+            elif payment_method == "Bank Transfer":
+                c1, c2, c3 = st.columns(3)
+                method_data["bank_name"] = c1.text_input("Receiving bank", value=bank_details.get("bank_name") or "", key="transfer_bank")
+                method_data["account_number"] = c2.text_input("Receiving account number", value=bank_details.get("account_no") or "", key="transfer_acct")
+                method_data["transfer_reference"] = c3.text_input("Transfer/session reference", value=bank_details.get("transfer_reference") or fields.get("receipt_no") or "", key="transfer_ref")
+                c4, c5 = st.columns(2)
+                method_data["sender_bank"] = c4.text_input("Sender bank", key="transfer_sender_bank")
+                method_data["receiver_bank"] = c5.text_input("Receiver bank", key="transfer_receiver_bank")
+            elif payment_method in ["Card", "POS/Card"]:
+                c1, c2, c3, c4 = st.columns(4)
+                method_data["card_type"] = selectbox_with_other("Card type", ["Unknown", "Visa", "Mastercard", "Verve", "Other"], "card_type", "card_type")
+                method_data["masked_card_number"] = c2.text_input("Masked card number", placeholder="**** **** **** 1234", key="masked_card")
+                method_data["card_auth_code"] = c3.text_input("Auth/approval code", value=receipt_details.get("auth_code") or "", key="card_auth")
+                method_data["pos_rrn"] = c4.text_input("RRN/STAN", value=receipt_details.get("rrn") or "", key="pos_rrn")
+                c5, c6 = st.columns(2)
+                method_data["pos_terminal_id"] = c5.text_input("POS terminal ID", value=receipt_details.get("terminal_id") or "", key="pos_tid")
+                method_data["pos_merchant_id"] = c6.text_input("Merchant ID", key="pos_mid")
+            elif payment_method == "Cheque":
+                c1, c2, c3 = st.columns(3)
+                method_data["cheque_number"] = c1.text_input("Cheque number", key="cheque_number")
+                method_data["cheque_bank"] = c2.text_input("Cheque bank", key="cheque_bank")
+                method_data["cheque_due_date"] = c3.date_input("Cheque date", date.today(), key="cheque_due_date").isoformat()
+            elif payment_method == "Mobile Money":
+                c1, c2 = st.columns(2)
+                method_data["mobile_wallet_provider"] = c1.text_input("Wallet/provider", placeholder="Opay, Moniepoint, Paga, etc.", key="mobile_provider")
+                method_data["mobile_transaction_id"] = c2.text_input("Mobile transaction ID", value=fields.get("receipt_no") or "", key="mobile_txn")
+            notes = st.text_area("Finance notes", key="receipt_notes")
+            submitted = st.form_submit_button("Save Receipt", type="primary")
+        if submitted:
+            if amount <= 0:
+                st.error("Receipt amount must be greater than zero.")
+                return
+            path, fhash = save_upload(uploaded, "receipts") if uploaded else (None, None)
+            try:
+                from core.ocr import duplicate_receipt_candidates
+                dup = duplicate_receipt_candidates(fhash, amount, payment_date.isoformat(), vendors[vendor_label])
+            except Exception:
+                dup = pd.DataFrame()
+            rid = run_insert(
+                """
+                INSERT INTO receipt_records (receipt_no, receipt_type, payment_method, payment_date, vendor_id, payer_name, payee_name, amount, tax_amount, currency, purpose, department_project,
+                    cash_received_by, cash_collected_from, cash_denominations, bank_name, account_number, transfer_reference, sender_bank, receiver_bank, card_type, masked_card_number,
+                    card_auth_code, pos_terminal_id, pos_merchant_id, pos_rrn, cheque_number, cheque_bank, cheque_due_date, mobile_wallet_provider, mobile_transaction_id,
+                    status, file_path, file_hash, ocr_text, ocr_json, duplicate_warning, notes, uploaded_by, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Recorded', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (receipt_no or make_ref("RCT"), receipt_type, payment_method, payment_date.isoformat(), vendors[vendor_label], user()["full_name"], vendor_label if vendor_label != "No vendor selected" else "", amount, tax, currency, purpose, dept,
+                 method_data.get("cash_received_by"), method_data.get("cash_collected_from"), method_data.get("cash_denominations"), method_data.get("bank_name"), method_data.get("account_number"), method_data.get("transfer_reference"), method_data.get("sender_bank"), method_data.get("receiver_bank"), method_data.get("card_type"), method_data.get("masked_card_number"), method_data.get("card_auth_code"), method_data.get("pos_terminal_id"), method_data.get("pos_merchant_id"), method_data.get("pos_rrn"), method_data.get("cheque_number"), method_data.get("cheque_bank"), method_data.get("cheque_due_date"), method_data.get("mobile_wallet_provider"), method_data.get("mobile_transaction_id"), path, fhash, parsed.get("raw_text", "") if parsed else "", json_dump(parsed) if parsed else "{}", 0 if dup.empty else 1, notes, user()["id"], now_iso(), now_iso()),
+            )
+            _save_ocr_attempt("Receipt", rid, parsed or {})
+            # Legacy expenses compatibility for budget and older pages.
+            exp_no = make_ref("EXP")
+            run_insert("""INSERT INTO expenses (expense_no, expense_date, category, description, vendor_id, amount, payment_method, project_department, status, receipt_path, receipt_hash, receipt_no, tax_amount, duplicate_warning, requested_by, ocr_text, ocr_json, document_kind, receipt_id, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Approved', ?, ?, ?, ?, ?, ?, ?, ?, 'Receipt', ?, ?, ?)""", (exp_no, payment_date.isoformat(), fields.get("category") or "Other", purpose or receipt_type, vendors[vendor_label], amount, payment_method, dept, path, fhash, receipt_no, tax, 0 if dup.empty else 1, user()["id"], parsed.get("raw_text", "") if parsed else "", json_dump(parsed) if parsed else "{}", rid, notes, now_iso()))
+            add_workflow_event("Receipt", rid, "Receipt Recorded", "Recorded", f"{payment_method} receipt", user()["id"])
+            log_audit("RECEIPT_RECORDED", "Receipt", rid, {"payment_method": payment_method, "amount": amount}, user()["id"], user()["role"])
+            st.success(f"Receipt saved: {receipt_no or 'auto reference'}")
+            if not dup.empty:
+                st.warning("Possible duplicate receipt detected.")
+            st.rerun()
+    elif section == "Receipt Register":
+        df = df_query("""
+            SELECT rr.id, rr.receipt_no, rr.receipt_type, rr.payment_method, rr.payment_date, v.name vendor, rr.amount, rr.status, rr.duplicate_warning, rr.department_project, rr.created_at
+            FROM receipt_records rr LEFT JOIN vendors v ON v.id=rr.vendor_id ORDER BY rr.created_at DESC
+        """)
+        if df.empty:
+            empty_state("No receipts", "Record payment receipts separately from invoices.")
+            return
+        show = df.drop(columns=["id"]).copy(); show["amount"] = show["amount"].apply(money)
+        dataframe(show)
+        selected = st.selectbox("Open receipt", [f"{r.receipt_no} — {r.payment_method} — #{int(r.id)}" for r in df.itertuples()], key="open_receipt")
+        rid = int(selected.rsplit("#", 1)[1])
+        row = df_query("SELECT rr.*, v.name vendor FROM receipt_records rr LEFT JOIN vendors v ON v.id=rr.vendor_id WHERE rr.id=?", (rid,)).iloc[0]
+        st.dataframe(_redact_ui_df(pd.DataFrame([row.to_dict()]), "receipt_records"), use_container_width=True)
+        with st.expander("OCR raw text", expanded=False):
+            try: st.json(json.loads(row.get("ocr_json") or "{}"))
+            except Exception: st.text(row.get("ocr_text") or "")
+        csv_download(show, "receipts")
+    else:
+        attempts = df_query("SELECT * FROM document_ocr_attempts WHERE document_type='Receipt' ORDER BY created_at DESC LIMIT 300")
+        dataframe(attempts) if not attempts.empty else st.info("No receipt OCR attempts yet.")
+
+
+def invoices_page():
+    _ensure_finance_doc_schema_ui()
+    st.subheader("Invoices")
+    st.caption("Invoices are requests for payment before payment is completed. They are now separate from receipts, which are proof of payment after money moves.")
+    section = st.radio("Invoice sections", ["Upload / Record Invoice", "Invoice Register", "Invoice Items", "OCR Attempts"], horizontal=True, key="invoice_sections")
+    vendors = vendor_options(True)
+    if section == "Upload / Record Invoice":
+        uploaded, parsed = _ocr_upload_panel("invoice_ocr_upload", "invoice")
+        fields = parsed.get("fields", {}) if parsed else {}
+        vendor_name = fields.get("matched_vendor_name") or "No vendor selected"
+        vendor_index = list(vendors.keys()).index(vendor_name) if vendor_name in vendors else 0
+        po_df = df_query("SELECT po.id, po.po_no, v.name vendor, po.total_amount FROM purchase_orders po LEFT JOIN vendors v ON po.vendor_id=v.id ORDER BY po.created_at DESC")
+        po_options = ["No PO selected"] + [f"{r.po_no} — {r.vendor} — {money(r.total_amount)}" for r in po_df.itertuples()]
+        with st.form("invoice_record_form"):
+            c1, c2, c3 = st.columns(3)
+            invoice_type = c1.selectbox("Invoice type", INVOICE_TYPES, key="invoice_type")
+            invoice_no = c2.text_input("Invoice number", value=fields.get("invoice_no") or "", key="invoice_number")
+            invoice_date = c3.date_input("Invoice date", date.today(), key="invoice_date")
+            c4, c5, c6 = st.columns(3)
+            due_date = c4.date_input("Due date", date.today() + timedelta(days=7), key="invoice_due_date")
+            vendor_label = c5.selectbox("Vendor", list(vendors.keys()), index=vendor_index, key="invoice_vendor")
+            po_label = c6.selectbox("Match Purchase Order", po_options, key="invoice_po_match")
+            c7, c8, c9, c10 = st.columns(4)
+            subtotal = c7.number_input("Subtotal", min_value=0.0, value=float(fields.get("subtotal") or 0), step=1000.0, key="invoice_subtotal")
+            tax = c8.number_input("VAT/Tax", min_value=0.0, value=float(fields.get("tax_amount") or 0), step=100.0, key="invoice_tax")
+            discount = c9.number_input("Discount", min_value=0.0, value=0.0, step=100.0, key="invoice_discount")
+            total = c10.number_input("Total / Amount Due", min_value=0.0, value=float(fields.get("total_amount") or 0), step=1000.0, key="invoice_total")
+            terms = selectbox_with_other("Payment terms", ["Due on Receipt", "Net 7", "Net 15", "Net 30", "Milestone", "Advance Payment", "Other"], "invoice_terms", "payment_terms")
+            desc = st.text_area("Invoice description / scope", value=fields.get("description") or "", key="invoice_desc")
+            submitted = st.form_submit_button("Save Invoice for Review", type="primary")
+        if submitted:
+            if not invoice_no.strip():
+                st.error("Invoice number is required.")
+                return
+            if total <= 0:
+                st.error("Invoice total must be greater than zero.")
+                return
+            path, fhash = save_upload(uploaded, "invoices") if uploaded else (None, None)
+            po_id = None
+            if po_label != "No PO selected":
+                po_id = int(po_df[po_df["po_no"] == po_label.split(" — ")[0]].iloc[0]["id"])
+            vendor_id = vendors[vendor_label]
+            match_status, mismatch = match_invoice_to_po(po_id, vendor_id, total)
+            inv_id = run_insert(
+                """
+                INSERT INTO invoices (invoice_no, receipt_no, po_id, vendor_id, invoice_date, amount, tax_amount, total_amount, file_path, file_hash, ocr_text, ocr_json, match_status, mismatch_reasons, status, uploaded_by, created_at,
+                    invoice_type, document_stage, supplier_invoice_no, due_date, payment_terms, subtotal, discount_amount, balance_due, approval_status)
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Uploaded', ?, ?, ?, 'Invoice', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (invoice_no.strip(), po_id, vendor_id, invoice_date.isoformat(), max(total - tax, 0), tax, total, path, fhash, parsed.get("raw_text", "") if parsed else "", json_dump(parsed) if parsed else "{}", match_status, "; ".join(mismatch), user()["id"], now_iso(), invoice_type, invoice_no.strip(), due_date.isoformat(), terms, subtotal or max(total - tax, 0), discount, total, match_status),
+            )
+            # Store guessed item lines when available.
+            for item in (parsed.get("line_items", []) if parsed else []):
+                run_query("INSERT INTO invoice_items (invoice_id, item_description, quantity, unit_price, tax_amount, total, category, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?)", (inv_id, item.get("item_name"), item.get("quantity") or 1, item.get("unit_price") or 0, item.get("total") or 0, fields.get("category") or "Other", now_iso()))
+            _save_ocr_attempt("Invoice", inv_id, parsed or {})
+            add_workflow_event("Invoice", inv_id, "Invoice Uploaded", "Uploaded", match_status, user()["id"])
+            create_notification(None, "Finance", "Invoice needs review", f"Invoice {invoice_no} match status: {match_status}", "Invoice", inv_id, "High", ["in_app", "browser_push"])
+            log_audit("INVOICE_RECORDED", "Invoice", inv_id, {"invoice_no": invoice_no, "total": total, "match_status": match_status}, user()["id"], user()["role"])
+            st.success(f"Invoice {invoice_no} saved for Finance review.")
+            st.rerun()
+    elif section == "Invoice Register":
+        df = df_query("""
+            SELECT inv.id, inv.invoice_no, inv.invoice_type, po.po_no, v.name vendor, inv.invoice_date, inv.due_date, inv.total_amount, inv.balance_due, inv.match_status, inv.mismatch_reasons, inv.status
+            FROM invoices inv LEFT JOIN purchase_orders po ON inv.po_id=po.id LEFT JOIN vendors v ON inv.vendor_id=v.id ORDER BY inv.created_at DESC
+        """)
+        if df.empty:
+            empty_state("No invoices", "Upload supplier invoices here. Receipts are recorded separately.")
+            return
+        show = df.drop(columns=["id"]).copy(); show["total_amount"] = show["total_amount"].apply(money); show["balance_due"] = show["balance_due"].apply(money)
+        dataframe(show)
+        selected = st.selectbox("Select invoice", [f"{r.invoice_no} — {r.status} — #{int(r.id)}" for r in df.itertuples()], key="invoice_select_phase3")
+        inv_id = int(selected.rsplit("#", 1)[1])
+        inv = df_query("SELECT * FROM invoices WHERE id=?", (inv_id,)).iloc[0]
+        st.dataframe(_redact_ui_df(pd.DataFrame([inv.to_dict()]), "invoices"), use_container_width=True)
+        with st.expander("OCR / mismatch details", expanded=False):
+            try: st.json(json.loads(inv.get("ocr_json") or "{}"))
+            except Exception: st.text(inv.get("ocr_text") or "")
+            st.write(inv.get("mismatch_reasons") or "")
+        if has_permission("review_invoice"):
+            c1, c2, c3 = st.columns(3)
+            if c1.button("Mark Finance Review Complete", key=f"invoice_reviewed_{inv_id}"):
+                run_query("UPDATE invoices SET status='Finance Review', approval_status='Reviewed' WHERE id=?", (inv_id,))
+                add_workflow_event("Invoice", inv_id, "Finance Review", "Finance Review", "Invoice reviewed", user()["id"])
+                st.rerun()
+            if c2.button("Create Payment Request", key=f"invoice_payment_{inv_id}"):
+                pno = make_ref("PAY")
+                pay_id = run_insert("INSERT INTO payments (payment_no, invoice_id, po_id, vendor_id, amount, payment_method, status, created_by, created_at, updated_at) SELECT ?, id, po_id, vendor_id, total_amount, 'Bank Transfer', 'Pending Approval', ?, ?, ? FROM invoices WHERE id=?", (pno, user()["id"], now_iso(), now_iso(), inv_id))
+                create_notification(None, "Approver", "Payment pending approval", f"{pno} requires approval", "Payment", pay_id, "High", ["in_app", "browser_push"])
+                add_workflow_event("Payment", pay_id, "Created from Invoice", "Pending Approval", pno, user()["id"])
+                st.success(f"Payment request {pno} created.")
+            if c3.button("Return Invoice", key=f"invoice_return_{inv_id}"):
+                run_query("UPDATE invoices SET status='Returned', approval_status='Returned' WHERE id=?", (inv_id,))
+                add_workflow_event("Invoice", inv_id, "Returned", "Returned", "Invoice returned for clarification", user()["id"])
+                st.rerun()
+        csv_download(show, "invoices")
+    elif section == "Invoice Items":
+        items = df_query("SELECT ii.*, inv.invoice_no FROM invoice_items ii LEFT JOIN invoices inv ON inv.id=ii.invoice_id ORDER BY ii.created_at DESC LIMIT 1000")
+        dataframe(items) if not items.empty else st.info("No invoice item lines captured yet.")
+    else:
+        attempts = df_query("SELECT * FROM document_ocr_attempts WHERE document_type='Invoice' ORDER BY created_at DESC LIMIT 300")
+        dataframe(attempts) if not attempts.empty else st.info("No invoice OCR attempts yet.")
+
+
+def expenses_page():
+    st.subheader("Expenses")
+    st.info("Invoices and receipts are now separate. Use Invoices for supplier bills/amount due, and Receipts for proof of payment by cash, transfer, card/POS, cheque, or mobile money. This page remains as the legacy expense register for budget/spend compatibility.")
+    expense_register()
+
+
+def payments_page():
+    st.subheader("Payments")
+    _ensure_finance_doc_schema_ui()
+    df = df_query("SELECT p.id, p.payment_no, v.name vendor, p.amount, p.payment_method, p.payment_date, p.status, p.notes, p.proof_path, p.finance_note FROM payments p LEFT JOIN vendors v ON p.vendor_id=v.id ORDER BY p.created_at DESC")
+    if df.empty:
+        st.info("No payment requests yet.")
+    else:
+        show = df.drop(columns=["id"]).copy(); show["amount"] = show["amount"].apply(money); dataframe(show)
+    if has_permission("manage_payments"):
+        st.markdown("##### Manual Payment Request")
+        with st.form("manual_payment_phase3"):
+            vendors = vendor_options(False)
+            v = st.selectbox("Vendor", list(vendors.keys()), key="manual_pay_vendor")
+            amount = st.number_input("Amount", min_value=0.0, step=1000.0, key="manual_pay_amount")
+            method = st.selectbox("Method", RECEIPT_PAYMENT_METHODS, key="manual_pay_method")
+            notes = st.text_area("Notes", key="manual_pay_notes")
+            submitted = st.form_submit_button("Create Payment Request")
+        if submitted:
+            pno = make_ref("PAY")
+            pay_id = run_insert("INSERT INTO payments (payment_no, vendor_id, amount, payment_method, status, notes, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, 'Pending Approval', ?, ?, ?, ?)", (pno, vendors[v], amount, method, notes, user()["id"], now_iso(), now_iso()))
+            add_workflow_event("Payment", pay_id, "Created", "Pending Approval", pno, user()["id"])
+            create_notification(None, "Approver", "Payment pending approval", f"{pno} requires approval", "Payment", pay_id, "High", ["in_app", "browser_push"])
+            st.success("Payment request created.")
+            st.rerun()
+    if not df.empty and (has_permission("approve_payment") or has_permission("manage_payments")):
+        selected = st.selectbox("Approve/Pay", df["payment_no"].tolist(), key="payment_select_phase3")
+        row = df[df["payment_no"] == selected].iloc[0]
+        finance_note = st.text_area("Payment / finance note", key=f"payment_note_{int(row['id'])}")
+        proof = st.file_uploader("Upload payment proof / receipt", type=["pdf", "jpg", "jpeg", "png"], key=f"payment_proof_{int(row['id'])}")
+        c1, c2, c3 = st.columns(3)
+        if row["status"] == "Pending Approval" and c1.button("Approve Payment", key=f"pay_approve_{int(row['id'])}"):
+            from core.db import transition_payment_status
+            transition_payment_status(int(row["id"]), "Approved", finance_note or "Payment approved.", user()["id"], user()["role"])
+            st.rerun()
+        if row["status"] == "Approved" and c2.button("Mark Paid", key=f"pay_paid_{int(row['id'])}"):
+            path, _ = save_upload(proof, "payment_proofs") if proof else (None, None)
+            from core.db import transition_payment_status
+            transition_payment_status(int(row["id"]), "Paid", finance_note or "Payment completed.", user()["id"], user()["role"], path)
+            # Create payment receipt shell automatically.
+            receipt_no = make_ref("RCT")
+            rid = run_insert("INSERT INTO receipt_records (receipt_no, receipt_type, payment_method, payment_date, vendor_id, amount, purpose, linked_payment_id, status, file_path, notes, uploaded_by, created_at, updated_at) VALUES (?, 'Payment Receipt', ?, ?, ?, ?, ?, ?, 'Recorded', ?, ?, ?, ?, ?)", (receipt_no, row.get("payment_method") or "Bank Transfer", date.today().isoformat(), int(row.get("vendor") or 0) if False else None, float(row["amount"]), selected, int(row["id"]), path, finance_note, user()["id"], now_iso(), now_iso()))
+            run_query("UPDATE payments SET receipt_id=? WHERE id=?", (rid, int(row["id"])))
+            st.success("Payment marked paid and receipt record created.")
+            st.rerun()
+        if c3.button("Return Payment", key=f"pay_return_{int(row['id'])}"):
+            from core.db import transition_payment_status
+            transition_payment_status(int(row["id"]), "Returned", finance_note or "Payment returned for clarification.", user()["id"], user()["role"])
+            st.rerun()
+
+
+def _assert_gateway_owner(gateway_pass_id: int, acting_user: dict | None = None) -> bool:
+    acting_user = acting_user or user()
+    rows = df_query("SELECT facility_manager_user_id FROM gateway_passes WHERE id=?", (gateway_pass_id,))
+    if rows.empty:
+        st.error("Gateway pass not found.")
+        return False
+    if acting_user["role"] == "Facility Manager" and int(rows.iloc[0]["facility_manager_user_id"]) != int(acting_user["id"]):
+        st.error("You can only access your own gateway passes.")
+        return False
+    return True
+
+
+def _assert_gateway_reviewer(gateway_pass_id: int, acting_user: dict | None = None) -> bool:
+    acting_user = acting_user or user()
+    if acting_user["role"] in ["Admin", "Approver"]:
+        return True
+    if acting_user["role"] != "Procurement Manager":
+        st.error("You are not authorized to review gateway passes.")
+        return False
+    gp = df_query("SELECT facility_manager_user_id FROM gateway_passes WHERE id=?", (gateway_pass_id,))
+    if gp.empty:
+        st.error("Gateway pass not found.")
+        return False
+    assigned = get_pm_for_facility_manager(int(gp.iloc[0]["facility_manager_user_id"]))
+    if assigned and int(assigned) == int(acting_user["id"]):
+        return True
+    st.error("This gateway pass belongs to a Facility Manager assigned to another Procurement Manager.")
+    return False
+
+
+def submit_gateway_pass(gateway_pass_id: int):
+    if not _assert_gateway_owner(gateway_pass_id):
+        return
+    row_df = df_query("SELECT * FROM gateway_passes WHERE id=?", (gateway_pass_id,))
+    if row_df.empty:
+        st.error("Gateway pass not found."); return
+    row = row_df.iloc[0]
+    if row["status"] not in ["Draft", "Returned for Correction"]:
+        st.warning("Only Draft or Returned gateway passes can be submitted."); return
+    items = gateway_pass_items_df(gateway_pass_id)
+    if items.empty:
+        st.error("At least one item line is required before submission."); return
+    if (items["quantity"].fillna(0) <= 0).any() or items["unit_of_measure"].fillna("").eq("").any() or items["quality_condition"].fillna("").eq("").any() or items["fragility_status"].fillna("").eq("").any():
+        st.error("Every item must include quantity > 0, unit, quality/condition, and fragile/non-fragile status."); return
+    pm_id = get_pm_for_facility_manager(int(row["facility_manager_user_id"]))
+    if not pm_id:
+        st.error("No Procurement Manager is assigned. Ask Admin to link you before submitting."); return
+    run_query("UPDATE gateway_passes SET status='Submitted', submitted_at=?, updated_at=? WHERE id=?", (now_iso(), now_iso(), gateway_pass_id))
+    log_gateway_event(gateway_pass_id, "Gateway Pass Submitted", "Submitted", "Submitted for Procurement Manager / Approver review")
+    create_notification(pm_id, None, "Gateway Pass Submitted", f"{row['pass_number']} has been submitted by your Facility Manager and requires review.", "Gateway Pass", gateway_pass_id, "High", ["in_app", "browser_push"], action_label="Review Gateway Pass")
+    create_notification(None, "Approver", "Gateway Pass Requires Review", f"{row['pass_number']} requires review.", "Gateway Pass", gateway_pass_id, "High", ["in_app", "browser_push"], action_label="Review Gateway Pass")
+    create_notification(None, "Admin", "Gateway Pass Oversight", f"{row['pass_number']} has been submitted.", "Gateway Pass", gateway_pass_id, "Normal", ["in_app"])
+    create_notification(int(row["facility_manager_user_id"]), None, "Gateway pass submitted", f"{row['pass_number']} was submitted for approval.", "Gateway Pass", gateway_pass_id, "Normal", ["in_app"])
+    st.success("Gateway pass submitted for approval.")
+    st.rerun()
+
+
+def _gateway_approve(gateway_pass_id: int, decision: str, note: str):
+    if not _assert_gateway_reviewer(gateway_pass_id):
+        return
+    row_df = df_query("SELECT * FROM gateway_passes WHERE id=?", (gateway_pass_id,))
+    if row_df.empty:
+        st.error("Gateway pass not found."); return
+    row = row_df.iloc[0]
+    if row["status"] not in ["Submitted", "Pending Procurement Manager / Approver Review"]:
+        st.warning("Only submitted gateway passes can be approved, returned or rejected."); return
+    if decision in ["Rejected", "Returned for Correction"] and not note.strip():
+        st.error("A rejection or return reason is required."); return
+    if decision == "Approved":
+        run_query("UPDATE gateway_passes SET status='Approved', approved_at=?, approved_by_user_id=?, approved_by_role=?, approval_note=?, updated_at=? WHERE id=?", (now_iso(), user()["id"], user()["role"], note or "Approved.", now_iso(), gateway_pass_id))
+        decision_label = "Approved"; title = "Gateway Pass Approved"; msg = f"{row['pass_number']} has been approved. You can now preview, generate and download the final gateway pass."
+    elif decision == "Rejected":
+        run_query("UPDATE gateway_passes SET status='Rejected', rejected_at=?, rejected_by_user_id=?, rejection_reason=?, updated_at=? WHERE id=?", (now_iso(), user()["id"], note, now_iso(), gateway_pass_id))
+        decision_label = "Rejected"; title = "Gateway Pass Rejected"; msg = f"{row['pass_number']} was rejected. Reason: {note}"
+    else:
+        run_query("UPDATE gateway_passes SET status='Returned for Correction', rejection_reason=?, updated_at=? WHERE id=?", (note, now_iso(), gateway_pass_id))
+        decision_label = "Returned for Correction"; title = "Gateway Pass Returned"; msg = f"{row['pass_number']} was returned for correction. Reason: {note}"
+    run_query("INSERT INTO gateway_pass_approvals (gateway_pass_id, approver_user_id, approver_role, decision, note, created_at) VALUES (?, ?, ?, ?, ?, ?)", (gateway_pass_id, user()["id"], user()["role"], decision_label, note, now_iso()))
+    action_label = "Ready to Generate" if decision_label == "Approved" else "Open Gateway Pass"
+    create_notification(int(row["facility_manager_user_id"]), None, title, msg, "Gateway Pass", gateway_pass_id, "High", ["in_app", "browser_push"], action_label=action_label)
+    _notify_auditors(title, msg, "Gateway Pass", gateway_pass_id)
+    _rerun_success(f"Gateway pass {decision_label.lower()}.")
+
+
+def edit_gateway_pass_form(gateway_pass_id: int):
+    if not _assert_gateway_owner(gateway_pass_id):
+        return
+    row_df = df_query("SELECT * FROM gateway_passes WHERE id=?", (gateway_pass_id,))
+    if row_df.empty:
+        st.error("Gateway pass not found."); return
+    row = row_df.iloc[0]
+    if row["status"] not in ["Draft", "Returned for Correction"]:
+        st.info("Only Draft or Returned for Correction passes can be edited."); return
+    st.markdown("#### Edit Gateway Pass")
+    with st.form(f"edit_gateway_pass_{gateway_pass_id}"):
+        c1, c2, c3 = st.columns(3)
+        dept = c1.selectbox("Department", department_options(), index=department_options().index(row["department"]) if row.get("department") in department_options() else 0, key=f"edit_gp_dept_{gateway_pass_id}")
+        movement_type = c2.selectbox("Movement type", GATEWAY_MOVEMENT_TYPES, index=GATEWAY_MOVEMENT_TYPES.index(row["movement_type"]) if row["movement_type"] in GATEWAY_MOVEMENT_TYPES else 0, key=f"edit_gp_mov_{gateway_pass_id}")
+        expected_movement = c3.date_input("Expected movement date", pd.to_datetime(row["expected_movement_date"] or date.today()).date(), key=f"edit_gp_date_{gateway_pass_id}")
+        purpose = st.text_area("Purpose", value=row["purpose"] or "", key=f"edit_gp_purpose_{gateway_pass_id}")
+        c4, c5 = st.columns(2)
+        origin = c4.text_input("Origin", value=row["origin_location"] or "", key=f"edit_gp_origin_{gateway_pass_id}")
+        destination = c5.text_input("Destination", value=row["destination"] or "", key=f"edit_gp_dest_{gateway_pass_id}")
+        c6, c7, c8 = st.columns(3)
+        vehicle = c6.text_input("Vehicle number", value=row["vehicle_number"] or "", key=f"edit_gp_vehicle_{gateway_pass_id}")
+        driver = c7.text_input("Driver name", value=row["driver_name"] or "", key=f"edit_gp_driver_{gateway_pass_id}")
+        driver_phone = c8.text_input("Driver phone", value=row["driver_phone"] or "", key=f"edit_gp_phone_{gateway_pass_id}")
+        c9, c10 = st.columns(2)
+        receiver = c9.text_input("Receiver name", value=row["receiver_name"] or "", key=f"edit_gp_receiver_{gateway_pass_id}")
+        checkpoint = c10.text_input("Security checkpoint", value=row["security_checkpoint"] or "", key=f"edit_gp_check_{gateway_pass_id}")
+        # Preserve optional fields that are not visible in this compact edit form.
+        # This prevents direct navigation to the edit page from failing with a
+        # NameError while leaving the existing record values unchanged.
+        return_required = bool(_clean(row.get("expected_return_date")))
+        expected_return = _date_or_default(row.get("expected_return_date"), expected_movement)
+        actual_return_applies = bool(_clean(row.get("actual_return_date")))
+        actual_return = _date_or_default(row.get("actual_return_date"), expected_movement)
+        receiver_org = _clean(row.get("receiver_organization"))
+        security_officer = _clean(row.get("security_officer_name"))
+        gate_time = _clean(row.get("gate_verification_time"))
+        exit_entry = _clean(row.get("exit_entry_confirmation"))
+        security_signature = _clean(row.get("security_signature"))
+        submitted = st.form_submit_button("Save Gateway Pass Details")
+    if submitted:
+        run_query(
+            """
+            UPDATE gateway_passes
+            SET department=?, movement_type=?, purpose=?, origin_location=?, destination=?, expected_movement_date=?, expected_return_date=?, actual_return_date=?, vehicle_number=?, driver_name=?, driver_phone=?, receiver_name=?, receiver_organization=?, security_checkpoint=?, security_officer_name=?, gate_verification_time=?, exit_entry_confirmation=?, security_signature=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                dept, movement_type, purpose, origin, destination, expected_movement.isoformat(),
+                expected_return.isoformat() if return_required else None,
+                actual_return.isoformat() if actual_return_applies else None,
+                vehicle, driver, driver_phone, receiver, receiver_org, checkpoint,
+                security_officer.strip() or None, gate_time.strip() or None, exit_entry.strip() or None, security_signature.strip() or None,
+                now_iso(), gateway_pass_id,
+            ),
+        )
+        log_gateway_event(gateway_pass_id, "Gateway Pass Edited", row["status"], "Details updated after draft/return")
+        _rerun_success("Gateway pass details updated.")
+    st.markdown("#### Edit Item Lines")
+    items = gateway_pass_items_df(gateway_pass_id)
+    if not items.empty:
+        for it in items.itertuples():
+            with st.expander(f"Edit item #{int(it.id)} — {it.item_description}", expanded=False):
+                with st.form(f"edit_gp_item_{int(it.id)}"):
+                    c1, c2, c3 = st.columns(3)
+                    desc = c1.text_input("Description", value=it.item_description, key=f"edit_item_desc_{int(it.id)}")
+                    qty = c2.number_input("Quantity", min_value=0.01, value=float(it.quantity), step=1.0, key=f"edit_item_qty_{int(it.id)}")
+                    unit = c3.text_input("Unit", value=it.unit_of_measure, key=f"edit_item_unit_{int(it.id)}")
+                    c4, c5, c6 = st.columns(3)
+                    quality = c4.selectbox("Quality / condition", GATEWAY_QUALITY_OPTIONS, index=GATEWAY_QUALITY_OPTIONS.index(it.quality_condition) if it.quality_condition in GATEWAY_QUALITY_OPTIONS else 0, key=f"edit_item_qual_{int(it.id)}")
+                    fragile = c5.selectbox("Fragility", GATEWAY_FRAGILITY_OPTIONS, index=GATEWAY_FRAGILITY_OPTIONS.index(it.fragility_status) if it.fragility_status in GATEWAY_FRAGILITY_OPTIONS else 0, key=f"edit_item_frag_{int(it.id)}")
+                    colour = c6.text_input("Colour", value=getattr(it, "colour", "") or "", key=f"edit_item_colour_{int(it.id)}")
+                    handling = st.text_input("Handling instruction", value=it.handling_instruction or "", key=f"edit_item_handling_{int(it.id)}")
+                    remarks = st.text_input("Remarks", value=it.remarks or "", key=f"edit_item_remarks_{int(it.id)}")
+                    c7, c8 = st.columns(2)
+                    save_item = c7.form_submit_button("Save item")
+                    delete_item = c8.form_submit_button("Delete item")
+                if save_item:
+                    run_query("UPDATE gateway_pass_items SET item_description=?, quantity=?, unit_of_measure=?, quality_condition=?, fragility_status=?, colour=?, handling_instruction=?, remarks=? WHERE id=?", (desc, qty, unit, quality, fragile, colour, handling, remarks, int(it.id)))
+                    log_gateway_event(gateway_pass_id, "Gateway Pass Item Edited", row["status"], desc)
+                    st.rerun()
+                if delete_item:
+                    run_query("DELETE FROM gateway_pass_items WHERE id=?", (int(it.id),))
+                    log_gateway_event(gateway_pass_id, "Gateway Pass Item Deleted", row["status"], it.item_description)
+                    st.rerun()
+    with st.form(f"add_gp_item_{gateway_pass_id}"):
+        st.markdown("##### Add item line")
+        c1, c2, c3 = st.columns(3)
+        desc = c1.text_input("Item description", key=f"add_item_desc_{gateway_pass_id}")
+        category = c2.text_input("Item category", key=f"add_item_cat_{gateway_pass_id}")
+        qty = c3.number_input("Quantity", min_value=0.01, value=1.0, step=1.0, key=f"add_item_qty_{gateway_pass_id}")
+        c4, c5, c6, c7 = st.columns(4)
+        unit = c4.text_input("Unit", value="Unit", key=f"add_item_unit_{gateway_pass_id}")
+        quality = c5.selectbox("Quality / condition", GATEWAY_QUALITY_OPTIONS, key=f"add_item_quality_{gateway_pass_id}")
+        fragile = c6.selectbox("Fragility", GATEWAY_FRAGILITY_OPTIONS, key=f"add_item_fragile_{gateway_pass_id}")
+        colour = c7.text_input("Colour", key=f"add_item_colour_{gateway_pass_id}")
+        handling = st.text_input("Handling instruction", key=f"add_item_handling_{gateway_pass_id}")
+        remarks = st.text_input("Remarks", key=f"add_item_remarks_{gateway_pass_id}")
+        add_item = st.form_submit_button("Add Item")
+    if add_item:
+        if not desc.strip() or qty <= 0 or not unit.strip():
+            st.error("Description, quantity greater than 0, and unit are required.")
+        else:
+            run_query("INSERT INTO gateway_pass_items (gateway_pass_id, item_description, item_category, quantity, unit_of_measure, quality_condition, fragility_status, colour, handling_instruction, remarks, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (gateway_pass_id, desc, category, qty, unit, quality, fragile, colour, handling, remarks, now_iso()))
+            log_gateway_event(gateway_pass_id, "Gateway Pass Item Added", row["status"], desc)
+            st.rerun()
+
+
+def generate_gateway_pass_document(gateway_pass_id: int) -> str | None:
+    if user()["role"] == "Facility Manager" and not _assert_gateway_owner(gateway_pass_id):
+        return None
+    # Reuse the existing professional PDF generator body by calling the previous implementation is not possible after override.
+    # The original function remains available in source above, so this compact secured version delegates by copying its core behavior through a local alias stored before override is not available.
+    # To keep behavior stable, call the original code path through the generated preview/export by temporarily trusting status guard: use _generate_gateway_pass_pdf_core.
+    return _generate_gateway_pass_pdf_core(gateway_pass_id)
+
+
+def _generate_gateway_pass_pdf_core(gateway_pass_id: int) -> str | None:
+    # Minimal professional PDF fallback compatible with the company template. The richer preview remains in HTML.
+    gp = gateway_pass_summary_df("gp.id=?", (gateway_pass_id,))
+    if gp.empty:
+        st.error("Gateway pass not found."); return None
+    row = gp.iloc[0]
+    if row["status"] not in ["Approved", "Generated", "Downloaded"]:
+        st.error("Generate is disabled until the gateway pass is approved."); return None
+    items = gateway_pass_items_df(gateway_pass_id)
+    if items.empty:
+        st.error("Cannot generate a gateway pass without item lines."); return None
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        out_dir = Path("data/attachments/gateway_passes")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{row['pass_number'].replace('/', '_')}.pdf"
+        doc = SimpleDocTemplate(str(path), pagesize=A4, rightMargin=14*mm, leftMargin=14*mm, topMargin=12*mm, bottomMargin=12*mm)
+        styles = getSampleStyleSheet(); normal = styles["Normal"]
+        title = ParagraphStyle("gp_title", parent=styles["Title"], fontSize=16, alignment=1, textColor=colors.HexColor("#0f172a"), spaceAfter=4)
+        small = ParagraphStyle("gp_small", parent=normal, fontSize=8, leading=10)
+        story = []
+        story.append(Paragraph("Consultancy Services Unit, Rivers State University", title))
+        story.append(Paragraph("Center For Marine and Offshore Technology Development (CMOTD)", ParagraphStyle("sub", parent=normal, alignment=1, fontSize=10, leading=12)))
+        story.append(Paragraph("Consultancy Unit, Rivers State University, Nkpolu-Oroworokwo, Port Harcourt, Rivers State", ParagraphStyle("addr", parent=normal, alignment=1, fontSize=8)))
+        story.append(Paragraph("Email: info@cmotd.org &nbsp;&nbsp; Phone NO.: +2349163505000", ParagraphStyle("addr2", parent=normal, alignment=1, fontSize=8)))
+        story.append(Paragraph("Where Theory becomes Reality and Individuals are Equipped to Lead in the Industry!", ParagraphStyle("motto", parent=normal, alignment=1, fontSize=8, italic=True, textColor=colors.HexColor("#065f46"))))
+        story.append(Spacer(1, 6))
+        story.append(Paragraph("PROPERTY MOVEMENT GATE PASS", ParagraphStyle("doc_title", parent=styles["Heading1"], alignment=1, fontSize=14, textColor=colors.HexColor("#111827"))))
+        info = [["Reference No.", row["pass_number"], "Date", date.today().strftime("%d %B %Y")], ["Facility Manager", row.get("facility_manager") or "", "Department", row.get("department") or ""], ["Movement Type", row.get("movement_type") or "", "Destination", row.get("destination") or ""], ["Origin", row.get("origin_location") or "", "Movement Date", str(row.get("expected_movement_date") or "")]]
+        t = Table(info, colWidths=[34*mm, 58*mm, 34*mm, 58*mm]); t.setStyle(TableStyle([("GRID", (0,0), (-1,-1), .4, colors.grey), ("BACKGROUND", (0,0), (0,-1), colors.HexColor("#f1f5f9")), ("BACKGROUND", (2,0), (2,-1), colors.HexColor("#f1f5f9")), ("FONTNAME", (0,0), (-1,-1), "Helvetica"), ("FONTSIZE", (0,0), (-1,-1), 8), ("PADDING", (0,0), (-1,-1), 5)])); story.append(t)
+        story.append(Spacer(1, 7)); story.append(Paragraph("This Gate Pass serves as official authorization for the movement of the underlisted company asset(s) from the premises of the Centre for Marine and Offshore Technology Development (CMOTD).", normal))
+        story.append(Spacer(1, 7)); story.append(Paragraph("PROPERTY DETAILS", styles["Heading3"]))
+        data = [["No.", "Item Description", "Colour", "Quantity", "Unit", "Condition", "Fragile?", "Serial/Asset", "Handling"]]
+        for idx, it in enumerate(items.itertuples(), 1):
+            data.append([idx, Paragraph(str(it.item_description), small), getattr(it, "colour", "") or "", it.quantity, it.unit_of_measure, it.quality_condition, it.fragility_status, f"{it.serial_number or ''} {it.asset_tag or ''}", Paragraph(it.handling_instruction or "", small)])
+        table = Table(data, colWidths=[8*mm, 42*mm, 18*mm, 16*mm, 14*mm, 23*mm, 18*mm, 24*mm, 27*mm], repeatRows=1)
+        table.setStyle(TableStyle([("GRID", (0,0), (-1,-1), .35, colors.grey), ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#dbeafe")), ("FONTSIZE", (0,0), (-1,-1), 7), ("VALIGN", (0,0), (-1,-1), "TOP")]))
+        story.append(table)
+        story.append(Spacer(1, 7)); story.append(Paragraph("PURPOSE OF MOVEMENT", styles["Heading3"])); story.append(Paragraph(row.get("purpose") or "", normal))
+        story.append(Spacer(1, 7)); story.append(Paragraph("TRANSPORT DETAILS", styles["Heading3"])); story.append(Paragraph(f"Driver's Name: {row.get('driver_name') or '____________________________________'}<br/>Driver's Phone Number: {row.get('driver_phone') or '_____________________________'}<br/>Vehicle Number: {row.get('vehicle_number') or '_____________________________'}", normal))
+        story.append(Spacer(1, 7)); story.append(Paragraph("AUTHORIZATION", styles["Heading3"])); story.append(Paragraph(f"I hereby certify that the movement of the above company property has been duly approved and authorized.<br/><br/>Authorizing Officer: {row.get('approved_by') or '_______________________________'}<br/>Designation: {row.get('approved_by_role') or '______________________________________'}<br/>Signature: ________________________________________<br/>Date: {str(row.get('approved_at') or '')}", normal))
+        story.append(Spacer(1, 7)); story.append(Paragraph("SECURITY VERIFICATION", styles["Heading3"])); story.append(Paragraph("Security Officer Name: ______________________________ &nbsp;&nbsp; Gate Verification Time: ______________________________<br/>Exit/Entry Confirmation: ______________________________ &nbsp;&nbsp; Signature: ______________________________", normal))
+        story.append(Spacer(1, 5)); story.append(Paragraph("This gateway pass is valid only for the listed items and approved movement date. System reference number: GP-%s" % gateway_pass_id, small))
+        doc.build(story)
+        run_query("UPDATE gateway_passes SET status='Generated', next_role=NULL, generated_at=?, generated_file_path=?, updated_at=? WHERE id=?", (now_iso(), str(path), now_iso(), gateway_pass_id))
+        log_gateway_event(gateway_pass_id, "Gateway Pass Generated", "Generated", str(path))
+        return str(path)
+    except Exception as exc:
+        st.error(f"Could not generate PDF gateway pass: {exc}")
+        return None
+
+
+def gateway_pass_review_queue(title: str, admin_mode: bool = False):
+    _phase2_bootstrap()
+    st.subheader(title)
+    if user()["role"] == "Procurement Manager" and not admin_mode:
+        df = gateway_pass_summary_df("gp.status IN ('Submitted','Pending Procurement Manager / Approver Review') AND EXISTS (SELECT 1 FROM facility_manager_links fml WHERE fml.facility_manager_user_id=gp.facility_manager_user_id AND fml.procurement_manager_user_id=? AND fml.is_active=1)", (user()["id"],))
+    else:
+        df = gateway_pass_summary_df("gp.status IN ('Submitted','Pending Procurement Manager / Approver Review')", ())
+    if df.empty:
+        st.success("No gateway passes are awaiting review."); return
+    show = df[["id", "pass_number", "facility_manager", "department", "movement_type", "destination", "expected_movement_date", "status", "submitted_at"]].copy()
+    dataframe(show.drop(columns=["id"]))
+    selected = st.selectbox("Open gateway pass for review", [f"{r.pass_number} — {r.facility_manager} — #{int(r.id)}" for r in df.itertuples()], key=f"gp_review_select_phase3_{user()['role']}_{admin_mode}")
+    gp_id = int(selected.rsplit("#", 1)[1])
+    gateway_pass_detail(gp_id)
+    note = st.text_area("Review note / reason", key=f"gp_review_note_phase3_{gp_id}_{user()['role']}_{admin_mode}")
+    c1, c2, c3 = st.columns(3)
+    if c1.button("Approve Gateway Pass", type="primary", key=f"gp_approve_phase3_{gp_id}_{user()['role']}"):
+        _gateway_approve(gp_id, "Approved", note or "Approved.")
+    if c2.button("Return for Correction", key=f"gp_return_phase3_{gp_id}_{user()['role']}"):
+        _gateway_approve(gp_id, "Returned for Correction", note)
+    if c3.button("Reject Gateway Pass", key=f"gp_reject_phase3_{gp_id}_{user()['role']}"):
+        _gateway_approve(gp_id, "Rejected", note)
+
+
+def gateway_pass_register(where_sql: str, params: tuple | list, title: str, allow_submit: bool = False, allow_generate: bool = False, key_prefix: str = "gp_register"):
+    st.subheader(title)
+    df = gateway_pass_summary_df(where_sql, params)
+    if df.empty:
+        empty_state("No gateway passes", "Gateway pass records will appear here."); return
+    show_cols = ["id", "pass_number", "facility_manager", "department", "movement_type", "destination", "expected_movement_date", "status", "approved_by", "updated_at"]
+    show = df[[c for c in show_cols if c in df.columns]].copy()
+    dataframe(show.drop(columns=["id"]) if "id" in show.columns else show)
+    selected = st.selectbox("Open gateway pass", [f"{r.pass_number} — {r.status} — #{int(r.id)}" for r in df.itertuples()], key=f"{key_prefix}_select_phase3")
+    gp_id = int(selected.rsplit("#", 1)[1])
+    row = df[df["id"] == gp_id].iloc[0]
+    gateway_pass_detail(gp_id)
+    if user()["role"] == "Facility Manager" and row["status"] in ["Draft", "Returned for Correction"]:
+        edit_gateway_pass_form(gp_id)
+    events = df_query("SELECT event, status, note, user_id, created_at FROM gateway_pass_events WHERE gateway_pass_id=? ORDER BY created_at DESC", (gp_id,))
+    with st.expander("Gateway pass history", expanded=False):
+        dataframe(events) if not events.empty else st.info("No events yet.")
+    if allow_submit and row["status"] in ["Draft", "Returned for Correction"]:
+        if st.button("Submit Gateway Pass for Approval", type="primary", key=f"{key_prefix}_submit_phase3_{gp_id}"):
+            submit_gateway_pass(gp_id)
+    if allow_generate:
+        ready = row["status"] in ["Approved", "Generated", "Downloaded"]
+        if ready:
+            render_gateway_pass_preview(gp_id)
+        else:
+            st.info("The final company-format preview and Generate button unlock after approval by Procurement Manager, Approver/MD, or Admin.")
+        if st.button("Generate Final Gateway Pass PDF", type="primary", key=f"{key_prefix}_generate_phase3_{gp_id}", disabled=not ready):
+            path = generate_gateway_pass_document(gp_id)
+            if path:
+                st.success("Gateway pass PDF generated. Review the preview above, then download the final PDF below."); st.rerun()
+        if not ready:
+            st.caption("Generate is disabled until the gateway pass is approved by Procurement Manager, Approver/MD, or Admin.")
+        refreshed = gateway_pass_summary_df("gp.id=?", (gp_id,)).iloc[0]
+        if refreshed["status"] in ["Generated", "Downloaded"] or refreshed.get("generated_file_path"):
+            st.markdown("#### Download")
+            gateway_pass_download_button(refreshed)
+
+
+def finance_workspace():
+    role_header("Finance Workspace", "Invoices, receipts, payments, expenses, budgets, reconciliation and financial controls.")
+    section = st.session_state.get("finance_section", "Financial Dashboard")
+    if section == "Financial Dashboard":
+        finance_metrics(); finance_dashboard()
+    elif section == "Approved for Payment":
+        approved_for_payment_page()
+    elif section == "Receipts":
+        receipts_page()
+    elif section == "Invoices":
+        invoices_page()
+    elif section == "Expenses":
+        expenses_page()
+    elif section == "Payments":
+        payments_page()
+    elif section == "Cash Advances":
+        cash_advances_page()
+    elif section == "Budgets":
+        budgets_page()
+    elif section == "Vendor Payment Records":
+        payments_page()
+    elif section == "Reconciliation":
+        reconciliation_page()
+    elif section == "Financial Reports":
+        finance_reports()
+    elif section == "Settings":
+        settings_page()
+    else:
+        finance_metrics(); finance_dashboard()
+
+
+def audit_workspace():
+    role_header("Audit & Compliance Workspace", "Strictly read-only review of lifecycles, approvals, delegated approvals, budgets, imports, handoffs, gateway passes, vendors and finance status changes.")
+    section = st.session_state.get("audit_section", "Audit Dashboard")
+    if section == "Audit Dashboard":
+        audit_metrics(); audit_dashboard()
+    elif section == "Procurement Records":
+        auditor_records_page()
+    elif section == "Document Archive":
+        document_archive(editable=False)
+    elif section == "Approval Trails":
+        approval_trails_page()
+    elif section == "Delegated Approval Review":
+        delegated_approval_review_page()
+    elif section == "Budget Audit":
+        budget_audit_page()
+    elif section == "Facility Manager Handoff Trail":
+        facility_handoff_trail_page()
+    elif section == "Gateway Pass Audit":
+        gateway_pass_audit_page()
+    elif section == "Vendor History":
+        vendor_history_page()
+    elif section == "Expense Review":
+        expense_review_page()
+    elif section == "Compliance Reports":
+        compliance_reports()
+    elif section == "Settings":
+        settings_page()
+    else:
+        audit_metrics(); audit_dashboard()
+
+# ============================================================================
+# Phase 4 UX upgrades: compact KPI cards, dynamic charts, badge counts, guided PRs,
+# persistent-audit views, smarter Other dropdowns, and payment-method receipt OCR.
+# These late definitions intentionally override earlier versions safely.
+# ============================================================================
+
+from datetime import datetime
+from core.ui import interactive_chart, format_kpi_value
+
+
+def _parse_date_value(raw: Any, fallback: date | None = None) -> date:
+    """Normalize OCR date text into a Python date. Falls back only when OCR is absent/invalid."""
+    fallback = fallback or date.today()
+    if raw is None:
+        return fallback
+    text = str(raw).strip().replace(".", "/").replace("-", "/")
+    if not text:
+        return fallback
+    # Month names require the original text.
+    original = str(raw).strip()
+    for fmt in [
+        "%Y/%m/%d", "%d/%m/%Y", "%m/%d/%Y", "%d/%m/%y", "%m/%d/%y",
+        "%d %b %Y", "%d %B %Y", "%b %d %Y", "%B %d %Y",
+        "%d-%b-%Y", "%d-%B-%Y", "%Y-%m-%d",
+    ]:
+        try:
+            value = original if "%b" in fmt or "%B" in fmt or "-" in fmt else text
+            return datetime.strptime(value, fmt).date()
+        except Exception:
+            continue
+    # Defensive Nigerian-style default: if ambiguous like 05/06/2026, treat as DD/MM/YYYY.
+    import re
+    m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", text)
+    if m:
+        d, mth, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if y < 100:
+            y += 2000
+        try:
+            return date(y, mth, d)
+        except Exception:
+            try:
+                return date(y, d, mth)
+            except Exception:
+                return fallback
+    return fallback
+
+
+def _custom_values(field_name: str) -> list[str]:
+    try:
+        rows = df_query("SELECT custom_value FROM custom_dropdown_values WHERE field_name=? ORDER BY custom_value", (field_name,))
+        return rows["custom_value"].dropna().astype(str).tolist() if not rows.empty else []
+    except Exception:
+        return []
+
+
+def _save_custom_value(field_name: str, value: str):
+    value = (value or "").strip()
+    if not value:
+        return
+    try:
+        run_query(
+            "INSERT OR IGNORE INTO custom_dropdown_values (field_name, custom_value, created_by, created_at) VALUES (?, ?, ?, ?)",
+            (field_name, value, user().get("id"), now_iso()),
+        )
+    except Exception:
+        pass
+
+
+def selectbox_with_other(label: str, options: list[str], key: str, field_name: str | None = None, index: int = 0, help: str | None = None) -> str:
+    """Dropdown that opens an input box when Other is selected and remembers custom values."""
+    field_name = field_name or key
+    merged = []
+    for item in list(options) + _custom_values(field_name):
+        if item and item not in merged:
+            merged.append(item)
+    if "Other" not in merged:
+        merged.append("Other")
+    index = min(index, max(len(merged) - 1, 0))
+    chosen = st.selectbox(label, merged, index=index, key=key, help=help)
+    if chosen == "Other":
+        typed = st.text_input(f"Specify other {label.lower()}", key=f"{key}_other", placeholder="Type the exact value you want to use")
+        if typed.strip():
+            st.caption(f"This will be saved as: {typed.strip()}")
+            return typed.strip()
+        return "Other"
+    return chosen
+
+
+def metric_row(metrics: list[tuple[str, Any, str | None]], cols: int = 4):
+    columns = st.columns(cols)
+    for i, (label, value, help_text) in enumerate(metrics):
+        columns[i % cols].metric(label, format_kpi_value(value), help=help_text)
+
+
+def _money_chart_df(df: pd.DataFrame, amount_col: str = "total") -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    data = df.copy()
+    try:
+        data[amount_col] = pd.to_numeric(data[amount_col], errors="coerce").fillna(0)
+    except Exception:
+        pass
+    return data
+
+
+def analytics():
+    st.subheader("Interactive Visual Analytics")
+    st.caption("Use each chart selector to switch between bar, horizontal bar, line, area, pie, donut, or table views. This makes the same data explain different procurement questions.")
+    c1, c2 = st.columns(2)
+    with c1:
+        df = df_query("SELECT category, SUM(amount) total FROM expenses WHERE status IN ('Approved','Paid') GROUP BY category ORDER BY total DESC")
+        interactive_chart(_money_chart_df(df), "Spend by Category", "category", "total", "analytics_spend_category", default="Bar")
+    with c2:
+        df = df_query("SELECT COALESCE(v.name,'No vendor') vendor, SUM(e.amount) total FROM expenses e LEFT JOIN vendors v ON e.vendor_id=v.id WHERE e.status IN ('Approved','Paid') GROUP BY vendor ORDER BY total DESC")
+        interactive_chart(_money_chart_df(df), "Spend by Vendor", "vendor", "total", "analytics_spend_vendor", default="Horizontal Bar")
+    c3, c4 = st.columns(2)
+    with c3:
+        df = df_query("SELECT status, COUNT(*) count FROM purchase_requests GROUP BY status ORDER BY count DESC")
+        interactive_chart(df, "Requests by Status", "status", "count", "analytics_req_status", default="Bar")
+    with c4:
+        df = df_query("SELECT receiving_status, COUNT(*) count FROM purchase_orders GROUP BY receiving_status ORDER BY count DESC")
+        interactive_chart(df, "PO Delivery Status", "receiving_status", "count", "analytics_po_receiving", default="Donut")
+    c5, c6 = st.columns(2)
+    with c5:
+        df = df_query("SELECT substr(created_at,1,7) AS month, COUNT(*) AS count FROM purchase_requests GROUP BY 1 ORDER BY 1")
+        interactive_chart(df, "Monthly Request Trend", "month", "count", "analytics_monthly_requests", default="Line", allow_pie=False)
+    with c6:
+        df = df_query("SELECT payment_method, SUM(amount) total FROM receipt_records GROUP BY payment_method ORDER BY total DESC")
+        interactive_chart(_money_chart_df(df), "Receipt Value by Payment Method", "payment_method", "total", "analytics_receipt_methods", default="Pie")
+
+
+def admin_overview():
+    c1, c2 = st.columns(2)
+    with c1:
+        df = df_query("SELECT status, COUNT(*) count FROM purchase_requests GROUP BY status ORDER BY count DESC")
+        interactive_chart(df, "Procurement Pipeline", "status", "count", "admin_pipeline", default="Bar")
+        st.subheader("Recently Imported Documents")
+        docs = df_query("SELECT id, document_type, department_project, title, total_amount, confidence, import_status FROM imported_legacy_documents ORDER BY created_at DESC LIMIT 10")
+        if not docs.empty:
+            docs["total_amount"] = docs["total_amount"].apply(money)
+            dataframe(docs)
+        else:
+            empty_state("No imports yet", "Use the Import Center to import procurement documents.")
+    with c2:
+        st.subheader("System Activity")
+        logs = df_query("SELECT created_at, event_date, event_time, action, entity_type, entity_id, details FROM audit_logs ORDER BY created_at DESC LIMIT 12")
+        dataframe(_redact_ui_df(logs, "audit_logs")) if not logs.empty else empty_state("No audit events", "System actions will be logged here.")
+        st.subheader("Budget Risk")
+        df = budget_risk_df()
+        if not df.empty:
+            dataframe(df)
+        else:
+            st.success("No budget risk detected.")
+
+
+def procurement_dashboard():
+    st.subheader("What needs my attention?")
+    c1, c2, c3 = st.columns(3)
+    fm_inbox = int(df_query("SELECT COUNT(*) c FROM purchase_requests WHERE status='Submitted to Procurement Manager'").iloc[0, 0])
+    gp_waiting = int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE status IN ('Submitted','Pending Procurement Manager / Approver Review')").iloc[0, 0])
+    sourcing = int(df_query("SELECT COUNT(*) c FROM purchase_requests WHERE status IN ('Requires Sourcing','Vendor Quote Collection')").iloc[0, 0])
+    c1.metric("Facility Manager Inbox", format_kpi_value(fm_inbox))
+    c2.metric("Gateway Passes Awaiting Review", format_kpi_value(gp_waiting))
+    c3.metric("Needs Sourcing", format_kpi_value(sourcing))
+    if gp_waiting:
+        st.warning(f"{gp_waiting} gateway pass(es) are awaiting review.")
+    df = df_query("SELECT request_no, department_project, category, estimated_amount, status, updated_at FROM purchase_requests WHERE status NOT IN ('Closed','Rejected','Paid') ORDER BY updated_at DESC LIMIT 20")
+    if not df.empty:
+        show = df.copy(); show["estimated_amount"] = show["estimated_amount"].apply(money); dataframe(show)
+    else:
+        st.success("No open procurement requests.")
+    c1, c2 = st.columns(2)
+    with c1:
+        pipe = df_query("SELECT status, COUNT(*) count FROM purchase_requests GROUP BY status ORDER BY count DESC")
+        interactive_chart(pipe, "Procurement Pipeline", "status", "count", "pm_pipeline", default="Bar")
+    with c2:
+        spend = df_query("SELECT category, SUM(estimated_amount) total FROM purchase_requests WHERE status NOT IN ('Rejected','Cancelled') GROUP BY category ORDER BY total DESC")
+        interactive_chart(_money_chart_df(spend), "Estimated Request Value by Category", "category", "total", "pm_category_value", default="Donut")
+
+
+def finance_dashboard():
+    st.subheader("Finance Attention Center")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Approved for Payment", format_kpi_value(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status='Approved for Payment' OR payment_status='Approved for Payment'").iloc[0,0]))
+    c2.metric("Invoices Needing Review", format_kpi_value(df_query("SELECT COUNT(*) FROM invoices WHERE status IN ('Uploaded','Needs Review') OR match_status IN ('Needs Review','Mismatch')").iloc[0,0]))
+    c3.metric("Payments Pending", format_kpi_value(df_query("SELECT COUNT(*) FROM payments WHERE status IN ('Pending Approval','Approved')").iloc[0,0]))
+    c4.metric(
+        "Receipts Today",
+        format_kpi_value(
+            df_query(
+                "SELECT COUNT(*) FROM receipt_records WHERE substr(created_at,1,10)=?",
+                (date.today().isoformat(),),
+            ).iloc[0, 0]
+        ),
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        df = df_query("SELECT payment_method, SUM(amount) total FROM receipt_records GROUP BY payment_method ORDER BY total DESC")
+        interactive_chart(_money_chart_df(df), "Receipts by Payment Method", "payment_method", "total", "finance_receipts_method", default="Bar")
+    with c2:
+        df = df_query("SELECT status, COUNT(*) count FROM invoices GROUP BY status ORDER BY count DESC")
+        interactive_chart(df, "Invoice Queue by Status", "status", "count", "finance_invoice_status", default="Donut")
+    c3, c4 = st.columns(2)
+    with c3:
+        df = df_query("SELECT category, SUM(amount) total FROM expenses WHERE status IN ('Approved','Paid') GROUP BY category ORDER BY total DESC")
+        interactive_chart(_money_chart_df(df), "Approved Spend by Category", "category", "total", "finance_category_spend", default="Horizontal Bar")
+    with c4:
+        df = df_query("SELECT substr(payment_date,1,7) AS month, COALESCE(SUM(amount),0) AS total FROM payments WHERE status='Paid' GROUP BY 1 ORDER BY 1")
+        interactive_chart(_money_chart_df(df), "Paid Payments Trend", "month", "total", "finance_paid_trend", default="Line", allow_pie=False)
+
+
+def executive_dashboard():
+    st.subheader("Executive Decision Center")
+    pending = int(df_query("SELECT COUNT(*) c FROM purchase_requests WHERE status IN ('Pending Approval','Pending Approver/MD Approval')").iloc[0, 0])
+    gp_waiting = int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE status IN ('Submitted','Pending Procurement Manager / Approver Review')").iloc[0, 0])
+    payment_pending = int(df_query("SELECT COUNT(*) c FROM payments WHERE status='Pending Approval'").iloc[0, 0])
+    metric_row([
+        ("Pending approvals", pending, None),
+        ("Gateway Passes Awaiting Review", gp_waiting, None),
+        ("Payment approvals", payment_pending, None),
+    ], cols=3)
+    df = df_query("SELECT request_no, department_project, category, estimated_amount, status, updated_at FROM purchase_requests WHERE status IN ('Pending Approval','Pending Approver/MD Approval') ORDER BY estimated_amount DESC LIMIT 20")
+    if not df.empty:
+        show = df.copy(); show["estimated_amount"] = show["estimated_amount"].apply(money); dataframe(show)
+    else:
+        st.success("No pending request approvals.")
+    c1, c2 = st.columns(2)
+    with c1:
+        by_cat = df_query("SELECT category, COUNT(*) count FROM purchase_requests WHERE status IN ('Pending Approval','Pending Approver/MD Approval') GROUP BY category ORDER BY count DESC")
+        interactive_chart(by_cat, "Pending Approvals by Category", "category", "count", "exec_pending_cat", default="Bar")
+    with c2:
+        by_value = df_query("SELECT category, SUM(estimated_amount) total FROM purchase_requests WHERE status IN ('Pending Approval','Pending Approver/MD Approval') GROUP BY category ORDER BY total DESC")
+        interactive_chart(_money_chart_df(by_value), "Approval Value by Category", "category", "total", "exec_value_cat", default="Donut")
+
+
+def audit_dashboard():
+    st.subheader("Compliance Snapshot")
+    recent_notifs = df_query("SELECT title, message, entity_type, entity_id, created_at FROM notifications WHERE role='Auditor' OR user_id=? ORDER BY created_at DESC LIMIT 25", (user()["id"],))
+    if not recent_notifs.empty:
+        st.markdown("#### Recent activity notifications")
+        dataframe(recent_notifs)
+    metric_row([
+        ("Gateway pass audit count", int(df_query("SELECT COUNT(*) c FROM gateway_passes").iloc[0,0]), None),
+        ("Approved passes", int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE status='Approved'").iloc[0,0]), None),
+        ("Generated passes", int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE status IN ('Generated','Downloaded')").iloc[0,0]), None),
+        ("Fragile item movements", int(df_query("SELECT COUNT(DISTINCT gateway_pass_id) c FROM gateway_pass_items WHERE fragility_status='Fragile'").iloc[0,0]), None),
+    ], cols=4)
+    c1, c2 = st.columns(2)
+    with c1:
+        logs_by_action = df_query("SELECT action, COUNT(*) count FROM audit_logs GROUP BY action ORDER BY count DESC LIMIT 15")
+        interactive_chart(logs_by_action, "Audit Events by Action", "action", "count", "audit_actions", default="Horizontal Bar")
+    with c2:
+        login = df_query("SELECT action, COUNT(*) count FROM audit_logs WHERE action IN ('LOGIN','LOGOUT') GROUP BY action")
+        interactive_chart(login, "Login / Logout Activity", "action", "count", "audit_login_logout", default="Donut")
+    logs = df_query("SELECT event_date, event_time, created_at, action, entity_type, entity_id, role, details FROM audit_logs ORDER BY created_at DESC LIMIT 20")
+    dataframe(_redact_ui_df(logs, "audit_logs")) if not logs.empty else st.info("No audit logs yet.")
+
+
+def audit_log_page(full=False):
+    st.subheader("Audit Logs")
+    st.caption("This view separates login/logout sessions from general audit events so a novice can see who entered the system, when they entered, and when they left.")
+    limit = 1000 if full else 200
+    session_df = df_query(f"""
+        SELECT u.username, u.full_name, u.role, s.login_at, substr(s.login_at,1,10) login_date, substr(s.login_at,12,8) login_time,
+               s.logout_at, substr(s.logout_at,1,10) logout_date, substr(s.logout_at,12,8) logout_time,
+               s.last_seen_at, s.status
+        FROM user_sessions s LEFT JOIN users u ON u.id=s.user_id
+        ORDER BY s.login_at DESC LIMIT {limit}
+    """)
+    st.markdown("#### Login / Logout Sessions")
+    if not session_df.empty:
+        dataframe(session_df)
+        csv_download(session_df, "login_logout_sessions")
+    else:
+        st.info("No session records yet. New logins will appear here.")
+    st.markdown("#### Detailed Audit Events")
+    df = df_query(f"""
+        SELECT COALESCE(a.event_date, substr(a.created_at,1,10)) event_date,
+               COALESCE(a.event_time, substr(a.created_at,12,8)) event_time,
+               a.created_at, u.full_name user, a.role, a.action, a.entity_type, a.entity_id,
+               a.details, a.before_values, a.after_values
+        FROM audit_logs a LEFT JOIN users u ON a.user_id=u.id
+        ORDER BY a.created_at DESC LIMIT {limit}
+    """)
+    safe = _redact_ui_df(df, "audit_logs")
+    dataframe(safe) if not safe.empty else empty_state("No audit logs", "Sensitive actions will appear here.")
+    csv_download(safe, "audit_logs")
+
+
+def notifications_monitor_page():
+    _phase2_bootstrap(); _ensure_finance_doc_schema_ui()
+    st.subheader("Notifications Monitor")
+    st.caption("Monitor in-app unread notifications, browser push readiness, fallback outbox, and user notification preferences.")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Unread in-app", format_kpi_value(df_query("SELECT COUNT(*) FROM notifications WHERE is_read=0").iloc[0,0]))
+    c2.metric("Push-enabled users", format_kpi_value(df_query("SELECT COUNT(*) FROM notification_preferences WHERE browser_push_enabled=1").iloc[0,0]))
+    c3.metric("Active subscriptions", format_kpi_value(df_query("SELECT COUNT(*) FROM push_subscriptions WHERE is_active=1").iloc[0,0]))
+    c4.metric("Outbox queued/fallback", format_kpi_value(df_query("SELECT COUNT(*) FROM notification_outbox WHERE status IN ('Queued','Fallback')").iloc[0,0]))
+    st.info("Browser/system push is a progressive enhancement. If a browser or local Streamlit deployment does not support service workers/push subscriptions, ProcureFlow keeps the alert unread and queues a fallback record here.")
+    smtp_ready, smtp_msg = email_delivery_ready()
+    if smtp_ready:
+        st.success(f"Email delivery: {smtp_msg}")
+    else:
+        st.warning(f"Email delivery: {smtp_msg}")
+    st.caption("Users must also save an email address and enable Email notifications in their own Settings before important alerts are emailed.")
+    st.markdown("#### Browser Notification Readiness")
+    readiness = df_query("""
+        SELECT u.username, u.full_name, u.role, np.browser_push_enabled, np.browser_permission_status,
+               COUNT(ps.id) AS active_subscriptions, MAX(ps.last_success_at) AS last_push_success, MAX(ps.last_failure_at) AS last_push_failure
+        FROM users u
+        LEFT JOIN notification_preferences np ON np.user_id=u.id
+        LEFT JOIN push_subscriptions ps ON ps.user_id=u.id AND ps.is_active=1
+        GROUP BY u.id, u.username, u.full_name, u.role, np.browser_push_enabled, np.browser_permission_status
+        ORDER BY u.role, u.username
+    """)
+    dataframe(_redact_ui_df(readiness, "push_subscriptions")) if not readiness.empty else st.info("No browser readiness data yet.")
+    st.markdown("#### Notifications")
+    df = df_query("SELECT n.*, u.username, u.full_name FROM notifications n LEFT JOIN users u ON n.user_id=u.id ORDER BY n.created_at DESC LIMIT 500")
+    dataframe(_redact_ui_df(df, "notifications")) if not df.empty else st.info("No notifications yet.")
+    st.markdown("#### External Notification Outbox")
+    outbox = _safe_table_df("notification_outbox", 500)
+    dataframe(_redact_ui_df(outbox, "notification_outbox")) if not outbox.empty else st.info("No external notification outbox items yet.")
+    st.markdown("#### User Preferences")
+    prefs = df_query("SELECT np.*, u.username, u.full_name, u.role FROM notification_preferences np LEFT JOIN users u ON u.id=np.user_id ORDER BY u.role, u.username")
+    dataframe(prefs) if not prefs.empty else st.info("No preferences yet.")
+
+
+def requests_page(mode="procurement"):
+    st.subheader("Purchase Requests")
+    section = st.radio("Purchase Request sections", ["Create Request", "Guided Next Actions", "Request Register", "Imported Draft Review"], horizontal=True, key=f"requests_sections_{mode}")
+    if section == "Create Request":
+        create_request_form()
+    elif section == "Guided Next Actions":
+        request_next_action_board()
+    elif section == "Request Register":
+        request_register(actions=True)
+    else:
+        imported_draft_review()
+
+
+def create_request_form():
+    if not has_permission("create_request"):
+        st.info("Your role can view requests but cannot create requests.")
+        return
+    st.caption("Create a draft request first. The next action board will guide procurement users to mark sourcing, send for approval, or create a PO.")
+    c1, c2, c3 = st.columns(3)
+    dept = selectbox_with_other("Department / Project", department_options() + ["Other"], "req_dept_phase4", "department_project")
+    req_date = c2.date_input("Request date", date.today(), key="req_date_phase4")
+    req_required = c3.date_input("Required date", date.today() + timedelta(days=7), key="req_required_phase4")
+    c4, c5, c6 = st.columns(3)
+    cat = selectbox_with_other("Category", EXPENSE_CATEGORIES, "req_cat_phase4", "category")
+    priority = c5.selectbox("Priority", PRIORITIES, index=1, key="req_priority_phase4")
+    vendor_pref = c6.text_input("Vendor preference", key="req_vendor_pref_phase4")
+    justification = st.text_area("Business justification", key="req_justification_phase4")
+    attachment = st.file_uploader("Supporting document", type=["docx", "pdf", "jpg", "jpeg", "png"], key="req_attachment_phase4")
+    item_count = st.number_input("Line items", 1, 15, 1, key="req_item_count_phase4")
+    items, estimated = [], 0.0
+    for i in range(int(item_count)):
+        c1, c2, c3, c4 = st.columns([1.4, .7, .9, 1])
+        item = c1.text_input("Item", key=f"req4_item_{i}")
+        qty = c2.number_input("Qty", 0.0, value=1.0, step=1.0, key=f"req4_qty_{i}")
+        unit = c3.number_input("Unit price", 0.0, step=1000.0, key=f"req4_unit_{i}")
+        icat = selectbox_with_other("Item category", EXPENSE_CATEGORIES, f"req4_item_cat_{i}", "category", index=EXPENSE_CATEGORIES.index("Other") if cat == "Other" else 0)
+        total = qty * unit
+        estimated += total
+        items.append((item, qty, unit, total, icat))
+    st.metric("Estimated request value", format_kpi_value(money(estimated)))
+    if st.button("Create Draft Request", type="primary", key="create_draft_request_phase4"):
+        if not justification or not any(i[0] for i in items):
+            st.error("Business justification and at least one item are required.")
+            return
+        _save_custom_value("department_project", dept); _save_custom_value("category", cat)
+        vendor_names = [v["name"] for v in vendor_details if v.get("name")]
+        vendor_pref_full = ", ".join(dict.fromkeys([v for v in [vendor_pref.strip(), *vendor_names] if v]))
+        path, _ = save_upload(attachment, "requests")
+        req_no = make_ref("PR")
+        req_id = run_insert("""
+            INSERT INTO purchase_requests (request_no, requested_by, department_project, request_date, required_date, category, justification, priority, estimated_amount, vendor_preference, status, attachments_json, notes, approval_history_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?, '', '[]', ?, ?)
+        """, (req_no, user()["id"], dept, req_date.isoformat(), req_required.isoformat(), cat, justification, priority, estimated, vendor_pref, json_dump([path] if path else []), now_iso(), now_iso()))
+        for item, qty, unit, total, icat in items:
+            if item:
+                _save_custom_value("category", icat)
+                run_query("INSERT INTO purchase_request_items (request_id, item_name, description, quantity, unit_price, total, category, suggested_vendor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (req_id, item, item, qty, unit, total, icat, vendor_pref, now_iso()))
+        add_workflow_event("Purchase Request", req_id, "Created", "Draft", req_no, user()["id"])
+        create_notification(user_id=user()["id"], title="Request draft created", message=f"{req_no} was created as a draft.", entity_type="Purchase Request", entity_id=req_id, importance="Normal", channels=["in_app"], action_label="Open Purchase Requests")
+        _rerun_success(f"Created {req_no}")
+
+
+def request_next_action_board():
+    st.caption("This is the simple command board for deciding what happens next. It avoids forcing users to understand every status in the status filter.")
+    cards = [
+        ("Submit drafts", "Draft", "Submit", "Submitted", "Submitted", "Request submitted for procurement review"),
+        ("Start procurement review", "Submitted", "Start Review", "Procurement Review", "Reviewed", "Procurement review started"),
+        ("Needs sourcing / supplier quotes", "Procurement Review", "Mark Requires Sourcing", "Requires Sourcing", "Sourcing Required", "Supplier comparison required"),
+        ("Send to Approver/MD", "Vendor Recommendation", "Send to MD", "Pending Approver/MD Approval", "Sent for Approval", "Awaiting MD approval"),
+        ("Approved requests needing PO", "Approved", "Open PO Creation", "Approved", "PO Action", "Create purchase order for approved request"),
+    ]
+    selected_action = st.selectbox("Action board", [c[0] for c in cards], key="pr_action_board_choice")
+    title, status, btn, new_status, event, note = [c for c in cards if c[0] == selected_action][0]
+    df = df_query("SELECT id, request_no, department_project, category, estimated_amount, status, updated_at FROM purchase_requests WHERE status=? ORDER BY updated_at DESC", (status,))
+    if df.empty:
+        st.success(f"No request currently needs: {title.lower()}.")
+        return
+    show = df.copy(); show["estimated_amount"] = show["estimated_amount"].apply(money); dataframe(show.drop(columns=["id"]))
+    chosen = st.selectbox("Select request", [f"{r.request_no} — {money(r.estimated_amount)} — #{int(r.id)}" for r in df.itertuples()], key="pr_action_board_request")
+    pr_id = int(chosen.rsplit("#", 1)[1])
+    if status == "Approved":
+        st.info("Approved requests are ready for Purchase Order creation. Click below to go to the Purchase Orders section.")
+        if st.button(btn, type="primary", key="pr_open_po_creation"):
+            _navigate_procurement_section("Purchase Orders")
+        return
+    if st.button(btn, type="primary", key="pr_apply_guided_action"):
+        update_request_status(pr_id, new_status, event, note)
+        if new_status == "Requires Sourcing":
+            create_sourcing_for_request(pr_id)
+        if new_status == "Pending Approver/MD Approval":
+            create_notification(None, "Approver", "Request pending approval", f"Request requires approval", "Purchase Request", pr_id, "High", ["in_app", "browser_push"], action_label="Open Pending Approvals")
+        st.rerun()
+
+
+def request_register(actions=True, approver_mode=False):
+    st.caption("Use the filters to find records. Use the Guided Next Actions board when you want to move a request to sourcing, approval or PO creation.")
+    c1, c2, c3 = st.columns(3)
+    status = c1.selectbox("Filter status only — not an action", ["All"] + PR_STATUSES, key=f"status_phase4_{approver_mode}")
+    dept = c2.selectbox("Department", ["All"] + department_options(), key=f"dept_phase4_{approver_mode}")
+    term = c3.text_input("Search", key=f"req_search_phase4_{approver_mode}")
+    sql = """
+        SELECT pr.id, pr.request_no, pr.department_project, pr.category, pr.priority, pr.estimated_amount, pr.status, pr.source_type, pr.import_confidence, u.full_name requested_by, pr.justification
+        FROM purchase_requests pr LEFT JOIN users u ON pr.requested_by=u.id WHERE 1=1
+    """
+    params = []
+    if status != "All": sql += " AND pr.status=?"; params.append(status)
+    if dept != "All": sql += " AND pr.department_project=?"; params.append(dept)
+    if term:
+        sql += " AND (pr.request_no LIKE ? OR pr.justification LIKE ? OR pr.category LIKE ?)"; params += [f"%{term}%"]*3
+    sql += " ORDER BY pr.updated_at DESC, pr.created_at DESC"
+    df = df_query(sql, params)
+    if df.empty:
+        empty_state("No purchase requests", "Create or import purchase requests to begin workflow.")
+        return
+    display = df.drop(columns=["id", "justification"]).copy()
+    display["estimated_amount"] = display["estimated_amount"].apply(money)
+    display["status"] = display["status"].apply(lambda x: badge(x))
+    st.markdown(display.to_html(escape=False, index=False), unsafe_allow_html=True)
+    selected = st.selectbox("Open request", df["request_no"].tolist(), key=f"open_req_phase4_{approver_mode}")
+    pr_id = int(df[df["request_no"] == selected].iloc[0]["id"])
+    request_detail(pr_id, actions=actions, key_scope=f"request_register_phase4_{approver_mode}")
+    csv_download(_redact_ui_df(df, "purchase_requests"), "purchase_requests")
+
+
+def request_actions(pr_id: int, pr, key_scope: str | None = None):
+    scope = key_scope or "default"
+    prefix = f"{scope}_pr_{pr_id}"
+    st.markdown("#### Guided next action")
+    st.caption("Only actions allowed for the current status and your role are shown. This is easier than manually changing statuses.")
+    actions = []
+    if pr["status"] == "Draft" and has_permission("submit_request"):
+        actions.append(("Submit to Procurement Review", "Submitted", "Submitted", "Request submitted for procurement review"))
+    if pr["status"] == "Submitted" and has_permission("procurement_review"):
+        actions.append(("Start Procurement Review", "Procurement Review", "Reviewed", "Procurement review started"))
+    if pr["status"] in ["Submitted", "Procurement Review"] and has_permission("create_sourcing"):
+        actions.append(("Requires Sourcing / Vendor Quotes", "Requires Sourcing", "Sourcing Required", "Supplier comparison required"))
+    if pr["status"] in ["Submitted", "Procurement Review", "Vendor Recommendation"] and has_permission("procurement_review"):
+        actions.append(("Send to Approver/MD", "Pending Approver/MD Approval", "Sent for Approval", "Awaiting MD approval"))
+    if pr["status"] in ["Pending Approver/MD Approval", "Pending Approval"] and has_permission("approve_request"):
+        actions.append(("Approve Request", "Approved", "Approved", "Approved"))
+        actions.append(("Reject Request", "Rejected", "Rejected", "Rejected"))
+    if pr["status"] == "Approved" and has_permission("create_po"):
+        st.success("This request is approved and ready for a Purchase Order.")
+        if st.button("Go to Purchase Orders", key=f"go_po_{prefix}"):
+            _navigate_procurement_section("Purchase Orders")
+    if not actions:
+        st.info("No direct action is available for this request at its current status or your role.")
+        return
+    action_labels = [a[0] for a in actions]
+    chosen = st.selectbox("Choose next action", action_labels, key=f"guided_action_{prefix}")
+    reason = ""
+    if "Reject" in chosen:
+        reason = st.text_input("Reject/request more information reason", key=f"reason_phase4_{prefix}")
+    if st.button("Apply selected action", type="primary", key=f"apply_action_{prefix}"):
+        label, new_status, event, note = [a for a in actions if a[0] == chosen][0]
+        if new_status == "Rejected" and not reason.strip():
+            st.error("Please enter a rejection reason.")
+            return
+        if new_status in ["Approved", "Rejected"]:
+            approval_action("Purchase Request", pr_id, pr["status"], new_status, event, reason or note)
+        else:
+            update_request_status(pr_id, new_status, event, note)
+            if new_status == "Requires Sourcing":
+                create_sourcing_for_request(pr_id)
+            if new_status == "Pending Approver/MD Approval":
+                create_notification(None, "Approver", "Request pending approval", f"{pr['request_no']} requires approval", "Purchase Request", pr_id, "High", ["in_app", "browser_push"], action_label="Open Pending Approvals")
+            st.rerun()
+
+
+def receipts_page():
+    _ensure_finance_doc_schema_ui()
+    st.subheader("Receipts")
+    st.caption("Receipts are proof that payment happened. Choose the payment method first; the form below changes immediately for cash, transfer, card, POS, cheque or mobile money evidence.")
+    section = st.radio("Receipt sections", ["Record Receipt", "Receipt Register", "OCR Attempts"], horizontal=True, key="receipt_sections_phase4")
+    if section == "Record Receipt":
+        uploaded, parsed = _ocr_upload_panel("receipt_ocr_upload_phase4", "receipt")
+        fields = parsed.get("fields", {}) if parsed else {}
+        receipt_details = parsed.get("receipt_details", {}) if parsed else {}
+        bank_details = parsed.get("bank_details", {}) if parsed else {}
+        vendors = vendor_options(True)
+
+        # A payment is now marked paid separately from its receipt. Finance can
+        # select any paid payment still awaiting a receipt and attach the manual
+        # receipt/upload to that payment here.
+        paid_without_receipt = df_query(
+            """
+            SELECT p.id, p.payment_no, p.request_id, p.po_id, p.vendor_id, p.amount, p.payment_method, p.payment_date,
+                   COALESCE(pr.request_no, '') request_no, COALESCE(po.po_no, '') po_no,
+                   COALESCE(pr.department_project, '') department
+            FROM payments p
+            LEFT JOIN purchase_orders po ON po.id=p.po_id
+            LEFT JOIN purchase_requests pr ON pr.id=COALESCE(p.request_id, po.request_id)
+            WHERE p.status='Paid' AND p.receipt_id IS NULL
+            ORDER BY COALESCE(p.payment_date, p.created_at) DESC, p.id DESC
+            """
+        )
+        payment_options = ["No paid payment selected"]
+        payment_lookup = {}
+        for row in paid_without_receipt.itertuples():
+            reference = row.request_no or row.po_no or "Unlinked payment"
+            label = f"{row.payment_no} | {reference} | {money(row.amount)}"
+            payment_options.append(label)
+            payment_lookup[label] = int(row.id)
+        linked_payment_label = st.selectbox(
+            "Link this receipt to a paid payment (optional)",
+            payment_options,
+            key="receipt_linked_payment_phase4",
+            help="Select the paid item this receipt proves. You can also record a standalone receipt.",
+        )
+        linked_payment = None
+        if linked_payment_label != "No paid payment selected":
+            linked_payment = paid_without_receipt[
+                paid_without_receipt["id"] == payment_lookup[linked_payment_label]
+            ].iloc[0]
+            st.caption(
+                f"Receipt will be attached to {linked_payment['payment_no']} "
+                f"({linked_payment['request_no'] or linked_payment['po_no'] or 'paid item'})."
+            )
+
+        selected_vendor_id = int(linked_payment.get("vendor_id") or 0) if linked_payment is not None else 0
+        vendor_name = fields.get("matched_vendor_name") or "No vendor selected"
+        if selected_vendor_id:
+            for name, vendor_id in vendors.items():
+                if vendor_id == selected_vendor_id:
+                    vendor_name = name
+                    break
+        vendor_index = list(vendors.keys()).index(vendor_name) if vendor_name in vendors else 0
+
+        linked_method = str(linked_payment.get("payment_method") or "") if linked_payment is not None else ""
+        detected_method = fields.get("payment_method") if fields.get("payment_method") in RECEIPT_PAYMENT_METHODS else (
+            linked_method if linked_method in RECEIPT_PAYMENT_METHODS else "Cash"
+        )
+        receipt_type_options = ["Payment Receipt", "Cash Receipt", "Transfer Receipt", "Card Receipt", "POS Receipt", "Cheque Receipt", "Mobile Money Receipt", "Refund Receipt", "Other"]
+        receipt_type = selectbox_with_other("Receipt type", receipt_type_options, "receipt_type_phase4", "receipt_type")
+        method_index = RECEIPT_PAYMENT_METHODS.index(detected_method) if detected_method in RECEIPT_PAYMENT_METHODS else 0
+        payment_method = selectbox_with_other("Payment method", RECEIPT_PAYMENT_METHODS + ["Other"], "receipt_method_phase4", "payment_method", index=method_index)
+        linked_payment_date = linked_payment.get("payment_date") if linked_payment is not None else None
+        default_pay_date = _parse_date_value(fields.get("date") or linked_payment_date, date.today())
+        linked_amount = float(linked_payment.get("amount") or 0) if linked_payment is not None else 0.0
+        default_amount = float(fields.get("total_amount") or linked_amount or 0)
+        departments = department_options()
+        linked_department = str(linked_payment.get("department") or "") if linked_payment is not None else ""
+        default_dept_index = departments.index(linked_department) if linked_department in departments else 0
+        linked_reference = ""
+        if linked_payment is not None:
+            linked_reference = linked_payment.get("request_no") or linked_payment.get("po_no") or linked_payment.get("payment_no") or ""
+        default_purpose = fields.get("description") or (f"Receipt for {linked_reference}" if linked_reference else "")
+        with st.form("receipt_record_form_phase4"):
+            c1, c2, c3 = st.columns(3)
+            payment_date = c1.date_input("Payment date", default_pay_date, key="receipt_payment_date_phase4")
+            receipt_no = c2.text_input("Receipt / transaction reference", value=fields.get("receipt_no") or "", key="receipt_no_phase4")
+            vendor_label = c3.selectbox("Vendor / Payee", list(vendors.keys()), index=vendor_index, key="receipt_vendor_phase4")
+            c4, c5, c6, c7 = st.columns(4)
+            amount = c4.number_input("Amount paid", min_value=0.0, value=default_amount, step=1000.0, key="receipt_amount_phase4")
+            tax = c5.number_input("VAT/Tax included", min_value=0.0, value=float(fields.get("tax_amount") or 0), step=100.0, key="receipt_tax_phase4")
+            dept = c6.selectbox("Department / Project", departments, index=default_dept_index, key="receipt_dept_phase4")
+            currency = selectbox_with_other("Currency", ["NGN", "USD", "EUR", "GBP", "Other"], "receipt_currency_phase4", "currency")
+            purpose = st.text_area("Purpose / what was paid for", value=default_purpose, key="receipt_purpose_phase4")
+            method_data = {}
+            st.markdown(f"##### {payment_method} receipt evidence")
+            if payment_method == "Cash":
+                c1, c2, c3 = st.columns(3)
+                method_data["cash_received_by"] = c1.text_input("Cash received by", key="cash_received_by_phase4")
+                method_data["cash_collected_from"] = c2.text_input("Cash collected from", value=user()["full_name"], key="cash_collected_from_phase4")
+                method_data["cash_denominations"] = c3.text_input("Denomination breakdown", placeholder="e.g. 10x ₦1,000 + 5x ₦500", key="cash_denominations_phase4")
+            elif payment_method == "Bank Transfer":
+                c1, c2, c3 = st.columns(3)
+                method_data["bank_name"] = c1.text_input("Receiving bank", value=bank_details.get("bank_name") or "", key="transfer_bank_phase4")
+                method_data["account_number"] = c2.text_input("Receiving account number", value=bank_details.get("account_no") or "", key="transfer_acct_phase4")
+                method_data["transfer_reference"] = c3.text_input("Transfer/session reference", value=bank_details.get("transfer_reference") or fields.get("receipt_no") or "", key="transfer_ref_phase4")
+                c4, c5 = st.columns(2)
+                method_data["sender_bank"] = c4.text_input("Sender bank", key="transfer_sender_bank_phase4")
+                method_data["receiver_bank"] = c5.text_input("Receiver bank", key="transfer_receiver_bank_phase4")
+            elif payment_method in ["Card", "POS/Card"] or "card" in payment_method.lower() or "pos" in payment_method.lower():
+                c1, c2, c3, c4 = st.columns(4)
+                method_data["card_type"] = selectbox_with_other("Card type", ["Unknown", "Visa", "Mastercard", "Verve", "Other"], "card_type_phase4", "card_type")
+                method_data["masked_card_number"] = c2.text_input("Masked card number", placeholder="**** **** **** 1234", key="masked_card_phase4")
+                method_data["card_auth_code"] = c3.text_input("Auth/approval code", value=receipt_details.get("auth_code") or "", key="card_auth_phase4")
+                method_data["pos_rrn"] = c4.text_input("RRN/STAN", value=receipt_details.get("rrn") or "", key="pos_rrn_phase4")
+                c5, c6 = st.columns(2)
+                method_data["pos_terminal_id"] = c5.text_input("POS terminal ID", value=receipt_details.get("terminal_id") or "", key="pos_tid_phase4")
+                method_data["pos_merchant_id"] = c6.text_input("Merchant ID", key="pos_mid_phase4")
+            elif payment_method == "Cheque":
+                c1, c2, c3 = st.columns(3)
+                method_data["cheque_number"] = c1.text_input("Cheque number", key="cheque_number_phase4")
+                method_data["cheque_bank"] = c2.text_input("Cheque bank", key="cheque_bank_phase4")
+                method_data["cheque_due_date"] = c3.date_input("Cheque date", default_pay_date, key="cheque_due_date_phase4").isoformat()
+            elif payment_method == "Mobile Money":
+                c1, c2 = st.columns(2)
+                method_data["mobile_wallet_provider"] = c1.text_input("Wallet/provider", placeholder="Opay, Moniepoint, Paga, etc.", key="mobile_provider_phase4")
+                method_data["mobile_transaction_id"] = c2.text_input("Mobile transaction ID", value=fields.get("receipt_no") or "", key="mobile_txn_phase4")
+            else:
+                method_data["other_payment_details"] = st.text_area("Describe payment evidence", key="other_payment_details_phase4")
+            notes = st.text_area("Finance notes", key="receipt_notes_phase4")
+            submitted = st.form_submit_button("Save Receipt", type="primary")
+        if submitted:
+            if amount <= 0:
+                st.error("Receipt amount must be greater than zero."); return
+            _save_custom_value("receipt_type", receipt_type); _save_custom_value("payment_method", payment_method)
+            path, fhash = save_upload(uploaded, "receipts") if uploaded else (None, None)
+            try:
+                from core.ocr import duplicate_receipt_candidates
+                dup = duplicate_receipt_candidates(fhash, amount, payment_date.isoformat(), vendors[vendor_label])
+            except Exception:
+                dup = pd.DataFrame()
+            receipt_ref = receipt_no.strip() or make_ref("RCT")
+            linked_payment_id = int(linked_payment["id"]) if linked_payment is not None else None
+            linked_po_id = None
+            linked_request_id = None
+            if linked_payment is not None:
+                if pd.notna(linked_payment.get("po_id")) and linked_payment.get("po_id"):
+                    linked_po_id = int(linked_payment.get("po_id"))
+                if pd.notna(linked_payment.get("request_id")) and linked_payment.get("request_id"):
+                    linked_request_id = int(linked_payment.get("request_id"))
+            rid = run_insert("""
+                INSERT INTO receipt_records (receipt_no, receipt_type, payment_method, payment_date, vendor_id, payer_name, payee_name, amount, tax_amount, currency, purpose, department_project,
+                    linked_payment_id, linked_po_id, cash_received_by, cash_collected_from, cash_denominations, bank_name, account_number, transfer_reference, sender_bank, receiver_bank, card_type, masked_card_number,
+                    card_auth_code, pos_terminal_id, pos_merchant_id, pos_rrn, cheque_number, cheque_bank, cheque_due_date, mobile_wallet_provider, mobile_transaction_id,
+                    status, file_path, file_hash, ocr_text, ocr_json, duplicate_warning, notes, uploaded_by, created_at, updated_at, detected_document_type, ocr_detected_date, interface_mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Recorded', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (receipt_ref, receipt_type, payment_method, payment_date.isoformat(), vendors[vendor_label], user()["full_name"], vendor_label if vendor_label != "No vendor selected" else "", amount, tax, currency, purpose, dept,
+                 linked_payment_id, linked_po_id, method_data.get("cash_received_by"), method_data.get("cash_collected_from"), method_data.get("cash_denominations"), method_data.get("bank_name"), method_data.get("account_number"), method_data.get("transfer_reference"), method_data.get("sender_bank"), method_data.get("receiver_bank"), method_data.get("card_type"), method_data.get("masked_card_number"), method_data.get("card_auth_code"), method_data.get("pos_terminal_id"), method_data.get("pos_merchant_id"), method_data.get("pos_rrn"), method_data.get("cheque_number"), method_data.get("cheque_bank"), method_data.get("cheque_due_date"), method_data.get("mobile_wallet_provider"), method_data.get("mobile_transaction_id"), path, fhash, parsed.get("raw_text", "") if parsed else "", json_dump(parsed) if parsed else "{}", 0 if dup.empty else 1, notes, user()["id"], now_iso(), now_iso(), fields.get("document_type"), fields.get("date"), payment_method))
+            _save_ocr_attempt("Receipt", rid, parsed or {})
+            exp_no = make_ref("EXP")
+            run_insert("""INSERT INTO expenses (expense_no, expense_date, category, description, vendor_id, amount, payment_method, project_department, status, receipt_path, receipt_hash, receipt_no, tax_amount, duplicate_warning, requested_by, ocr_text, ocr_json, document_kind, receipt_id, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Approved', ?, ?, ?, ?, ?, ?, ?, ?, 'Receipt', ?, ?, ?)""", (exp_no, payment_date.isoformat(), fields.get("category") or "Other", purpose or receipt_type, vendors[vendor_label], amount, payment_method, dept, path, fhash, receipt_ref, tax, 0 if dup.empty else 1, user()["id"], parsed.get("raw_text", "") if parsed else "", json_dump(parsed) if parsed else "{}", rid, notes, now_iso()))
+            add_workflow_event("Receipt", rid, "Receipt Recorded", "Recorded", f"{payment_method} receipt", user()["id"])
+            log_audit("RECEIPT_RECORDED", "Receipt", rid, {"payment_method": payment_method, "amount": amount, "payment_date": payment_date.isoformat()}, user()["id"], user()["role"])
+            if linked_payment_id:
+                run_query(
+                    "UPDATE payments SET receipt_id=?, proof_path=COALESCE(?, proof_path), updated_at=? WHERE id=?",
+                    (rid, path, now_iso(), linked_payment_id),
+                )
+                add_workflow_event(
+                    "Payment",
+                    linked_payment_id,
+                    "Receipt Attached",
+                    "Paid",
+                    f"Receipt {receipt_ref} was recorded separately by Finance.",
+                    user()["id"],
+                )
+                if linked_request_id:
+                    run_query(
+                        "UPDATE purchase_requests SET receipt_uploaded_at=COALESCE(receipt_uploaded_at, ?), updated_at=? WHERE id=?",
+                        (now_iso(), now_iso(), linked_request_id),
+                    )
+                log_audit(
+                    "PAYMENT_RECEIPT_LINKED",
+                    "Payment",
+                    linked_payment_id,
+                    {"receipt_no": receipt_ref, "receipt_id": rid},
+                    user()["id"],
+                    user()["role"],
+                    after_values={"receipt_id": rid, "receipt_status": "Recorded"},
+                )
+            linked_message = f" and linked to payment {linked_payment['payment_no']}" if linked_payment is not None else ""
+            st.success(f"Receipt saved: {receipt_ref}{linked_message}.")
+            if not dup.empty: st.warning("Possible duplicate receipt detected.")
+            st.rerun()
+    elif section == "Receipt Register":
+        df = df_query("""
+            SELECT rr.id, rr.receipt_no, rr.receipt_type, rr.payment_method, rr.payment_date, v.name vendor, rr.amount, rr.status, rr.department_project, rr.duplicate_warning, rr.created_at
+            FROM receipt_records rr LEFT JOIN vendors v ON rr.vendor_id=v.id ORDER BY rr.created_at DESC
+        """)
+        if df.empty:
+            empty_state("No receipts", "Record cash, transfer, card/POS, cheque or mobile-money receipts here."); return
+        show = df.drop(columns=["id"]).copy(); show["amount"] = show["amount"].apply(money); dataframe(show)
+        selected = st.selectbox("Select receipt", [f"{r.receipt_no} — {r.payment_method} — #{int(r.id)}" for r in df.itertuples()], key="receipt_select_phase4")
+        rid = int(selected.rsplit("#", 1)[1])
+        detail = df_query("SELECT * FROM receipt_records WHERE id=?", (rid,))
+        dataframe(_redact_ui_df(detail, "receipt_records")) if not detail.empty else None
+        csv_download(show, "receipts")
+    else:
+        attempts = df_query("SELECT * FROM document_ocr_attempts WHERE document_type='Receipt' ORDER BY created_at DESC LIMIT 300")
+        dataframe(_redact_ui_df(attempts, "document_ocr_attempts")) if not attempts.empty else st.info("No receipt OCR attempts yet.")
+
+
+def invoices_page():
+    _ensure_finance_doc_schema_ui()
+    st.subheader("Invoices")
+    st.caption("Invoices are payment requests before payment. The invoice type selector changes the fields and review hints immediately.")
+    section = st.radio("Invoice sections", ["Upload / Record Invoice", "Invoice Register", "Invoice Items", "OCR Attempts"], horizontal=True, key="invoice_sections_phase4")
+    vendors = vendor_options(True)
+    if section == "Upload / Record Invoice":
+        uploaded, parsed = _ocr_upload_panel("invoice_ocr_upload_phase4", "invoice")
+        fields = parsed.get("fields", {}) if parsed else {}
+        vendor_name = fields.get("matched_vendor_name") or "No vendor selected"
+        vendor_index = list(vendors.keys()).index(vendor_name) if vendor_name in vendors else 0
+        invoice_type = selectbox_with_other("Invoice type", INVOICE_TYPES + ["Other"], "invoice_type_phase4", "invoice_type")
+        po_df = df_query("SELECT po.id, po.po_no, v.name vendor, po.total_amount FROM purchase_orders po LEFT JOIN vendors v ON po.vendor_id=v.id ORDER BY po.created_at DESC")
+        po_options = ["No PO selected"] + [f"{r.po_no} — {r.vendor} — {money(r.total_amount)}" for r in po_df.itertuples()]
+        default_invoice_date = _parse_date_value(fields.get("date"), date.today())
+        default_due_date = _parse_date_value(fields.get("due_date"), default_invoice_date + timedelta(days=7))
+        with st.form("invoice_record_form_phase4"):
+            c1, c2, c3 = st.columns(3)
+            invoice_no = c1.text_input("Invoice number", value=fields.get("invoice_no") or "", key="invoice_number_phase4")
+            invoice_date = c2.date_input("Invoice date", default_invoice_date, key="invoice_date_phase4")
+            due_date = c3.date_input("Due date", default_due_date, key="invoice_due_date_phase4")
+            c4, c5 = st.columns(2)
+            vendor_label = c4.selectbox("Vendor", list(vendors.keys()), index=vendor_index, key="invoice_vendor_phase4")
+            po_label = c5.selectbox("Match Purchase Order", po_options, key="invoice_po_match_phase4")
+            if invoice_type == "Tax Invoice":
+                ctax1, ctax2 = st.columns(2)
+                tax_id = ctax1.text_input("Supplier VAT/TIN", key="tax_invoice_tin_phase4")
+                tax_note = ctax2.text_input("Tax breakdown note", key="tax_invoice_note_phase4")
+            elif invoice_type == "Service Invoice":
+                cserv1, cserv2 = st.columns(2)
+                service_period = cserv1.text_input("Service period", placeholder="e.g. May 2026", key="service_period_phase4")
+                service_owner = cserv2.text_input("Service owner/department", key="service_owner_phase4")
+            elif invoice_type == "Recurring Invoice":
+                rec_freq = selectbox_with_other("Recurring frequency", ["Monthly", "Quarterly", "Annually", "Milestone", "Other"], "recurring_freq_phase4", "recurring_frequency")
+            elif invoice_type in ["Credit Note", "Debit Note"]:
+                adjustment_reason = st.text_area("Adjustment reason", key="invoice_adjustment_reason_phase4")
+            c7, c8, c9, c10 = st.columns(4)
+            subtotal = c7.number_input("Subtotal", min_value=0.0, value=float(fields.get("subtotal") or 0), step=1000.0, key="invoice_subtotal_phase4")
+            tax = c8.number_input("VAT/Tax", min_value=0.0, value=float(fields.get("tax_amount") or 0), step=100.0, key="invoice_tax_phase4")
+            discount = c9.number_input("Discount", min_value=0.0, value=0.0, step=100.0, key="invoice_discount_phase4")
+            total = c10.number_input("Total / Amount Due", min_value=0.0, value=float(fields.get("total_amount") or 0), step=1000.0, key="invoice_total_phase4")
+            terms = selectbox_with_other("Payment terms", ["Due on Receipt", "Net 7", "Net 15", "Net 30", "Milestone", "Advance Payment", "Other"], "invoice_terms_phase4", "payment_terms")
+            desc = st.text_area("Invoice description / scope", value=fields.get("description") or "", key="invoice_desc_phase4")
+            submitted = st.form_submit_button("Save Invoice for Review", type="primary")
+        if submitted:
+            if not invoice_no.strip(): st.error("Invoice number is required."); return
+            if total <= 0: st.error("Invoice total must be greater than zero."); return
+            _save_custom_value("invoice_type", invoice_type); _save_custom_value("payment_terms", terms)
+            path, fhash = save_upload(uploaded, "invoices") if uploaded else (None, None)
+            po_id = None
+            if po_label != "No PO selected":
+                po_id = int(po_df[po_df["po_no"] == po_label.split(" — ")[0]].iloc[0]["id"])
+            vendor_id = vendors[vendor_label]
+            match_status, mismatch = match_invoice_to_po(po_id, vendor_id, total)
+            inv_id = run_insert("""
+                INSERT INTO invoices (invoice_no, receipt_no, po_id, vendor_id, invoice_date, amount, tax_amount, total_amount, file_path, file_hash, ocr_text, ocr_json, match_status, mismatch_reasons, status, uploaded_by, created_at,
+                    invoice_type, document_stage, supplier_invoice_no, due_date, payment_terms, subtotal, discount_amount, balance_due, approval_status, detected_document_type, ocr_detected_date, interface_mode)
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Uploaded', ?, ?, ?, 'Invoice', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (invoice_no.strip(), po_id, vendor_id, invoice_date.isoformat(), max(total - tax, 0), tax, total, path, fhash, parsed.get("raw_text", "") if parsed else "", json_dump(parsed) if parsed else "{}", match_status, "; ".join(mismatch), user()["id"], now_iso(), invoice_type, invoice_no.strip(), due_date.isoformat(), terms, subtotal or max(total - tax, 0), discount, total, match_status, fields.get("document_type"), fields.get("date"), invoice_type))
+            for item in (parsed.get("line_items", []) if parsed else []):
+                run_query("INSERT INTO invoice_items (invoice_id, item_description, quantity, unit_price, tax_amount, total, category, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?)", (inv_id, item.get("item_name"), item.get("quantity") or 1, item.get("unit_price") or 0, item.get("total") or 0, fields.get("category") or "Other", now_iso()))
+            _save_ocr_attempt("Invoice", inv_id, parsed or {})
+            add_workflow_event("Invoice", inv_id, "Invoice Uploaded", "Uploaded", match_status, user()["id"])
+            create_notification(None, "Finance", "Invoice needs review", f"Invoice {invoice_no} match status: {match_status}", "Invoice", inv_id, "High", ["in_app", "browser_push"], action_label="Open Invoices")
+            log_audit("INVOICE_RECORDED", "Invoice", inv_id, {"invoice_no": invoice_no, "total": total, "invoice_date": invoice_date.isoformat(), "match_status": match_status}, user()["id"], user()["role"])
+            _rerun_success(f"Invoice {invoice_no} saved for Finance review.")
+    elif section == "Invoice Register":
+        df = df_query("""
+            SELECT inv.id, inv.invoice_no, inv.invoice_type, po.po_no, v.name vendor, inv.invoice_date, inv.due_date, inv.total_amount, inv.balance_due, inv.match_status, inv.mismatch_reasons, inv.status
+            FROM invoices inv LEFT JOIN purchase_orders po ON inv.po_id=po.id LEFT JOIN vendors v ON inv.vendor_id=v.id ORDER BY inv.created_at DESC
+        """)
+        if df.empty:
+            empty_state("No invoices", "Upload supplier invoices here. Receipts are recorded separately."); return
+        show = df.drop(columns=["id"]).copy(); show["total_amount"] = show["total_amount"].apply(money); show["balance_due"] = show["balance_due"].apply(money); dataframe(show)
+        selected = st.selectbox("Select invoice", [f"{r.invoice_no} — {r.status} — #{int(r.id)}" for r in df.itertuples()], key="invoice_select_phase4")
+        inv_id = int(selected.rsplit("#", 1)[1])
+        inv = df_query("SELECT * FROM invoices WHERE id=?", (inv_id,)).iloc[0]
+        dataframe(_redact_ui_df(pd.DataFrame([inv.to_dict()]), "invoices"))
+        with st.expander("OCR / mismatch details", expanded=False):
+            try: st.json(json.loads(inv.get("ocr_json") or "{}"))
+            except Exception: st.text(inv.get("ocr_text") or "")
+            st.write(inv.get("mismatch_reasons") or "")
+        if has_permission("review_invoice"):
+            c1, c2, c3 = st.columns(3)
+            if c1.button("Mark Finance Review Complete", key=f"invoice_reviewed_phase4_{inv_id}"):
+                run_query("UPDATE invoices SET status='Finance Review', approval_status='Reviewed' WHERE id=?", (inv_id,)); add_workflow_event("Invoice", inv_id, "Finance Review", "Finance Review", "Invoice reviewed", user()["id"]); st.rerun()
+            if c2.button("Create Payment Request", key=f"invoice_payment_phase4_{inv_id}"):
+                pno = make_ref("PAY"); pay_id = run_insert("INSERT INTO payments (payment_no, invoice_id, po_id, vendor_id, amount, payment_method, status, created_by, created_at, updated_at) SELECT ?, id, po_id, vendor_id, total_amount, 'Bank Transfer', 'Pending Approval', ?, ?, ? FROM invoices WHERE id=?", (pno, user()["id"], now_iso(), now_iso(), inv_id)); create_notification(None, "Approver", "Payment pending approval", f"{pno} requires approval", "Payment", pay_id, "High", ["in_app", "browser_push"]); add_workflow_event("Payment", pay_id, "Created from Invoice", "Pending Approval", pno, user()["id"]); st.success(f"Payment request {pno} created.")
+            if c3.button("Return Invoice", key=f"invoice_return_phase4_{inv_id}"):
+                run_query("UPDATE invoices SET status='Returned', approval_status='Returned' WHERE id=?", (inv_id,)); add_workflow_event("Invoice", inv_id, "Returned", "Returned", "Invoice returned for clarification", user()["id"]); st.rerun()
+        csv_download(show, "invoices")
+    elif section == "Invoice Items":
+        items = df_query("SELECT ii.*, inv.invoice_no FROM invoice_items ii LEFT JOIN invoices inv ON inv.id=ii.invoice_id ORDER BY ii.created_at DESC LIMIT 1000")
+        dataframe(items) if not items.empty else st.info("No invoice item lines captured yet.")
+    else:
+        attempts = df_query("SELECT * FROM document_ocr_attempts WHERE document_type='Invoice' ORDER BY created_at DESC LIMIT 300")
+        dataframe(_redact_ui_df(attempts, "document_ocr_attempts")) if not attempts.empty else st.info("No invoice OCR attempts yet.")
+
+# ============================================================================
+# Command-chain hardening overrides
+# These final definitions intentionally override earlier MVP/phase functions.
+# ============================================================================
+from io import BytesIO
+import csv
+from core.permissions import (
+    display_role, can_approve, can_pay, can_create_payment_request,
+    can_delete_draft, can_edit_own_draft, is_read_only,
+)
+from core.report_service import build_excel_workbook, excel_mime
+from core.workflow import normalize_status, next_role_for_status, gateway_next_role_for_status
+from core.ui import interactive_chart, format_kpi_value
+
+# Business-approved statuses. Legacy values remain accepted by queries and migrations.
+PR_STATUSES = [
+    "Draft", "FM Draft", "Sent for Procurement Review", "Submitted to Procurement Manager",
+    "Returned for Correction", "Returned to Facility Manager", "Reviewed by Procurement",
+    "Procurement Review", "Requires Sourcing", "Vendor Quote Collection", "Vendor Recommendation",
+    "Submitted for Approval", "Pending Approver/MD Approval", "Approved", "Rejected",
+    "Awaiting Payment", "Approved for Payment", "Paid", "Receipt Uploaded",
+    "Payment Submitted for Verification", "Completed", "Closed", "Archived",
+]
+GATEWAY_DEPARTMENTS = ["CMOTD", "RACAM"]
+
+
+def _request_workflow_steps_for_status(status: str) -> list[str]:
+    """Keep the status rail focused on the user's actionable chain.
+
+    Facility/Utility users should not see confusing post-payment steps they
+    cannot action. Procurement Manager/Admin/Auditor can see the final
+    Paid -> Completed -> Closed -> Archived chain.
+    """
+    base = ["Draft", "Sent for Procurement Review", "Reviewed by Procurement", "Submitted for Approval", "Approved", "Awaiting Payment", "Paid"]
+    closure = ["Completed", "Closed", "Archived"]
+    role = _current_role() if "user" in globals() and "user" in st.session_state else ""
+    if role in ["Procurement Manager", "Admin", "Auditor"] or status in ["Completed", "Closed", "Archived"]:
+        return base + closure
+    return base
+
+
+def _current_role() -> str:
+    return str(user().get("role", ""))
+
+
+def _is_utility() -> bool:
+    return _current_role() == "Facility Manager"
+
+
+def _next_role_for_status(status: str) -> str | None:
+    """Compatibility wrapper around the centralized request workflow map.
+
+    Older UI sections call this helper, but routing now lives in
+    core.workflow so all roles share one command-chain source of truth.
+    """
+    return next_role_for_status(status)
+
+
+def _set_next_role(entity_table: str, entity_id: int, status: str):
+    """Set next_role using the centralized workflow map for the entity type."""
+    next_role = gateway_next_role_for_status(status) if entity_table == "gateway_passes" else next_role_for_status(status)
+    try:
+        if next_role and "next_role" in __import__("core.db", fromlist=["table_columns"]).table_columns(entity_table):
+            run_query(f"UPDATE {entity_table} SET next_role=? WHERE id=?", (next_role, entity_id))
+        elif "next_role" in __import__("core.db", fromlist=["table_columns"]).table_columns(entity_table):
+            run_query(f"UPDATE {entity_table} SET next_role=NULL WHERE id=?", (entity_id,))
+    except Exception:
+        pass
+
+
+def _normalise_report_name(name: str) -> str:
+    return str(name or "report").replace(" ", "_").replace("/", "_").replace("\\", "_").lower()
+
+
+def _csv_bytes_from_sheets(sheets: dict[str, pd.DataFrame]) -> bytes:
+    frames = []
+    for sheet_name, df in (sheets or {}).items():
+        data = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(df)
+        if data.empty:
+            data = pd.DataFrame([{"message": "No records"}])
+        data.insert(0, "sheet", str(sheet_name))
+        frames.append(data)
+    combined = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame([{"message": "No records"}])
+    return combined.to_csv(index=False).encode("utf-8-sig")
+
+
+def _pdf_bytes_from_sheets(sheets: dict[str, pd.DataFrame], title: str) -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    out = BytesIO()
+    doc = SimpleDocTemplate(out, pagesize=landscape(A4), rightMargin=10*mm, leftMargin=10*mm, topMargin=10*mm, bottomMargin=10*mm)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("pf_pdf_title", parent=styles["Title"], fontSize=14, leading=16, spaceAfter=8)
+    heading_style = ParagraphStyle("pf_pdf_heading", parent=styles["Heading2"], fontSize=11, leading=13, spaceBefore=8, spaceAfter=5)
+    small = ParagraphStyle("pf_pdf_small", parent=styles["Normal"], fontSize=6.8, leading=8)
+    story = [Paragraph(str(title).replace("_", " ").title(), title_style)]
+    items = list((sheets or {}).items()) or [("Detailed Records", pd.DataFrame())]
+    for sheet_idx, (sheet_name, df) in enumerate(items):
+        if sheet_idx:
+            story.append(PageBreak())
+        data = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(df)
+        story.append(Paragraph(str(sheet_name), heading_style))
+        if data.empty:
+            story.append(Paragraph("No records available.", small))
+            continue
+        source_rows, source_cols = len(data), len(data.columns)
+        data = data.fillna("").astype(str).iloc[:60, :8]
+        table_data = [[Paragraph(str(c), small) for c in data.columns]]
+        for row in data.itertuples(index=False):
+            table_data.append([Paragraph(str(v), small) for v in row])
+        width = 277 * mm
+        col_count = max(1, len(table_data[0]))
+        tbl = Table(table_data, colWidths=[width / col_count] * col_count, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ("GRID", (0,0), (-1,-1), .25, colors.lightgrey),
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#e2e8f0")),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("PADDING", (0,0), (-1,-1), 3),
+        ]))
+        story.append(tbl)
+        if source_rows > 60 or source_cols > 8:
+            story.append(Spacer(1, 5))
+            story.append(Paragraph("PDF preview is limited for readability. Use Excel or CSV for full details.", small))
+    doc.build(story)
+    return out.getvalue()
+
+
+def report_download_buttons(sheets: dict[str, pd.DataFrame], name: str, key: str):
+    """Render Excel, PDF and CSV downloads for every role/report surface.
+
+    The payload is generated only for the selected format, so opening tabs stays
+    fast even when the report tables are large.
+    """
+    if not sheets:
+        return
+    clean_name = _normalise_report_name(name)
+    safe_sheets: dict[str, pd.DataFrame] = {}
+    for sheet_name, df in sheets.items():
+        data = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(df)
+        safe_sheets[str(sheet_name)] = _redact_ui_df(data, clean_name) if "_redact_ui_df" in globals() else data
+    format_choice = st.selectbox(
+        f"Download format for {name.replace('_', ' ').title()}",
+        ["Excel (.xlsx)", "PDF (.pdf)", "CSV (.csv)"],
+        key=f"{key}_format",
+        label_visibility="collapsed",
+    )
+    if format_choice.startswith("Excel"):
+        payload = build_excel_workbook(safe_sheets, clean_name)
+        mime = excel_mime(); ext = "xlsx"; action = "EXCEL_REPORT_DOWNLOADED"
+    elif format_choice.startswith("PDF"):
+        payload = _pdf_bytes_from_sheets(safe_sheets, clean_name)
+        mime = "application/pdf"; ext = "pdf"; action = "PDF_REPORT_DOWNLOADED"
+    else:
+        payload = _csv_bytes_from_sheets(safe_sheets)
+        mime = "text/csv"; ext = "csv"; action = "CSV_REPORT_DOWNLOADED"
+    if st.download_button(f"Download {name.replace('_', ' ').title()} {ext.upper()}", payload, f"{clean_name}.{ext}", mime, key=f"{key}_{ext}"):
+        log_audit(action, "Report", clean_name, f"Downloaded {clean_name}.{ext}", user().get("id"), user().get("role"))
+
+
+def csv_download(df: pd.DataFrame, name: str):
+    """Backwards-compatible helper now offering Excel, PDF and CSV."""
+    if df is None or df.empty:
+        return
+    safe_key = f"download_{_normalise_report_name(name)}_{abs(hash(tuple(df.columns))) % 10_000_000}"
+    report_download_buttons({"Detailed Records": df}, name, safe_key)
+
+
+def _excel_download_button(label: str, filename: str, sheets: dict[str, pd.DataFrame], key: str):
+    """Backwards-compatible helper now offering Excel, PDF and CSV."""
+    base = filename.rsplit(".", 1)[0] if "." in filename else filename
+    title = label.replace("Download ", "").replace(" Excel", "").replace(" Workbook", "") or base
+    report_download_buttons(sheets, title, key)
+    return False
+
+
+def _status_values_for_queue(kind: str) -> tuple[str, ...]:
+    return {
+        "procurement": ("Sent for Procurement Review", "Submitted to Procurement Manager", "Submitted"),
+        "approval": ("Submitted for Approval", "Pending Approver/MD Approval", "Pending Approval"),
+        "finance": ("Approved", "Awaiting Payment", "Approved for Payment"),
+        "receipt": ("Paid",),
+        "completed": ("Paid", "Receipt Uploaded", "Payment Submitted for Verification", "Completed", "Closed"),
+    }.get(kind, tuple())
+
+
+def update_request_status(pr_id: int, status: str, event: str, note: str):
+    rows = df_query("SELECT * FROM purchase_requests WHERE id=?", (pr_id,))
+    if rows.empty:
+        st.error("Request not found.")
+        return
+    old = rows.iloc[0]
+    role = _current_role()
+    # Guard final approval/rejection centrally.
+    if status in ["Approved", "Rejected"] and not can_approve(role):
+        st.error("Only Admin and Approver / MD can approve or reject requests.")
+        return
+    # Finance cannot move records backward into approval or create payment requests.
+    if role == "Finance" and status in ["Submitted for Approval", "Pending Approval", "Pending Approver/MD Approval", "Approved", "Rejected"]:
+        st.error("Finance cannot approve, reject, or submit items for approval.")
+        return
+    next_role = _next_role_for_status(status)
+    if status in ["Submitted for Approval", "Pending Approval", "Pending Approver/MD Approval"]:
+        # Keep old wrappers aligned with the centralized monetary approval rule.
+        next_role = required_approval_role_for_amount(old.get("estimated_amount"))
+    payment_status = None
+    if status in ["Approved", "Awaiting Payment", "Approved for Payment"]:
+        payment_status = "Approved for Payment"
+    elif status in ["Paid", "Completed", "Receipt Uploaded"]:
+        payment_status = "Paid"
+    transition_request_status(pr_id, status, event, note, user()["id"], role, payment_status=payment_status)
+    try:
+        extras = []
+        params: list[Any] = []
+        if next_role is not None:
+            extras.append("next_role=?"); params.append(next_role)
+        elif status in ["Rejected", "Archived"]:
+            extras.append("next_role=NULL")
+        if status in ["Sent for Procurement Review", "Submitted to Procurement Manager"]:
+            extras.append("submitted_at=COALESCE(submitted_at, ?)"); params.append(now_iso())
+        if status == "Approved":
+            extras.extend(["approved_at=?", "approved_by_user_id=?", "approved_by_role=?"]); params.extend([now_iso(), user()["id"], role])
+        if status in ["Paid", "Completed"]:
+            extras.append("paid_at=COALESCE(paid_at, ?)"); params.append(now_iso())
+        if status == "Completed":
+            extras.append("completed_at=COALESCE(completed_at, ?)"); params.append(now_iso())
+        if extras:
+            params.append(pr_id)
+            run_query(f"UPDATE purchase_requests SET {', '.join(extras)} WHERE id=?", params)
+    except Exception:
+        pass
+    _rerun_success(f"{event} completed.")
+
+
+def approval_action(entity: str, entity_id: int, old_status: str, new_status: str, action: str, reason: str = ""):
+    role = _current_role()
+    if not can_approve(role):
+        st.error("Only Admin and Approver / MD can approve or reject workflow items.")
+        return
+    if entity == "Purchase Request":
+        payment_status = "Approved for Payment" if new_status == "Approved" else None
+        transition_request_status(
+            entity_id, new_status, action, reason or f"{action} by {display_role(role)}",
+            user()["id"], role, "Normal Approval Mode", payment_status=payment_status,
+        )
+        try:
+            updates = ["next_role=?", "approved_at=?", "approved_by_user_id=?", "approved_by_role=?"] if new_status == "Approved" else ["next_role=NULL"]
+            params: list[Any] = ["finance", now_iso(), user()["id"], role] if new_status == "Approved" else []
+            params.append(entity_id)
+            run_query(f"UPDATE purchase_requests SET {', '.join(updates)} WHERE id=?", params)
+        except Exception:
+            pass
+        if new_status == "Approved":
+            create_notification(None, "Finance", "Approved item ready for Finance", "A request has been approved and is ready for payment.", entity, entity_id, "Important", ["in_app", "browser_push"], action_label="Open Approved for Payment")
+        _rerun_success(f"{entity} {action.lower()}.")
+        return
+    table = "purchase_orders" if entity == "Purchase Order" else "payments"
+    run_query(f"UPDATE {table} SET status=?, updated_at=? WHERE id=?", (new_status, now_iso(), entity_id))
+    _set_next_role(table, entity_id, new_status)
+    run_query(
+        """
+        INSERT INTO approval_history (entity_type, entity_id, action, status_before, status_after, reason, user_id, approved_by_user_id, approved_by_role, approval_mode, note, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Normal Approval Mode', ?, ?)
+        """,
+        (entity, entity_id, action, old_status, new_status, reason, user()["id"], user()["id"], role, reason, now_iso()),
+    )
+    add_workflow_event(entity, entity_id, action, new_status, reason, user()["id"])
+    log_audit(action, entity, entity_id, reason, user()["id"], role, {"status": old_status}, {"status": new_status})
+    _rerun_success(f"{entity} {action.lower()}.")
+
+
+def _line_row_ids(state_key: str) -> list[int]:
+    if state_key not in st.session_state:
+        st.session_state[state_key] = [1]
+    return list(st.session_state[state_key])
+
+
+def _add_line_row(state_key: str):
+    rows = _line_row_ids(state_key)
+    next_id = (max(rows) if rows else 0) + 1
+    rows.append(next_id)
+    st.session_state[state_key] = rows
+
+
+def _remove_last_line_row(state_key: str, prefix: str) -> bool:
+    """Remove the last dynamic line row while keeping all remaining row keys stable."""
+    rows = _line_row_ids(state_key)
+    if len(rows) <= 1:
+        return False
+    removed = rows.pop()
+    st.session_state[state_key] = rows
+    # Clear only the widgets that belonged to the removed row. Existing rows keep values.
+    for key in list(st.session_state.keys()):
+        k = str(key)
+        if k.startswith(f"{prefix}_") and k.endswith(f"_{removed}"):
+            del st.session_state[key]
+    return True
+
+
+def _clear_line_state(state_key: str, prefix: str):
+    for k in list(st.session_state.keys()):
+        if k == state_key or str(k).startswith(prefix):
+            del st.session_state[k]
+
+
+def _request_line_items(state_key: str, prefix: str, default_category: str) -> tuple[list[tuple[str, float, float, float, str]], float]:
+    rows = _line_row_ids(state_key)
+    add_col, remove_col, _ = st.columns([1.15, 1.15, 5])
+    if add_col.button("＋ Add line item", key=f"{prefix}_add_line_button"):
+        _add_line_row(state_key)
+        st.rerun()
+    if remove_col.button("− Remove line item", key=f"{prefix}_remove_line_button", disabled=len(rows) <= 1):
+        _remove_last_line_row(state_key, prefix)
+        st.rerun()
+    rows = _line_row_ids(state_key)
+    items, estimated = [], 0.0
+    st.markdown("##### Line items")
+    for idx, row_id in enumerate(rows, 1):
+        st.caption(f"Item {idx}")
+        c1, c2, c3, c4 = st.columns([1.4, .55, .8, .9])
+        item = c1.text_input("Item", key=f"{prefix}_item_{row_id}")
+        qty = c2.number_input("Qty", min_value=0.0, value=1.0, step=1.0, key=f"{prefix}_qty_{row_id}")
+        unit = c3.number_input("Unit price", min_value=0.0, step=1000.0, key=f"{prefix}_unit_{row_id}")
+        try:
+            default_index = EXPENSE_CATEGORIES.index(default_category) if default_category in EXPENSE_CATEGORIES else 0
+        except Exception:
+            default_index = 0
+        icat = selectbox_with_other("Item category", EXPENSE_CATEGORIES, f"{prefix}_cat_{row_id}", "category", index=default_index)
+        total = float(qty or 0) * float(unit or 0)
+        estimated += total
+        items.append((item, float(qty or 0), float(unit or 0), total, icat))
+    return items, estimated
+
+
+def _suggested_vendor_detail_inputs(prefix: str, default_category: str) -> list[dict[str, Any]]:
+    """Capture optional vendor details while a draft is being created.
+
+    Facility/Utility users and Procurement Managers can now add supplier names
+    and contact details at the point of drafting instead of leaving sourcing
+    users to recreate the vendor records later.
+    """
+    vendor_details: list[dict[str, Any]] = []
+    with st.expander("Suggested vendor details (optional)", expanded=False):
+        st.caption("Add known or suggested vendors now. These vendors are saved into the vendor register and become selectable later in Sourcing → Add Vendor Quote.")
+        count = st.number_input("Number of suggested vendors to capture", min_value=0, max_value=5, value=0, step=1, key=f"{prefix}_vendor_count")
+        for idx in range(int(count or 0)):
+            st.markdown(f"###### Suggested vendor {idx + 1}")
+            c1, c2, c3 = st.columns([1.4, 1, 1])
+            name = c1.text_input("Vendor name", key=f"{prefix}_vendor_name_{idx}")
+            phone = c2.text_input("Phone", key=f"{prefix}_vendor_phone_{idx}")
+            email = c3.text_input("Email", key=f"{prefix}_vendor_email_{idx}")
+            c4, c5 = st.columns([1.6, .8])
+            address = c4.text_area("Address / location", key=f"{prefix}_vendor_address_{idx}")
+            rating = c5.slider("Initial rating", 1, 5, 3, key=f"{prefix}_vendor_rating_{idx}")
+            notes = st.text_area("Vendor note / what they can supply", key=f"{prefix}_vendor_notes_{idx}")
+            if name.strip():
+                vendor_details.append({
+                    "name": name.strip(),
+                    "phone": phone.strip(),
+                    "email": email.strip(),
+                    "address": address.strip(),
+                    "rating": int(rating),
+                    "notes": notes.strip(),
+                    "category": default_category,
+                })
+    return vendor_details
+
+
+def _save_suggested_vendors_for_request(request_id: int, vendor_details: list[dict[str, Any]], category: str, source_label: str) -> list[str]:
+    """Create/update vendor-register entries and attach a plain-text summary to the request."""
+    if not vendor_details:
+        return []
+    names: list[str] = []
+    lines: list[str] = []
+    for vendor in vendor_details:
+        name = str(vendor.get("name") or "").strip()
+        if not name:
+            continue
+        phone = str(vendor.get("phone") or "").strip()
+        email = str(vendor.get("email") or "").strip()
+        address = str(vendor.get("address") or "").strip()
+        vendor_category = str(vendor.get("category") or category or "Other").strip()
+        notes = str(vendor.get("notes") or "").strip()
+        rating = int(vendor.get("rating") or 3)
+        run_query(
+            """
+            INSERT OR IGNORE INTO vendors (name, category, phone, email, address, rating, status, documents_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'Active', '[]', ?, ?)
+            """,
+            (name, vendor_category, phone, email, address, rating, now_iso(), now_iso()),
+        )
+        run_query(
+            """
+            UPDATE vendors
+            SET category=COALESCE(NULLIF(?, ''), category),
+                phone=COALESCE(NULLIF(?, ''), phone),
+                email=COALESCE(NULLIF(?, ''), email),
+                address=COALESCE(NULLIF(?, ''), address),
+                rating=?, updated_at=?
+            WHERE name=?
+            """,
+            (vendor_category, phone, email, address, rating, now_iso(), name),
+        )
+        names.append(name)
+        detail_bits = [name]
+        if phone:
+            detail_bits.append(f"phone: {phone}")
+        if email:
+            detail_bits.append(f"email: {email}")
+        if address:
+            detail_bits.append(f"address: {address}")
+        if notes:
+            detail_bits.append(f"note: {notes}")
+        lines.append("- " + "; ".join(detail_bits))
+    if names:
+        row = df_query("SELECT notes, status FROM purchase_requests WHERE id=?", (request_id,))
+        old_notes = str(row.iloc[0]["notes"] or "") if not row.empty else ""
+        status = str(row.iloc[0]["status"] or "Draft") if not row.empty else "Draft"
+        block = f"{source_label} suggested vendor details:\n" + "\n".join(lines)
+        combined = f"{old_notes}\n\n{block}".strip() if old_notes.strip() else block
+        run_query("UPDATE purchase_requests SET notes=?, vendor_preference=COALESCE(NULLIF(vendor_preference, ''), ?), updated_at=? WHERE id=?", (combined, ", ".join(names), now_iso(), request_id))
+        add_workflow_event("Purchase Request", request_id, "Suggested Vendors Captured", status, ", ".join(names), user()["id"])
+        log_audit("SUGGESTED_VENDORS_CAPTURED", "Purchase Request", request_id, {"vendors": names}, user()["id"], user()["role"])
+    return names
+
+
+def create_request_form():
+    if not has_permission("create_request") or is_read_only(_current_role()):
+        st.info("Your role can view requests but cannot create requests.")
+        return
+    st.caption("Create a draft request. Procurement can route it to Approver/Admin after review.")
+    c1, c2, c3 = st.columns(3)
+    dept = selectbox_with_other("Department / Project", department_options() + ["Other"], "req_dept_cmd", "department_project")
+    req_date = c2.date_input("Request date", date.today(), key="req_date_cmd")
+    req_required = c3.date_input("Required date", date.today() + timedelta(days=7), key="req_required_cmd")
+    c4, c5, c6 = st.columns(3)
+    cat = selectbox_with_other("Category", EXPENSE_CATEGORIES, "req_cat_cmd", "category")
+    priority = c5.selectbox("Priority", PRIORITIES, index=1, key="req_priority_cmd")
+    vendor_pref = c6.text_input("Vendor preference", key="req_vendor_pref_cmd")
+    justification = st.text_area("Business justification", key="req_justification_cmd")
+    attachment = st.file_uploader("Supporting document", type=["docx", "pdf", "jpg", "jpeg", "png", "xlsx"], key="req_attachment_cmd")
+    vendor_details = _suggested_vendor_detail_inputs("req_cmd", cat)
+    items, estimated = _request_line_items("req_line_rows_cmd", "req_cmd", cat)
+    st.metric("Estimated request value", format_kpi_value(money(estimated)))
+    if st.button("Create Draft Request", type="primary", key="create_draft_request_cmd"):
+        if not justification.strip() or not any(i[0].strip() for i in items):
+            st.error("Business justification and at least one item are required.")
+            return
+        _save_custom_value("department_project", dept); _save_custom_value("category", cat)
+        vendor_names = [str(v.get("name") or "").strip() for v in vendor_details if str(v.get("name") or "").strip()]
+        vendor_pref_full = ", ".join(dict.fromkeys([v for v in [vendor_pref.strip(), *vendor_names] if v]))
+        path, _ = save_upload(attachment, "requests")
+        req_no = make_ref("PR")
+        req_id = run_insert(
+            """
+            INSERT INTO purchase_requests (request_no, requested_by, department_project, request_date, required_date, category, justification, priority, estimated_amount, vendor_preference, status, source_type, attachments_json, notes, approval_history_json, next_role, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Draft', 'Manual', ?, '', '[]', NULL, ?, ?)
+            """,
+            (req_no, user()["id"], dept, req_date.isoformat(), req_required.isoformat(), cat, justification, priority, estimated, vendor_pref_full, json_dump([path] if path else []), now_iso(), now_iso()),
+        )
+        for item, qty, unit, total, icat in items:
+            if item.strip():
+                _save_custom_value("category", icat)
+                run_query("INSERT INTO purchase_request_items (request_id, item_name, description, quantity, unit_price, total, category, suggested_vendor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (req_id, item.strip(), item.strip(), qty, unit, total, icat, vendor_pref_full, now_iso()))
+        _save_suggested_vendors_for_request(req_id, vendor_details, cat, "Procurement Manager draft")
+        add_workflow_event("Purchase Request", req_id, "Draft Created", "Draft", req_no, user()["id"])
+        log_audit("DRAFT_CREATED", "Purchase Request", req_id, {"request_no": req_no, "amount": estimated, "department": dept}, user()["id"], user()["role"], after_values={"status": "Draft"})
+        _clear_line_state("req_line_rows_cmd", "req_cmd_")
+        _rerun_success(f"Created {req_no}")
+
+
+def create_fm_draft_form():
+    if not has_permission("create_request") or not _is_utility():
+        st.info("Only Utility Head / Facility Head can create this draft type.")
+        return
+    pm_id = _resolve_active_procurement_manager(
+        facility_manager_user_id=int(user()["id"]),
+    )
+    if pm_id:
+        pm = df_query("SELECT full_name FROM users WHERE id=?", (pm_id,))
+        st.info(f"Automatic routing is active. Procurement Manager queue: {pm.iloc[0]['full_name'] if not pm.empty else 'active Procurement Manager'}")
+    else:
+        st.warning("No active Procurement Manager user exists. Create one in Admin → User Management.")
+    c1, c2, c3 = st.columns(3)
+    dept = c1.selectbox("Department / Project", department_options(), key="uf_dept_cmd")
+    req_required = c2.date_input("Required date", date.today() + timedelta(days=7), key="uf_required_cmd")
+    cat = c3.selectbox("Category", EXPENSE_CATEGORIES, key="uf_cat_cmd")
+    c4, c5 = st.columns(2)
+    priority = c4.selectbox("Priority", PRIORITIES, index=1, key="uf_priority_cmd")
+    vendor_pref = c5.text_input("Vendor preference", key="uf_vendor_pref_cmd")
+    justification = st.text_area("Business justification", key="uf_justification_cmd")
+    attachment = st.file_uploader("Supporting document", type=["docx", "pdf", "jpg", "jpeg", "png", "xlsx"], key="uf_support_cmd")
+    vendor_details = _suggested_vendor_detail_inputs("uf_cmd", cat)
+    items, estimated = _request_line_items("uf_line_rows_cmd", "uf_cmd", cat)
+    st.metric("Estimated draft value", format_kpi_value(money(estimated)))
+    if st.button("Create Utility / Facility Draft", type="primary", key="uf_create_draft_cmd"):
+        if not justification.strip() or not any(i[0].strip() for i in items):
+            st.error("Business justification and at least one item are required.")
+            return
+        vendor_names = [v["name"] for v in vendor_details if v.get("name")]
+        vendor_pref_full = ", ".join(dict.fromkeys([v for v in [vendor_pref.strip(), *vendor_names] if v]))
+        path, _ = save_upload(attachment, "requests")
+        req_no = make_ref("UF")
+        pr_id = run_insert(
+            """
+            INSERT INTO purchase_requests (request_no, requested_by, department_project, request_date, required_date, category, justification, priority, estimated_amount, vendor_preference, status, source_type, attachments_json, notes, approval_history_json, facility_manager_user_id, assigned_procurement_manager_id, next_role, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FM Draft', 'Utility Head / Facility Head', ?, '', '[]', ?, ?, NULL, ?, ?)
+            """,
+            (req_no, user()["id"], dept, date.today().isoformat(), req_required.isoformat(), cat, justification, priority, estimated, vendor_pref_full, json_dump([path] if path else []), user()["id"], pm_id, now_iso(), now_iso()),
+        )
+        for item, qty, unit, total, icat in items:
+            if item.strip():
+                run_query("INSERT INTO purchase_request_items (request_id, item_name, description, quantity, unit_price, total, category, suggested_vendor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (pr_id, item.strip(), item.strip(), qty, unit, total, icat, vendor_pref_full, now_iso()))
+        _save_suggested_vendors_for_request(pr_id, vendor_details, cat, "Utility / Facility draft")
+        if pm_id:
+            ensure_thread("Purchase Request", pr_id, user()["id"], pm_id)
+        add_workflow_event("Purchase Request", pr_id, "Draft Created", "FM Draft", req_no, user()["id"])
+        log_audit("DRAFT_CREATED", "Purchase Request", pr_id, {"request_no": req_no, "amount": estimated, "department": dept}, user()["id"], user()["role"], after_values={"status": "FM Draft"})
+        # A draft is new work for its creator until My Draft Requests is opened.
+        # Routing it through the existing notification architecture restores
+        # the section-specific red badge without creating a second workflow.
+        create_notification(
+            int(user()["id"]),
+            None,
+            "Draft request created",
+            f"{req_no} was saved and is ready for review or submission.",
+            "Purchase Request",
+            int(pr_id),
+            "Normal",
+            ["in_app"],
+            action_label="My Draft Requests",
+        )
+        _clear_line_state("uf_line_rows_cmd", "uf_cmd_")
+        st.success(f"Created draft {req_no}.")
+        st.rerun()
+
+
+def facility_dashboard():
+    fm_id = user()["id"]
+    pm_id = get_pm_for_facility_manager(fm_id)
+    pm = df_query("SELECT full_name FROM users WHERE id=?", (pm_id,)) if pm_id else pd.DataFrame()
+    st.info(f"Automatic Procurement Manager routing: {pm.iloc[0]['full_name'] if not pm.empty else 'No active Procurement Manager found'}")
+    q = lambda statuses: int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE facility_manager_user_id=? AND status IN (%s)" % ",".join(["?"] * len(statuses)), tuple([fm_id] + list(statuses))).iloc[0, 0])
+    metric_row([
+        ("Drafts", q(("FM Draft", "Draft")), None),
+        ("Pending Procurement Review", q(("Sent for Procurement Review", "Submitted to Procurement Manager")), None),
+        ("Returned", q(("Returned for Correction", "Returned to Facility Manager")), None),
+        ("Submitted for Approval", q(("Submitted for Approval", "Pending Approver/MD Approval")), None),
+        ("Approved", q(("Approved", "Awaiting Payment", "Approved for Payment")), None),
+        ("Completed", q(("Completed", "Closed", "Paid")), None),
+    ], cols=3)
+    df = df_query(
+        """
+        SELECT request_no, department_project, category, estimated_amount, status, updated_at
+        FROM purchase_requests
+        WHERE facility_manager_user_id=?
+        ORDER BY updated_at DESC, created_at DESC LIMIT 20
+        """,
+        (fm_id,),
+    )
+    if not df.empty:
+        df["estimated_amount"] = df["estimated_amount"].apply(money); dataframe(df)
+    else:
+        st.success("No Utility Head / Facility Head actions pending.")
+
+
+def facility_workspace():
+    role_header("Utility Head / Facility Head Workspace", "Create drafts, manage gateway passes, submit to Procurement Manager, and respond to corrections.")
+    section = st.session_state.get("facility_section", "Utility / Facility Dashboard")
+    if section in ["Utility / Facility Dashboard", "Facility Dashboard"]:
+        facility_dashboard()
+    elif section == "Create Request Draft":
+        create_fm_draft_form()
+    elif section == "My Draft Requests":
+        facility_draft_register(status_filter=None)
+    elif section == "Submit to Procurement Manager":
+        facility_draft_register(status_filter=["FM Draft", "Draft", "Returned for Correction", "Returned to Facility Manager"])
+    elif section == "Import Documents":
+        facility_import_documents()
+    elif section == "Gateway Pass":
+        facility_gateway_pass_page()
+    elif section == "Shared Thread with Procurement Manager":
+        facility_shared_threads()
+    elif section == "Returned Requests":
+        facility_draft_register(status_filter=["Returned for Correction", "Returned to Facility Manager"])
+    elif section == "Approved / Accepted Requests":
+        facility_draft_register(status_filter=["Reviewed by Procurement", "Submitted for Approval", "Approved", "Awaiting Payment", "Paid", "Completed", "Closed"])
+    elif section == "My Activity History":
+        activity_history_page(scope="mine")
+    elif section == "Income":
+        income_page(manage=False)
+    elif section == "Settings":
+        settings_page()
+    else:
+        facility_dashboard()
+
+
+def facility_draft_register(status_filter: list[str] | None = None):
+    sql = "SELECT * FROM purchase_requests WHERE facility_manager_user_id=?"
+    params: list[Any] = [user()["id"]]
+    if status_filter:
+        sql += " AND status IN (%s)" % ",".join(["?"] * len(status_filter)); params += status_filter
+    sql += " ORDER BY updated_at DESC, created_at DESC"
+    df = df_query(sql, params)
+    if df.empty:
+        empty_state("No Utility Head / Facility Head drafts", "Create a draft or gateway pass to begin.")
+        return
+    show_cols = ["id", "request_no", "department_project", "category", "estimated_amount", "status", "updated_at"]
+    show = df[[c for c in show_cols if c in df.columns]].copy()
+    show["estimated_amount"] = show["estimated_amount"].apply(money)
+    dataframe(show.drop(columns=["id"]))
+    selected = st.selectbox("Open my draft/request", [f"{r.request_no} — {r.status} — #{int(r.id)}" for r in df.itertuples()], key=f"uf_open_{'_'.join(status_filter or ['all'])}")
+    pr_id = int(selected.rsplit("#", 1)[1])
+    pr = df[df["id"] == pr_id].iloc[0]
+    request_detail(pr_id, actions=False, key_scope=f"uf_detail_{pr_id}")
+    if int(pr.get("assigned_procurement_manager_id") or 0):
+        render_private_thread("Purchase Request", pr_id, int(pr["facility_manager_user_id"]), int(pr["assigned_procurement_manager_id"] or 0), f"uf_thread_{pr_id}")
+    if pr["status"] in ["FM Draft", "Draft", "Returned for Correction", "Returned to Facility Manager"]:
+        c1, c2 = st.columns(2)
+        if c1.button("Send to Procurement Manager", type="primary", key=f"uf_submit_{pr_id}"):
+            pm_id = _resolve_active_procurement_manager(
+                pr.get("assigned_procurement_manager_id"),
+                int(user()["id"]),
+            )
+            if not pm_id:
+                st.error(
+                    "No active Procurement Manager account is available. "
+                    "Ask Admin to activate or assign a Procurement Manager."
+                )
+                return
+            run_query("UPDATE purchase_requests SET assigned_procurement_manager_id=?, next_role='procurement_manager' WHERE id=?", (pm_id, pr_id))
+            ensure_thread(
+                "Purchase Request",
+                int(pr_id),
+                int(pr.get("facility_manager_user_id") or user()["id"]),
+                int(pm_id),
+            )
+            # The centralized request transition already creates the single
+            # Procurement Manager notification. Do not add a second inbox-specific
+            # notification here: it would light both Purchase Requests and the
+            # Facility inbox for one submission. The request remains visible in
+            # the Facility inbox by its status/next_role, while the unread badge
+            # appears only on Purchase Requests as the user expects.
+            update_request_status(pr_id, "Sent for Procurement Review", "Sent for Procurement Review", "Utility Head / Facility Head sent draft to Procurement Manager")
+        if c2.button("Delete draft", key=f"uf_delete_{pr_id}"):
+            if not can_delete_draft(user()["role"], int(pr.get("facility_manager_user_id") or pr.get("requested_by") or 0), user()["id"], pr["status"]):
+                st.error("Only your own unsubmitted draft can be deleted.")
+            else:
+                run_query("DELETE FROM purchase_request_items WHERE request_id=?", (pr_id,))
+                run_query("DELETE FROM purchase_requests WHERE id=?", (pr_id,))
+                log_audit("DRAFT_DELETED", "Purchase Request", pr_id, pr.get("request_no"), user()["id"], user()["role"], before_values={"status": pr["status"]})
+                _rerun_success("Draft deleted.")
+
+
+def facility_manager_inbox():
+    st.subheader("Utility Head / Facility Head Inbox")
+    st.caption("Requests sent by Utility Head / Facility Head appear here automatically by role-based routing. Review, return, or submit valid items to Approver/Admin.")
+    df = df_query(
+        """
+        SELECT pr.*, fm.full_name facility_manager
+        FROM purchase_requests pr LEFT JOIN users fm ON pr.facility_manager_user_id=fm.id
+        WHERE (pr.next_role='procurement_manager' OR pr.status IN ('Sent for Procurement Review','Submitted to Procurement Manager','Submitted','Procurement Review','Reviewed by Procurement','Returned for Correction'))
+        ORDER BY pr.updated_at DESC, pr.created_at DESC
+        """
+    )
+    if df.empty:
+        empty_state("No Utility Head / Facility Head requests", "Submitted drafts will appear here automatically.")
+        return
+    show = df[["id", "request_no", "facility_manager", "department_project", "category", "estimated_amount", "status", "updated_at"]].copy()
+    show["estimated_amount"] = show["estimated_amount"].apply(money)
+    dataframe(show.drop(columns=["id"]))
+    selected = st.selectbox("Open request", [f"{r.request_no} — {r.status} — #{int(r.id)}" for r in df.itertuples()], key="pm_uf_inbox_select_cmd")
+    pr_id = int(selected.rsplit("#", 1)[1])
+    pr = df[df["id"] == pr_id].iloc[0]
+    request_detail(pr_id, actions=False, key_scope=f"pm_uf_inbox_{pr_id}")
+    if int(pr.get("facility_manager_user_id") or 0):
+        render_private_thread("Purchase Request", pr_id, int(pr["facility_manager_user_id"]), int(user()["id"]), f"pm_uf_thread_{pr_id}")
+    note = st.text_area("Procurement review comment / correction reason", key=f"pm_uf_note_{pr_id}")
+    c1, c2, c3, c4 = st.columns(4)
+    if c1.button("Mark Reviewed", key=f"pm_uf_review_{pr_id}"):
+        update_request_status(pr_id, "Reviewed by Procurement", "Reviewed by Procurement", note or "Reviewed by Procurement Manager")
+    if c2.button("Requires Sourcing", key=f"pm_uf_sourcing_{pr_id}"):
+        create_sourcing_for_request(pr_id)
+        _navigate_procurement_section("Sourcing", "Sourcing task is ready. Add vendor quotes from the Sourcing tab.")
+    if c3.button("Return for Correction", key=f"pm_uf_return_{pr_id}"):
+        update_request_status(pr_id, "Returned for Correction", "Returned for Correction", note or "Returned for correction")
+    if c4.button("Submit to Approver/Admin", type="primary", key=f"pm_uf_to_approver_{pr_id}"):
+        run_query("UPDATE purchase_requests SET next_role='approver' WHERE id=?", (pr_id,))
+        create_notification(None, "Approver", "Request submitted for approval", f"{pr['request_no']} requires final approval.", "Purchase Request", pr_id, "High", ["in_app", "browser_push"], action_label="Open Pending Approvals")
+        create_notification(None, "Admin", "Request submitted for approval", f"{pr['request_no']} requires approval/oversight.", "Purchase Request", pr_id, "Important", ["in_app"])
+        update_request_status(pr_id, "Submitted for Approval", "Submitted for Approval", note or "Submitted by Procurement Manager for final approval")
+
+
+def request_actions(pr_id: int, pr, key_scope: str | None = None):
+    scope = key_scope or "default"
+    prefix = f"{scope}_pr_{pr_id}"
+    role = _current_role()
+    status = str(pr["status"])
+    requester_id = int(pr.get("requested_by") or 0)
+    is_pm_own_request = role == "Procurement Manager" and requester_id == int(user()["id"])
+    st.markdown("#### Guided next action")
+    st.caption("Only valid actions for this request, its current status, and your role are shown.")
+
+    actions: list[tuple[str, str, str, str]] = []
+
+    # Facility/Utility drafts are sent to Procurement Manager. A Procurement
+    # Manager's own draft must not be sent back to himself; it can be sourced or
+    # submitted directly to Approver/Admin.
+    if status in ["Draft", "FM Draft", "Returned for Correction", "Returned to Facility Manager"]:
+        if is_pm_own_request:
+            actions.extend([
+                ("Mark Requires Sourcing / Start Vendor Quotes", "__sourcing__", "Sourcing Required", "Supplier comparison required before final approval"),
+                ("Submit to Approver/Admin", "Submitted for Approval", "Submitted for Approval", "Submitted directly by Procurement Manager for final approval"),
+            ])
+        elif role in ["Facility Manager", "Admin"]:
+            actions.append(("Send to Procurement Manager", "Sent for Procurement Review", "Sent for Procurement Review", "Sent for procurement review"))
+        elif role == "Procurement Manager":
+            # Covers imported/manual drafts owned by others that landed in PM's register.
+            actions.extend([
+                ("Mark Reviewed", "Reviewed by Procurement", "Reviewed by Procurement", "Reviewed by Procurement Manager"),
+                ("Mark Requires Sourcing / Start Vendor Quotes", "__sourcing__", "Sourcing Required", "Supplier comparison required before final approval"),
+                ("Submit to Approver/Admin", "Submitted for Approval", "Submitted for Approval", "Submitted by Procurement Manager for final approval"),
+            ])
+
+    procurement_review_statuses = ["Sent for Procurement Review", "Submitted to Procurement Manager", "Submitted", "Procurement Review", "Reviewed by Procurement"]
+    if status in procurement_review_statuses and role in ["Procurement Manager", "Admin"]:
+        if status != "Reviewed by Procurement":
+            actions.append(("Mark Reviewed", "Reviewed by Procurement", "Reviewed by Procurement", "Reviewed by Procurement Manager"))
+        actions.extend([
+            ("Mark Requires Sourcing / Start Vendor Quotes", "__sourcing__", "Sourcing Required", "Supplier comparison required before final approval"),
+            ("Submit to Approver/Admin", "Submitted for Approval", "Submitted for Approval", "Submitted by Procurement Manager for final approval"),
+            ("Return for Correction", "Returned for Correction", "Returned for Correction", "Returned for correction"),
+        ])
+
+    if status in ["Requires Sourcing", "Vendor Quote Collection"] and role in ["Procurement Manager", "Admin"]:
+        actions.append(("Open / Continue Sourcing", "__open_sourcing__", "Sourcing Continued", "Continue vendor quote collection"))
+
+    if status == "Vendor Recommendation" and role in ["Procurement Manager", "Admin"]:
+        actions.extend([
+            ("Submit Vendor Recommendation to Approver/Admin", "Submitted for Approval", "Submitted for Approval", "Vendor recommendation submitted for final approval"),
+            ("Open / Continue Sourcing", "__open_sourcing__", "Sourcing Continued", "Continue vendor quote collection"),
+            ("Return for Correction", "Returned for Correction", "Returned for Correction", "Returned for correction"),
+        ])
+
+    if status in ["Submitted for Approval", "Pending Approver/MD Approval", "Pending Approval"] and can_approve(role):
+        actions.extend([
+            ("Approve Request", "Approved", "Approved", "Approved"),
+            ("Reject Request", "Rejected", "Rejected", "Rejected"),
+            ("Return for Correction", "Returned for Correction", "Returned for Correction", "Returned for correction"),
+        ])
+
+    if status == "Approved" and role in ["Procurement Manager", "Admin"] and has_permission("create_po"):
+        actions.append(("Open Purchase Orders / Create PO", "__open_po__", "PO Action", "Create purchase order for approved request"))
+
+    if role == "Finance" and status in ["Approved", "Awaiting Payment", "Approved for Payment"]:
+        st.info("This item is approved. Use Finance → Approved for Payment to record payment and upload receipt.")
+
+    if not actions:
+        st.info("No direct action is available for this request at its current status or your role.")
+        return
+
+    chosen = st.selectbox("Choose next action", [a[0] for a in actions], key=f"guided_action_cmd_{prefix}")
+    reason = st.text_area("Comment / reason", key=f"reason_cmd_{prefix}")
+    if st.button("Apply selected action", type="primary", key=f"apply_action_cmd_{prefix}"):
+        label, new_status, event, note = [a for a in actions if a[0] == chosen][0]
+        if any(word in label for word in ["Reject", "Return"]) and not reason.strip():
+            st.error("Please enter a reason.")
+            return
+        if new_status in ["__sourcing__", "__open_sourcing__"]:
+            sid = create_sourcing_for_request(pr_id)
+            _navigate_procurement_section("Sourcing", "Sourcing task is ready. Add vendor quotes from the Sourcing tab.")
+            return
+        if new_status == "__open_po__":
+            _navigate_procurement_section("Purchase Orders")
+            return
+        if new_status in ["Approved", "Rejected"]:
+            approval_action("Purchase Request", pr_id, status, new_status, event, reason or note)
+            return
+        if new_status == "Submitted for Approval":
+            create_notification(None, "Approver", "Request pending approval", f"{pr['request_no']} requires final approval.", "Purchase Request", pr_id, "High", ["in_app", "browser_push"], action_label="Open Pending Approvals")
+            create_notification(None, "Admin", "Request submitted for approval", f"{pr['request_no']} requires approval/oversight.", "Purchase Request", pr_id, "Important", ["in_app"])
+        update_request_status(pr_id, new_status, event, reason or note)
+
+def request_next_action_board():
+    st.caption("Use this board for Procurement Manager command actions: review, sourcing, vendor recommendation, approval submission and PO handoff.")
+    role = _current_role()
+    review_statuses = ("Sent for Procurement Review", "Submitted to Procurement Manager", "Submitted", "Procurement Review")
+    cards: list[dict[str, Any]] = [
+        {
+            "title": "My PM drafts: submit directly to Approver/Admin",
+            "statuses": ("Draft",),
+            "button": "Submit to Approver/Admin",
+            "new_status": "Submitted for Approval",
+            "event": "Submitted for Approval",
+            "note": "Submitted directly by Procurement Manager for final approval",
+            "extra_sql": " AND requested_by=?",
+            "extra_params": (user()["id"],),
+        },
+        {
+            "title": "Facility submissions: mark reviewed",
+            "statuses": review_statuses,
+            "button": "Mark Reviewed",
+            "new_status": "Reviewed by Procurement",
+            "event": "Reviewed by Procurement",
+            "note": "Reviewed by Procurement Manager",
+            "extra_sql": "",
+            "extra_params": (),
+        },
+        {
+            "title": "Requests requiring sourcing / vendor quotes",
+            "statuses": (*review_statuses, "Reviewed by Procurement"),
+            "button": "Create / Open Sourcing Task",
+            "new_status": "__sourcing__",
+            "event": "Sourcing Required",
+            "note": "Supplier comparison required before final approval",
+            "extra_sql": "",
+            "extra_params": (),
+        },
+        {
+            "title": "Active sourcing: continue vendor quote collection",
+            "statuses": ("Requires Sourcing", "Vendor Quote Collection"),
+            "button": "Open Sourcing Tab",
+            "new_status": "__open_sourcing__",
+            "event": "Sourcing Continued",
+            "note": "Continue vendor quote collection",
+            "extra_sql": "",
+            "extra_params": (),
+        },
+        {
+            "title": "Vendor recommendations ready for Approver/Admin",
+            "statuses": ("Vendor Recommendation",),
+            "button": "Submit Recommendation to Approver/Admin",
+            "new_status": "Submitted for Approval",
+            "event": "Submitted for Approval",
+            "note": "Vendor recommendation submitted for final approval",
+            "extra_sql": "",
+            "extra_params": (),
+        },
+        {
+            "title": "Approved requests needing PO",
+            "statuses": ("Approved",),
+            "button": "Open PO Creation",
+            "new_status": "__open_po__",
+            "event": "PO Action",
+            "note": "Create purchase order for approved request",
+            "extra_sql": " AND linked_po_id IS NULL",
+            "extra_params": (),
+        },
+    ]
+    if role not in ["Procurement Manager", "Admin"]:
+        st.info("This command board is mainly for Procurement Manager actions.")
+    selected_title = st.selectbox("Action board", [c["title"] for c in cards], key="pr_action_board_choice_cmd")
+    card = [c for c in cards if c["title"] == selected_title][0]
+    statuses = tuple(card["statuses"])
+    placeholders = ",".join(["?"] * len(statuses))
+    params: list[Any] = list(statuses) + list(card.get("extra_params", ()))
+    df = df_query(
+        f"""
+        SELECT id, request_no, department_project, category, estimated_amount, status, updated_at
+        FROM purchase_requests
+        WHERE status IN ({placeholders}) {card.get('extra_sql', '')}
+        ORDER BY updated_at DESC, created_at DESC
+        """,
+        params,
+    )
+    if df.empty:
+        st.success(f"No request currently needs: {selected_title.lower()}.")
+        return
+    show = df.copy()
+    show["estimated_amount"] = show["estimated_amount"].apply(money)
+    dataframe(show.drop(columns=["id"]))
+    selected = st.selectbox("Select request", [f"{r.request_no} — {r.status} — {money(r.estimated_amount)} — #{int(r.id)}" for r in df.itertuples()], key="pr_action_board_request_cmd")
+    pr_id = int(selected.rsplit("#", 1)[1])
+    note = st.text_area("Comment / note", value=card["note"], key="pr_action_board_note_cmd")
+    if st.button(card["button"], type="primary", key="pr_apply_guided_action_cmd"):
+        new_status = card["new_status"]
+        if new_status in ["__sourcing__", "__open_sourcing__"]:
+            create_sourcing_for_request(pr_id)
+            _navigate_procurement_section("Sourcing", "Sourcing task is ready. Add vendor quotes from the Sourcing tab.")
+            return
+        if new_status == "__open_po__":
+            _navigate_procurement_section("Purchase Orders")
+            return
+        if new_status == "Submitted for Approval":
+            pr_no = str(df[df["id"] == pr_id].iloc[0]["request_no"])
+            create_notification(None, "Approver", "Request pending approval", f"{pr_no} requires final approval.", "Purchase Request", pr_id, "High", ["in_app", "browser_push"], action_label="Open Pending Approvals")
+            create_notification(None, "Admin", "Request submitted for approval", f"{pr_no} requires approval/oversight.", "Purchase Request", pr_id, "Important", ["in_app"])
+        update_request_status(pr_id, new_status, card["event"], note or card["note"])
+
+def procurement_dashboard():
+    st.subheader("What needs my attention?")
+    queue_review = int(df_query("SELECT COUNT(*) c FROM purchase_requests WHERE next_role='procurement_manager' OR status IN ('Sent for Procurement Review','Submitted to Procurement Manager','Submitted')").iloc[0, 0])
+    sourcing_count = int(df_query("SELECT COUNT(*) c FROM purchase_requests WHERE status IN ('Requires Sourcing','Vendor Quote Collection')").iloc[0, 0])
+    recommendation_count = int(df_query("SELECT COUNT(*) c FROM purchase_requests WHERE status='Vendor Recommendation'").iloc[0, 0])
+    approved_total = int(df_query("SELECT COUNT(*) c FROM purchase_requests WHERE status IN ('Approved','Awaiting Payment','Approved for Payment','Paid','Completed','Closed')").iloc[0, 0])
+    metric_row([
+        ("Pending Review", queue_review, "queue"),
+        ("Needs Sourcing", sourcing_count, "supplier comparison queue"),
+        ("Vendor Recommendations", recommendation_count, "ready to submit to Approver/Admin"),
+        ("Total Approved", approved_total, "cumulative"),
+    ], cols=4)
+    df = df_query("SELECT request_no, department_project, category, estimated_amount, status, updated_at FROM purchase_requests WHERE status NOT IN ('Rejected','Archived') ORDER BY updated_at DESC LIMIT 25")
+    if not df.empty:
+        df["estimated_amount"] = df["estimated_amount"].apply(money); dataframe(df)
+    c1, c2 = st.columns(2)
+    with c1:
+        pipe = df_query("SELECT status, COUNT(*) count FROM purchase_requests GROUP BY status ORDER BY count DESC")
+        interactive_chart(pipe, "Procurement Pipeline", "status", "count", "pm_pipeline_cmd", default="Bar")
+    with c2:
+        spend = df_query("SELECT category, SUM(estimated_amount) total FROM purchase_requests WHERE status NOT IN ('Rejected','Archived') GROUP BY category ORDER BY total DESC")
+        interactive_chart(_money_chart_df(spend), "Estimated Value by Category", "category", "total", "pm_category_value_cmd", default="Donut")
+
+
+def post_payment_closure_page():
+    st.subheader("Post-Payment Closure")
+    st.caption("Finance records payment and uploads receipt. Procurement Manager then completes, closes, and archives the record for history/audit.")
+    df = df_query("""
+        SELECT id, request_no, department_project, category, estimated_amount, status, payment_status, paid_at, updated_at
+        FROM purchase_requests
+        WHERE status IN ('Paid','Receipt Uploaded','Payment Submitted for Verification','Completed','Closed')
+           OR (next_role='procurement_manager' AND payment_status='Paid')
+        ORDER BY COALESCE(paid_at, updated_at, created_at) DESC
+        LIMIT 500
+    """)
+    if df.empty:
+        st.success("No paid records are waiting for completion, closure, or archive.")
+        return
+    show = df.copy()
+    show["estimated_amount"] = show["estimated_amount"].apply(money)
+    dataframe(show.drop(columns=["id"]))
+    selected = st.selectbox("Open paid record", [f"{r.request_no} — {r.status} — #{int(r.id)}" for r in df.itertuples()], key="pm_postpay_select_cmd")
+    pr_id = int(selected.rsplit("#", 1)[1])
+    pr = df[df["id"] == pr_id].iloc[0]
+    request_detail(pr_id, actions=False, key_scope=f"pm_postpay_{pr_id}")
+    note = st.text_area("Closure note", key=f"pm_postpay_note_{pr_id}")
+    c1, c2, c3 = st.columns(3)
+    if c1.button("Mark Completed", type="primary", disabled=pr["status"] not in ["Paid", "Receipt Uploaded", "Payment Submitted for Verification"], key=f"pm_mark_completed_{pr_id}"):
+        run_query("UPDATE purchase_requests SET status='Completed', next_role='procurement_manager', completed_at=COALESCE(completed_at, ?), updated_at=? WHERE id=?", (now_iso(), now_iso(), pr_id))
+        add_workflow_event("Purchase Request", pr_id, "Completed", "Completed", note or "Completed after payment by Procurement Manager", user()["id"])
+        log_audit("REQUEST_COMPLETED", "Purchase Request", pr_id, note or "Completed after payment", user()["id"], user()["role"], before_values={"status": pr["status"]}, after_values={"status": "Completed"})
+        owner_df = df_query("SELECT COALESCE(facility_manager_user_id, requested_by) owner_id FROM purchase_requests WHERE id=?", (pr_id,))
+        owner_id = int(owner_df.iloc[0,0] or 0) if not owner_df.empty else 0
+        if owner_id:
+            create_notification(owner_id, None, "Request completed", f"{pr['request_no']} has been marked Completed.", "Purchase Request", pr_id, "Normal", ["in_app"], action_label="Approved / Accepted Requests")
+        _notify_auditors("Request completed", f"{pr['request_no']} was completed by Procurement Manager.", "Purchase Request", pr_id)
+        _rerun_success("Record marked Completed.")
+    if c2.button("Close Record", disabled=pr["status"] != "Completed", key=f"pm_close_record_{pr_id}"):
+        run_query("UPDATE purchase_requests SET status='Closed', next_role='procurement_manager', updated_at=? WHERE id=?", (now_iso(), pr_id))
+        add_workflow_event("Purchase Request", pr_id, "Closed", "Closed", note or "Closed by Procurement Manager", user()["id"])
+        log_audit("REQUEST_CLOSED", "Purchase Request", pr_id, note or "Closed after completion", user()["id"], user()["role"], before_values={"status": pr["status"]}, after_values={"status": "Closed"})
+        _notify_auditors("Request closed", f"{pr['request_no']} was closed by Procurement Manager.", "Purchase Request", pr_id)
+        _rerun_success("Record closed.")
+    if c3.button("Archive Record", disabled=pr["status"] != "Closed", key=f"pm_archive_record_{pr_id}"):
+        run_query("UPDATE purchase_requests SET status='Archived', next_role='auditor', updated_at=? WHERE id=?", (now_iso(), pr_id))
+        add_workflow_event("Purchase Request", pr_id, "Archived", "Archived", note or "Archived by Procurement Manager", user()["id"])
+        log_audit("REQUEST_ARCHIVED", "Purchase Request", pr_id, note or "Archived after closure", user()["id"], user()["role"], before_values={"status": pr["status"]}, after_values={"status": "Archived"})
+        _notify_auditors("Request archived", f"{pr['request_no']} was archived by Procurement Manager.", "Purchase Request", pr_id)
+        _rerun_success("Record archived and visible in history/audit.")
+
+
+def procurement_workspace():
+    role_header("Procurement Manager Workspace", "Review Utility Head / Facility Head submissions, source vendors, and submit valid requests to Approver/Admin. This role cannot approve normal procurement/payment requests.")
+    section = st.session_state.get("procurement_section", "Operations Dashboard")
+    if section == "Operations Dashboard":
+        procurement_dashboard_metrics(); procurement_dashboard()
+    elif section == "Purchase Requests":
+        requests_page(mode="procurement")
+    elif section in ["Utility Head / Facility Head Inbox", "Facility Manager Inbox"]:
+        facility_manager_inbox()
+    elif section == "Import Center":
+        import_center()
+    elif section == "Sourcing":
+        sourcing_page()
+    elif section == "Vendor Quotes":
+        quote_page()
+    elif section == "Vendor Recommendation":
+        sourcing_page()
+    elif section == "Purchase Orders":
+        purchase_orders_page()
+    elif section == "Receiving Slips":
+        receiving_page()
+    elif section == "Vendors":
+        vendors_page()
+    elif section == "Gateway Pass Review":
+        gateway_pass_review_queue("Gateway Pass Review")
+    elif section == "Post-Payment Closure":
+        post_payment_closure_page()
+    elif section == "Availability / Away Notice":
+        availability_panel()
+    elif section == "Procurement Documents":
+        document_archive(editable=True)
+    elif section == "Procurement Reports":
+        procurement_reports()
+    elif section == "Income":
+        income_page(manage=False)
+    elif section == "My Activity History":
+        activity_history_page(scope="mine")
+    elif section == "Settings":
+        settings_page()
+    else:
+        procurement_dashboard_metrics(); procurement_dashboard()
+
+
+def _gateway_department_options():
+    return GATEWAY_DEPARTMENTS
+
+
+def _notify_auditors(title: str, message: str, entity_type: str, entity_id: int | None = None, importance: str = "Normal"):
+    try:
+        create_notification(None, "Auditor", title, message, entity_type, entity_id, importance, ["in_app"], action_label="Open Audit Dashboard")
+    except Exception:
+        pass
+
+
+def _row_to_dict(row) -> dict:
+    try:
+        return row.to_dict()
+    except Exception:
+        return dict(row)
+
+
+def _notify_gateway_event(row, title: str, message: str, target: str = "facility", importance: str = "High"):
+    """Route gateway notifications to the correct sidebar badge and auditor feed."""
+    data = _row_to_dict(row)
+    gp_id = int(data.get("id") or data.get("gateway_pass_id") or 0) or None
+    if target in ("facility", "all") and data.get("facility_manager_user_id"):
+        try:
+            create_notification(int(data["facility_manager_user_id"]), None, title, message, "Gateway Pass", gp_id, importance, ["in_app", "browser_push"], action_label="Open Gateway Pass")
+        except Exception:
+            pass
+    if target in ("reviewers", "all"):
+        create_notification(None, "Procurement Manager", title, message, "Gateway Pass", gp_id, importance, ["in_app", "browser_push"], action_label="Review Gateway Pass")
+        create_notification(None, "Approver", title, message, "Gateway Pass", gp_id, importance, ["in_app", "browser_push"], action_label="Review Gateway Pass")
+        create_notification(None, "Admin", title, message, "Gateway Pass", gp_id, "Important", ["in_app"], action_label="Gateway Pass Management")
+    _notify_auditors(title, message, "Gateway Pass", gp_id, "Normal")
+
+
+def create_gateway_pass_form():
+    _phase2_bootstrap()
+    if not _is_utility() and user()["role"] != "Admin":
+        st.info("Only Utility Head / Facility Head can create gateway pass drafts.")
+        return
+    st.subheader("Create Gateway Pass Draft")
+    rows = _line_row_ids("gp_line_rows_cmd")
+    add_col, remove_col, _ = st.columns([1.25, 1.25, 5])
+    if add_col.button("＋ Add gateway line item", key="gp_cmd_add_line"):
+        _add_line_row("gp_line_rows_cmd")
+        st.rerun()
+    if remove_col.button("− Remove gateway line item", key="gp_cmd_remove_line", disabled=len(rows) <= 1):
+        _remove_last_line_row("gp_line_rows_cmd", "gp_cmd")
+        st.rerun()
+    rows = _line_row_ids("gp_line_rows_cmd")
+    with st.form("create_gateway_pass_form_cmd"):
+        c1, c2, c3 = st.columns(3)
+        dept = c1.selectbox("Department", _gateway_department_options(), key="gp_create_dept_cmd")
+        movement_type = selectbox_with_other("Movement type", GATEWAY_MOVEMENT_TYPES, "gp_create_movement_cmd", "gateway_movement_type")
+        expected_movement = c3.date_input("Movement date", date.today(), key="gp_create_move_date_cmd")
+        purpose = st.text_area("Purpose of movement", key="gp_create_purpose_cmd")
+        c4, c5 = st.columns(2)
+        origin = c4.text_input("Origin", key="gp_create_origin_cmd")
+        destination = c5.text_input("Destination", key="gp_create_destination_cmd")
+        c6, c7, c8 = st.columns(3)
+        vehicle = c6.text_input("Vehicle number", key="gp_create_vehicle_cmd")
+        checkpoint = c7.text_input("Security checkpoint", key="gp_create_checkpoint_cmd")
+        c9, c10, c11 = st.columns(3)
+        driver = c9.text_input("Driver name", key="gp_create_driver_cmd")
+        driver_phone = c10.text_input("Driver phone", key="gp_create_driver_phone_cmd")
+        receiver = c11.text_input("Receiver name", key="gp_create_receiver_cmd")
+        receiver_org = st.text_input("Receiver organization", key="gp_create_receiver_org_cmd")
+        return_tab, security_tab = st.tabs(["Return Date", "Security Verification"])
+        with return_tab:
+            st.caption("Set the expected return date while creating the pass. The value will appear on the final gateway pass.")
+            expected_return = st.date_input(
+                "Expected return date",
+                value=expected_movement + timedelta(days=1),
+                min_value=expected_movement,
+                key="gp_create_return_cmd",
+            )
+            actual_return_applies = st.checkbox("Actual return date available", value=False, key="gp_create_actual_return_applies_cmd")
+            actual_return = st.date_input("Actual return date", date.today(), key="gp_create_actual_return_cmd", disabled=not actual_return_applies)
+        with security_tab:
+            s1, s2 = st.columns(2)
+            security_officer = s1.text_input("Security Officer Name", key="gp_create_security_officer_cmd")
+            gate_time = s2.text_input("Gate Verification Time", key="gp_create_gate_time_cmd", placeholder="e.g. 04:30 PM")
+            s3, s4 = st.columns(2)
+            exit_entry = s3.text_input("Exit / Entry Confirmation", key="gp_create_exit_entry_cmd", placeholder="e.g. Exit confirmed")
+            security_signature = s4.text_input("Security Signature / Name", key="gp_create_security_signature_cmd")
+        items = []
+        st.markdown("##### Item details")
+        for idx, row_id in enumerate(rows, 1):
+            st.caption(f"Item {idx}")
+            a, b, c, d0 = st.columns([1.6, 1, .7, .8])
+            desc = a.text_input("Item description", key=f"gp_cmd_item_desc_{row_id}")
+            category = b.text_input("Item category", key=f"gp_cmd_item_cat_{row_id}")
+            qty = c.number_input("Quantity", min_value=0.0, step=1.0, value=1.0, key=f"gp_cmd_item_qty_{row_id}")
+            colour = d0.text_input("Colour", key=f"gp_cmd_item_colour_{row_id}")
+            d, e, f = st.columns(3)
+            uom = selectbox_with_other("Unit of measure", GATEWAY_UOMS, f"gp_cmd_item_uom_{row_id}", "gateway_uom")
+            quality = selectbox_with_other("Quality / condition", GATEWAY_QUALITY_OPTIONS, f"gp_cmd_item_quality_{row_id}", "gateway_quality")
+            fragile = f.selectbox("Fragility status", GATEWAY_FRAGILITY_OPTIONS, key=f"gp_cmd_item_fragile_{row_id}")
+            g, h, k = st.columns(3)
+            value = g.number_input("Estimated value", min_value=0.0, step=1000.0, key=f"gp_cmd_item_value_{row_id}")
+            serial = h.text_input("Serial number", key=f"gp_cmd_item_serial_{row_id}")
+            asset = k.text_input("Asset tag", key=f"gp_cmd_item_asset_{row_id}")
+            handling = st.text_input("Handling instruction", key=f"gp_cmd_item_handling_{row_id}")
+            remarks = st.text_input("Remarks", key=f"gp_cmd_item_remarks_{row_id}")
+            items.append({"desc": desc, "category": category, "qty": qty, "colour": colour, "uom": uom, "quality": quality, "fragile": fragile, "value": value, "serial": serial, "asset": asset, "handling": handling, "remarks": remarks})
+        submitted = st.form_submit_button("Create Gateway Pass Draft", type="primary")
+    if submitted:
+        valid_items = [x for x in items if x["desc"].strip()]
+        if not purpose.strip() or not receiver.strip():
+            st.error("Purpose of movement and receiver name are required."); return
+        if not valid_items:
+            st.error("At least one item line is required before saving."); return
+        if any(float(x["qty"] or 0) <= 0 or not x["uom"] or x["uom"] == "Other" for x in valid_items):
+            st.error("Every item needs quantity greater than 0 and a valid unit of measure."); return
+        for x in valid_items:
+            _save_custom_value("gateway_uom", x["uom"]); _save_custom_value("gateway_quality", x["quality"])
+        _save_custom_value("gateway_movement_type", movement_type)
+        pass_no = make_ref("GP")
+        gp_id = run_insert(
+            """
+            INSERT INTO gateway_passes (pass_number, facility_manager_user_id, department, movement_type, purpose, origin_location, destination, expected_movement_date, expected_return_date, actual_return_date, vehicle_number, driver_name, driver_phone, receiver_name, receiver_organization, security_checkpoint, security_officer_name, gate_verification_time, exit_entry_confirmation, security_signature, status, next_role, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Draft', NULL, ?, ?)
+            """,
+            (pass_no, user()["id"], dept, movement_type, purpose.strip(), origin, destination, expected_movement.isoformat(), expected_return.isoformat() if expected_return else None, actual_return.isoformat() if actual_return_applies else None, vehicle, driver, driver_phone, receiver, receiver_org, checkpoint, security_officer.strip() or None, gate_time.strip() or None, exit_entry.strip() or None, security_signature.strip() or None, now_iso(), now_iso()),
+        )
+        for item in valid_items:
+            run_query(
+                """
+                INSERT INTO gateway_pass_items (gateway_pass_id, item_description, item_category, colour, quantity, unit_of_measure, quality_condition, estimated_value, serial_number, asset_tag, fragility_status, handling_instruction, remarks, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (gp_id, item["desc"].strip(), item["category"], item["colour"], float(item["qty"]), item["uom"], item["quality"], float(item["value"] or 0), item["serial"], item["asset"], item["fragile"], item["handling"], item["remarks"], now_iso()),
+            )
+        log_gateway_event(gp_id, "Gateway Pass Draft Created", "Draft", pass_no)
+        log_audit("DRAFT_CREATED", "Gateway Pass", gp_id, {"pass_number": pass_no, "department": dept}, user()["id"], user()["role"], after_values={"status": "Draft"})
+        _clear_line_state("gp_line_rows_cmd", "gp_cmd_")
+        _rerun_success(f"Gateway pass draft created: {pass_no}")
+
+
+def submit_gateway_pass(gateway_pass_id: int):
+    if not _assert_gateway_owner(gateway_pass_id):
+        return
+    row_df = df_query("SELECT * FROM gateway_passes WHERE id=?", (gateway_pass_id,))
+    if row_df.empty:
+        st.error("Gateway pass not found."); return
+    row = row_df.iloc[0]
+    if row["status"] not in ["Draft", "Returned for Correction"]:
+        st.warning("Only Draft or Returned gateway passes can be submitted."); return
+    items = gateway_pass_items_df(gateway_pass_id)
+    if items.empty:
+        st.error("At least one item line is required before submission."); return
+    if (items["quantity"].fillna(0) <= 0).any() or items["unit_of_measure"].fillna("").eq("").any():
+        st.error("Every item must include quantity > 0 and unit."); return
+    transition_gateway_pass_status(gateway_pass_id, "Sent for Procurement Review", "Sent for Procurement Review", "Submitted to Procurement Manager", user()["id"], user()["role"])
+    create_notification(None, "Procurement Manager", "Gateway pass sent for review", f"{row['pass_number']} requires Procurement Manager review before final approval.", "Gateway Pass", gateway_pass_id, "High", ["in_app", "browser_push"], action_label="Review Gateway Pass")
+    create_notification(int(row["facility_manager_user_id"]), None, "Gateway pass submitted to Procurement Manager", f"{row['pass_number']} was sent to Procurement Manager for review.", "Gateway Pass", gateway_pass_id, "Normal", ["in_app"], action_label="Open Gateway Pass")
+    _notify_auditors("Gateway pass sent for review", f"{row['pass_number']} was sent to Procurement Manager for review.", "Gateway Pass", gateway_pass_id)
+    _rerun_success("Gateway pass sent to Procurement Manager for review. Procurement Manager has been notified.")
+
+
+def _assert_gateway_reviewer(gateway_pass_id: int, acting_user: dict | None = None) -> bool:
+    acting_user = acting_user or user()
+    role = acting_user["role"]
+    if role in ["Admin", "Approver", "Procurement Manager"]:
+        return True
+    st.error("You are not authorized to review gateway passes.")
+    return False
+
+
+def _gateway_approve(gateway_pass_id: int, decision: str, note: str):
+    role = _current_role()
+    if role == "Procurement Manager":
+        st.error("Procurement Manager can review and submit gateway passes to Approver / MD, but cannot approve them.")
+        return
+    if not can_approve(role):
+        st.error("Only Admin and Approver / MD can approve, return, or reject gateway passes.")
+        return
+    row_df = df_query("SELECT * FROM gateway_passes WHERE id=?", (gateway_pass_id,))
+    if row_df.empty:
+        st.error("Gateway pass not found."); return
+    row = row_df.iloc[0]
+    allowed_statuses = ["Submitted for Approval", "Pending Approval"]
+    if role == "Admin":
+        # Admin keeps audited override ability without making Procurement Manager an approver.
+        allowed_statuses += ["Sent for Procurement Review", "Reviewed by Procurement", "Submitted", "Pending Procurement Manager / Approver Review"]
+    if row["status"] not in allowed_statuses and row.get("next_role") != "approver":
+        st.warning("Gateway passes must be submitted by Procurement Manager to Approver / MD before final approval."); return
+    if decision in ["Rejected", "Returned for Correction"] and not note.strip():
+        st.error("A rejection or return reason is required."); return
+    if decision == "Approved":
+        # Final approval hands the record back to Utility Head / Facility Head for preview/generation.
+        transition_gateway_pass_status(gateway_pass_id, "Approved", "Gateway Pass Approved", note or "Approved.", user()["id"], role)
+        decision_label = "Approved"; title = "Gateway Pass Approved - Ready to Generate"; msg = f"{row['pass_number']} has been approved by {display_role(role)}. Open Gateway Pass > Ready to Generate to preview and download it."
+    elif decision == "Rejected":
+        transition_gateway_pass_status(gateway_pass_id, "Rejected", "Gateway Pass Rejected", note, user()["id"], role)
+        decision_label = "Rejected"; title = "Gateway Pass Rejected"; msg = f"{row['pass_number']} was rejected. Reason: {note}"
+    else:
+        transition_gateway_pass_status(gateway_pass_id, "Returned for Correction", "Gateway Pass Returned for Correction", note, user()["id"], role)
+        decision_label = "Returned for Correction"; title = "Gateway Pass Returned"; msg = f"{row['pass_number']} was returned for correction. Reason: {note}"
+    run_query("INSERT INTO gateway_pass_approvals (gateway_pass_id, approver_user_id, approver_role, decision, note, created_at) VALUES (?, ?, ?, ?, ?, ?)", (gateway_pass_id, user()["id"], role, decision_label, note, now_iso()))
+    action_label = "Ready to Generate" if decision_label == "Approved" else "Open Gateway Pass"
+    create_notification(int(row["facility_manager_user_id"]), None, title, msg, "Gateway Pass", gateway_pass_id, "High", ["in_app", "browser_push"], action_label=action_label)
+    if decision_label == "Approved":
+        create_notification(None, "Procurement Manager", "Gateway pass final approval completed", f"{row['pass_number']} was approved by {display_role(role)} and routed to Utility Head / Facility Head for generation.", "Gateway Pass", gateway_pass_id, "Normal", ["in_app"], action_label="Review Gateway Pass")
+    _notify_auditors(title, msg, "Gateway Pass", gateway_pass_id)
+    _rerun_success(f"Gateway pass {decision_label.lower()}.")
+
+
+def gateway_pass_review_queue(title: str, admin_mode: bool = False):
+    _phase2_bootstrap()
+    st.subheader(title)
+    role = _current_role()
+    if role == "Procurement Manager" and not admin_mode:
+        df = gateway_pass_summary_df("(gp.status IN ('Sent for Procurement Review','Submitted','Pending Procurement Manager / Approver Review') OR gp.next_role='procurement_manager')", ())
+    elif can_approve(role) or admin_mode:
+        df = gateway_pass_summary_df("(gp.status IN ('Submitted for Approval','Pending Approval') OR gp.next_role='approver')", ())
+    else:
+        st.info("This queue is not available to your role."); return
+    if df.empty:
+        st.success("No gateway passes are awaiting action."); return
+    show = df[["id", "pass_number", "facility_manager", "department", "movement_type", "destination", "expected_movement_date", "status", "submitted_at"]].copy()
+    dataframe(show.drop(columns=["id"]))
+    selected = st.selectbox("Open gateway pass", [f"{r.pass_number} — {r.facility_manager} — #{int(r.id)}" for r in df.itertuples()], key=f"gp_review_select_cmd_{role}_{admin_mode}")
+    gp_id = int(selected.rsplit("#", 1)[1])
+    row = df[df["id"] == gp_id].iloc[0]
+    gateway_pass_detail(gp_id)
+    note = st.text_area("Review note / reason", key=f"gp_review_note_cmd_{gp_id}_{role}_{admin_mode}")
+    if role == "Procurement Manager":
+        st.info("Procurement Manager reviews gateway passes and submits valid ones to Approver / MD. There is no Procurement Manager approval button.")
+        c1, c2, c3 = st.columns(3)
+        if c1.button("Mark Reviewed", key=f"gp_pm_reviewed_{gp_id}"):
+            transition_gateway_pass_status(gp_id, "Reviewed by Procurement", "Reviewed by Procurement", note or "Reviewed by Procurement Manager", user()["id"], user()["role"])
+            _notify_auditors("Gateway pass reviewed by Procurement Manager", f"{row['pass_number']} was reviewed by Procurement Manager.", "Gateway Pass", gp_id)
+            _rerun_success("Gateway pass marked reviewed by Procurement Manager.")
+        if c2.button("Return for Correction", key=f"gp_pm_return_{gp_id}"):
+            if not note.strip(): st.error("Please enter a correction reason."); return
+            transition_gateway_pass_status(gp_id, "Returned for Correction", "Returned for Correction", note, user()["id"], user()["role"])
+            _notify_gateway_event({**row.to_dict(), "id": gp_id}, "Gateway pass returned", f"{row['pass_number']} was returned for correction. {note}", target="facility", importance="High")
+            _rerun_success("Gateway pass returned for correction.")
+        if c3.button("Submit to Approver / MD", type="primary", key=f"gp_pm_submit_approver_{gp_id}"):
+            transition_gateway_pass_status(gp_id, "Submitted for Approval", "Submitted for Approval", note or "Submitted for final approval", user()["id"], user()["role"])
+            create_notification(None, "Approver", "Gateway pass pending final approval", f"{row['pass_number']} requires final approval from Approver / MD.", "Gateway Pass", gp_id, "High", ["in_app", "browser_push"], action_label="Review Gateway Pass")
+            create_notification(None, "Admin", "Gateway pass pending final approval", f"{row['pass_number']} requires final approval/oversight.", "Gateway Pass", gp_id, "Important", ["in_app"], action_label="Gateway Pass Management")
+            create_notification(int(row["facility_manager_user_id"]), None, "Gateway pass submitted for final approval", f"{row['pass_number']} was reviewed by Procurement Manager and sent to Approver / MD.", "Gateway Pass", gp_id, "Normal", ["in_app"], action_label="Open Gateway Pass")
+            _notify_auditors("Gateway pass submitted to Approver / MD", f"{row['pass_number']} was submitted for final approval.", "Gateway Pass", gp_id)
+            _rerun_success("Gateway pass submitted to Approver / MD.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        if c1.button("Approve Gateway Pass", type="primary", key=f"gp_approve_cmd_{gp_id}_{role}"):
+            _gateway_approve(gp_id, "Approved", note or "Approved.")
+        if c2.button("Return for Correction", key=f"gp_return_cmd_{gp_id}_{role}"):
+            _gateway_approve(gp_id, "Returned for Correction", note)
+        if c3.button("Reject Gateway Pass", key=f"gp_reject_cmd_{gp_id}_{role}"):
+            _gateway_approve(gp_id, "Rejected", note)
+
+
+def edit_gateway_pass_form(gateway_pass_id: int):
+    if not _assert_gateway_owner(gateway_pass_id):
+        return
+    row_df = df_query("SELECT * FROM gateway_passes WHERE id=?", (gateway_pass_id,))
+    if row_df.empty:
+        st.error("Gateway pass not found."); return
+    row = row_df.iloc[0]
+    if row["status"] not in ["Draft", "Returned for Correction"]:
+        st.info("Only Draft or Returned for Correction passes can be edited."); return
+    st.markdown("#### Edit Gateway Pass")
+    with st.form(f"edit_gateway_pass_cmd_{gateway_pass_id}"):
+        c1, c2, c3 = st.columns(3)
+        dept = c1.selectbox("Department", _gateway_department_options(), index=0, key=f"edit_gp_dept_cmd_{gateway_pass_id}")
+        movement_type = selectbox_with_other("Movement type", GATEWAY_MOVEMENT_TYPES, f"edit_gp_mov_cmd_{gateway_pass_id}", "gateway_movement_type")
+        expected_movement = c3.date_input("Movement date", pd.to_datetime(row["expected_movement_date"] or date.today()).date(), key=f"edit_gp_date_cmd_{gateway_pass_id}")
+        purpose = st.text_area("Purpose", value=row["purpose"] or "", key=f"edit_gp_purpose_cmd_{gateway_pass_id}")
+        c4, c5 = st.columns(2)
+        origin = c4.text_input("Origin", value=row["origin_location"] or "", key=f"edit_gp_origin_cmd_{gateway_pass_id}")
+        destination = c5.text_input("Destination", value=row["destination"] or "", key=f"edit_gp_dest_cmd_{gateway_pass_id}")
+        c6, c7, c8 = st.columns(3)
+        vehicle = c6.text_input("Vehicle number", value=row["vehicle_number"] or "", key=f"edit_gp_vehicle_cmd_{gateway_pass_id}")
+        driver = c7.text_input("Driver name", value=row["driver_name"] or "", key=f"edit_gp_driver_cmd_{gateway_pass_id}")
+        driver_phone = c8.text_input("Driver phone", value=row["driver_phone"] or "", key=f"edit_gp_phone_cmd_{gateway_pass_id}")
+        c9, c10, c11 = st.columns(3)
+        receiver = c9.text_input("Receiver name", value=row["receiver_name"] or "", key=f"edit_gp_receiver_cmd_{gateway_pass_id}")
+        receiver_org = c10.text_input("Receiver organization", value=_series_value(row, "receiver_organization"), key=f"edit_gp_receiver_org_cmd_{gateway_pass_id}")
+        checkpoint = c11.text_input("Security checkpoint", value=row["security_checkpoint"] or "", key=f"edit_gp_check_cmd_{gateway_pass_id}")
+        return_tab, security_tab = st.tabs(["Return Date", "Security Verification"])
+        with return_tab:
+            st.caption("Return-date details stay editable until this gateway pass is submitted.")
+            expected_return = st.date_input(
+                "Expected return date",
+                value=_date_or_default(row.get("expected_return_date"), expected_movement + timedelta(days=1)),
+                min_value=expected_movement,
+                key=f"edit_gp_return_date_cmd_{gateway_pass_id}",
+            )
+            actual_return_applies = st.checkbox("Actual return date available", value=bool(_series_value(row, "actual_return_date")), key=f"edit_gp_actual_return_applies_cmd_{gateway_pass_id}")
+            actual_return = st.date_input("Actual return date", value=_date_or_default(row.get("actual_return_date"), date.today()), key=f"edit_gp_actual_return_date_cmd_{gateway_pass_id}", disabled=not actual_return_applies)
+        with security_tab:
+            s1, s2 = st.columns(2)
+            security_officer = s1.text_input("Security Officer Name", value=_series_value(row, "security_officer_name"), key=f"edit_gp_security_officer_cmd_{gateway_pass_id}")
+            gate_time = s2.text_input("Gate Verification Time", value=_series_value(row, "gate_verification_time"), placeholder="e.g. 04:30 PM", key=f"edit_gp_gate_time_cmd_{gateway_pass_id}")
+            s3, s4 = st.columns(2)
+            exit_entry = s3.text_input("Exit / Entry Confirmation", value=_series_value(row, "exit_entry_confirmation"), placeholder="e.g. Exit confirmed", key=f"edit_gp_exit_entry_cmd_{gateway_pass_id}")
+            security_signature = s4.text_input("Security Signature / Name", value=_series_value(row, "security_signature"), key=f"edit_gp_security_signature_cmd_{gateway_pass_id}")
+        submitted = st.form_submit_button("Save Gateway Pass Details")
+    if submitted:
+        run_query(
+            """
+            UPDATE gateway_passes
+            SET department=?, movement_type=?, purpose=?, origin_location=?, destination=?,
+                expected_movement_date=?, expected_return_date=?, actual_return_date=?,
+                vehicle_number=?, driver_name=?, driver_phone=?, receiver_name=?,
+                receiver_organization=?, security_checkpoint=?, security_officer_name=?,
+                gate_verification_time=?, exit_entry_confirmation=?, security_signature=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                dept, movement_type, purpose, origin, destination, expected_movement.isoformat(),
+                expected_return.isoformat(), actual_return.isoformat() if actual_return_applies else None,
+                vehicle, driver, driver_phone, receiver, receiver_org, checkpoint,
+                security_officer.strip() or None, gate_time.strip() or None,
+                exit_entry.strip() or None, security_signature.strip() or None,
+                now_iso(), gateway_pass_id,
+            ),
+        )
+        log_gateway_event(gateway_pass_id, "Gateway Pass Edited", row["status"], "Details updated")
+        _rerun_success("Gateway pass details updated.")
+    # Reuse existing item editing for stored lines, but new-line add uses unique stable keys.
+    items = gateway_pass_items_df(gateway_pass_id)
+    if not items.empty:
+        st.markdown("#### Existing Item Lines")
+        dataframe(items)
+    with st.form(f"add_gp_item_cmd_{gateway_pass_id}"):
+        st.markdown("##### Add item line")
+        c1, c2, c3 = st.columns(3)
+        desc = c1.text_input("Item description", key=f"add_item_desc_cmd_{gateway_pass_id}")
+        category = c2.text_input("Item category", key=f"add_item_cat_cmd_{gateway_pass_id}")
+        qty = c3.number_input("Quantity", min_value=0.01, value=1.0, step=1.0, key=f"add_item_qty_cmd_{gateway_pass_id}")
+        c4, c5, c6, c7 = st.columns(4)
+        unit = selectbox_with_other("Unit", GATEWAY_UOMS, f"add_item_unit_cmd_{gateway_pass_id}", "gateway_uom")
+        quality = selectbox_with_other("Quality / condition", GATEWAY_QUALITY_OPTIONS, f"add_item_quality_cmd_{gateway_pass_id}", "gateway_quality")
+        fragile = c6.selectbox("Fragility", GATEWAY_FRAGILITY_OPTIONS, key=f"add_item_fragile_cmd_{gateway_pass_id}")
+        colour = c7.text_input("Colour", key=f"add_item_colour_cmd_{gateway_pass_id}")
+        handling = st.text_input("Handling instruction", key=f"add_item_handling_cmd_{gateway_pass_id}")
+        remarks = st.text_input("Remarks", key=f"add_item_remarks_cmd_{gateway_pass_id}")
+        add_item = st.form_submit_button("Add Item")
+    if add_item:
+        if not desc.strip() or qty <= 0 or not unit.strip() or unit == "Other":
+            st.error("Description, quantity greater than 0, and a valid unit are required.")
+        else:
+            run_query("INSERT INTO gateway_pass_items (gateway_pass_id, item_description, item_category, quantity, unit_of_measure, quality_condition, fragility_status, colour, handling_instruction, remarks, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (gateway_pass_id, desc, category, qty, unit, quality, fragile, colour, handling, remarks, now_iso()))
+            log_gateway_event(gateway_pass_id, "Gateway Pass Item Added", row["status"], desc)
+            st.rerun()
+
+
+def _fmt_clean_date(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    try:
+        return pd.to_datetime(value).strftime("%d %B %Y")
+    except Exception:
+        return str(value)[:10]
+
+
+def generate_gateway_pass_document(gateway_pass_id: int) -> str | None:
+    if user()["role"] == "Facility Manager" and not _assert_gateway_owner(gateway_pass_id):
+        return None
+    gp = gateway_pass_summary_df("gp.id=?", (gateway_pass_id,))
+    if gp.empty:
+        st.error("Gateway pass not found."); return None
+    row = gp.iloc[0]
+    if row["status"] not in ["Approved", "Generated", "Downloaded", "Completed"]:
+        st.error("Generate is disabled until the gateway pass is approved by Admin or Approver / MD."); return None
+    items = gateway_pass_items_df(gateway_pass_id)
+    if items.empty:
+        st.error("Cannot generate a gateway pass without item lines."); return None
+
+    def _ptext(value: Any, default: str = "") -> str:
+        return escape(_clean(value, default)).replace("\n", "<br/>")
+
+    def _first_item_text(key: str, default: str = "") -> str:
+        if items.empty:
+            return default
+        return _clean(items.iloc[0].get(key), default)
+
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, KeepTogether
+
+        out_dir = Path("data/attachments/gateway_passes")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{str(row['pass_number']).replace('/', '_')}.pdf"
+        doc = SimpleDocTemplate(str(path), pagesize=A4, rightMargin=16*mm, leftMargin=16*mm, topMargin=12*mm, bottomMargin=12*mm)
+        styles = getSampleStyleSheet()
+        normal = ParagraphStyle("gp_normal_template", parent=styles["Normal"], fontName="Helvetica", fontSize=9.2, leading=13, spaceAfter=4)
+        body = ParagraphStyle("gp_body_template", parent=normal, fontSize=10.2, leading=15)
+        title_style = ParagraphStyle("gp_title_template", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=14.5, leading=17, alignment=1, textColor=colors.black, spaceAfter=1)
+        sub_style = ParagraphStyle("gp_sub_template", parent=title_style, fontSize=13, leading=15)
+        motto_style = ParagraphStyle("gp_motto_template", parent=normal, fontName="Helvetica-BoldOblique", fontSize=8.8, leading=11, alignment=1)
+        section_style = ParagraphStyle("gp_section_template", parent=styles["Heading3"], fontName="Helvetica-Bold", fontSize=10.8, leading=13, spaceBefore=8, spaceAfter=5, textColor=colors.black)
+        small = ParagraphStyle("gp_small_template", parent=normal, fontSize=7.8, leading=9.5)
+        cell = ParagraphStyle("gp_cell_template", parent=normal, fontSize=7.2, leading=8.6)
+
+        story = []
+        cmotd_path = _gateway_asset_path("cmotd_logo.png")
+        rsu_path = _gateway_asset_path("rsu_logo.png")
+        left_logo = Image(str(cmotd_path), width=22*mm, height=20*mm) if cmotd_path.exists() else Paragraph("CMOTD", normal)
+        right_logo = Image(str(rsu_path), width=21*mm, height=20*mm) if rsu_path.exists() else Paragraph("RSU", normal)
+        header_mid = [
+            Paragraph("Center For Marine and Offshore Technology Development (CMOTD)", title_style),
+            Paragraph("Consultancy Services Unit, Rivers State University", sub_style),
+            Paragraph("Where Theory becomes Reality and Individuals are Equipped to Lead in the Industry!", motto_style),
+        ]
+        header = Table([[left_logo, header_mid, right_logo]], colWidths=[25*mm, 128*mm, 25*mm])
+        header.setStyle(TableStyle([
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("ALIGN", (0,0), (0,0), "LEFT"),
+            ("ALIGN", (2,0), (2,0), "RIGHT"),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+        ]))
+        story.append(header)
+        story.append(Spacer(1, 7))
+        story.append(Paragraph("PROPERTY MOVEMENT GATE PASS", section_style))
+
+        ref_table = Table([
+            [Paragraph("<b>Reference No.:</b>", normal), Paragraph(_ptext(row.get("pass_number")), normal)],
+            [Paragraph("<b>Date:</b>", normal), Paragraph(_fmt_clean_date(row.get("approved_at")) or date.today().strftime("%d %B %Y"), normal)],
+            [Paragraph("<b>Department:</b>", normal), Paragraph(_ptext(row.get("department")), normal)],
+            [Paragraph("<b>Movement Type:</b>", normal), Paragraph(_ptext(row.get("movement_type")), normal)],
+            [Paragraph("<b>Movement Date:</b>", normal), Paragraph(_fmt_clean_date(row.get("expected_movement_date")), normal)],
+            [Paragraph("<b>Return Date:</b>", normal), Paragraph(_fmt_clean_date(row.get("expected_return_date")), normal)],
+            [Paragraph("<b>Actual Return Date:</b>", normal), Paragraph(_fmt_clean_date(row.get("actual_return_date")), normal)],
+            [Paragraph("<b>Origin:</b>", normal), Paragraph(_ptext(row.get("origin_location"), "N/A"), normal)],
+            [Paragraph("<b>Destination:</b>", normal), Paragraph(_ptext(row.get("destination"), "N/A"), normal)],
+        ], colWidths=[33*mm, 145*mm])
+        ref_table.setStyle(TableStyle([
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("LEFTPADDING", (0,0), (-1,-1), 0),
+            ("RIGHTPADDING", (0,0), (-1,-1), 3),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ]))
+        story.append(ref_table)
+        story.append(Spacer(1, 4))
+        story.append(Paragraph("This Gate Pass serves as official authorization for the movement of the underlisted company asset(s) from the premises of the Centre for Marine and Offshore Technology Development (CMOTD).", body))
+
+        story.append(Paragraph("PROPERTY DETAILS", section_style))
+        if len(items) == 1:
+            item_text = _first_item_text("item_description", "listed company asset")
+            quantity_text = f"{_qty_text(_first_item_text('quantity', '0'))} {_first_item_text('unit_of_measure', '')}".strip()
+            prop_rows = [
+                [Paragraph("Item Description:", normal), Paragraph(_ptext(item_text), normal)],
+                [Paragraph("Colour:", normal), Paragraph(_ptext(_first_item_text("colour", "N/A")), normal)],
+                [Paragraph("Quantity:", normal), Paragraph(_ptext(quantity_text), normal)],
+                [Paragraph("Condition:", normal), Paragraph(_ptext(_first_item_text("quality_condition", "N/A")), normal)],
+            ]
+            prop_table = Table(prop_rows, colWidths=[32*mm, 146*mm])
+            prop_table.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP"), ("LEFTPADDING", (0,0), (-1,-1), 0), ("BOTTOMPADDING", (0,0), (-1,-1), 6)]))
+            story.append(prop_table)
+        else:
+            story.append(Paragraph(f"Item Description: {len(items)} listed item lines. Full details are shown below.", normal))
+
+        data = [[Paragraph("No.", cell), Paragraph("Item Description", cell), Paragraph("Colour", cell), Paragraph("Qty", cell), Paragraph("Unit", cell), Paragraph("Condition", cell), Paragraph("Serial / Asset Tag", cell), Paragraph("Remarks", cell)]]
+        for idx, it in enumerate(items.itertuples(), 1):
+            data.append([
+                str(idx), Paragraph(_ptext(getattr(it, "item_description", "")), cell), _clean(getattr(it, "colour", ""), "-"), _qty_text(getattr(it, "quantity", "")), _clean(getattr(it, "unit_of_measure", ""), "-"),
+                _clean(getattr(it, "quality_condition", ""), "-"), Paragraph(_ptext(" / ".join([x for x in [_clean(getattr(it, "serial_number", "")), _clean(getattr(it, "asset_tag", ""))] if x]) or "-"), cell), Paragraph(_ptext(getattr(it, "remarks", "") or getattr(it, "handling_instruction", "") or "-"), cell)
+            ])
+        item_table = Table(data, colWidths=[8*mm, 51*mm, 19*mm, 12*mm, 17*mm, 23*mm, 27*mm, 21*mm], repeatRows=1)
+        item_table.setStyle(TableStyle([
+            ("GRID", (0,0), (-1,-1), .25, colors.grey),
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#f1f5f9")),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,-1), 7),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("PADDING", (0,0), (-1,-1), 3),
+        ]))
+        story.append(item_table)
+
+        story.append(Paragraph("PURPOSE OF MOVEMENT", section_style))
+        purpose_sentence = row.get("purpose") or "movement as approved by Management"
+        story.append(Paragraph(f"The above-mentioned asset(s) is/are being moved for {escape(str(purpose_sentence))}. Security personnel are hereby requested to permit the approved movement.", body))
+
+        story.append(Paragraph("TRANSPORT DETAILS", section_style))
+        line_style = TableStyle([
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("LEFTPADDING", (0,0), (-1,-1), 0),
+            ("RIGHTPADDING", (0,0), (-1,-1), 3),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 7),
+            ("LINEBELOW", (1,0), (1,-1), .55, colors.black),
+            ("LINEBELOW", (3,0), (3,-1), .55, colors.black),
+        ])
+        transport = [
+            [Paragraph("Driver's Name:", normal), Paragraph(_ptext(row.get("driver_name")), normal), Paragraph("Driver's Phone Number:", normal), Paragraph(_ptext(row.get("driver_phone")), normal)],
+            [Paragraph("Vehicle Number:", normal), Paragraph(_ptext(row.get("vehicle_number")), normal), Paragraph("Receiver Name:", normal), Paragraph(_ptext(row.get("receiver_name")), normal)],
+        ]
+        story.append(Table(transport, colWidths=[33*mm, 55*mm, 42*mm, 48*mm], style=line_style))
+
+        story.append(Paragraph("AUTHORIZATION", section_style))
+        story.append(Paragraph("I hereby certify that the movement of the above company property has been duly approved and authorized.", body))
+        auth = [
+            [Paragraph("Authorizing Officer:", normal), Paragraph(_ptext(row.get("approved_by")), normal), Paragraph("Designation:", normal), Paragraph(_ptext(display_role(row.get("approved_by_role"))), normal)],
+            [Paragraph("Signature:", normal), Paragraph("", normal), Paragraph("Date:", normal), Paragraph(_fmt_clean_date(row.get("approved_at")), normal)],
+        ]
+        story.append(Table(auth, colWidths=[35*mm, 54*mm, 27*mm, 62*mm], style=line_style))
+
+        story.append(Paragraph("SECURITY VERIFICATION", section_style))
+        security = [
+            [Paragraph("Security Officer Name:", normal), Paragraph(_ptext(row.get("security_officer_name")), normal), Paragraph("Gate Verification Time:", normal), Paragraph(_ptext(row.get("gate_verification_time")), normal)],
+            [Paragraph("Exit / Entry Confirmation:", normal), Paragraph(_ptext(row.get("exit_entry_confirmation")), normal), Paragraph("Security Signature:", normal), Paragraph(_ptext(row.get("security_signature")), normal)],
+        ]
+        story.append(Table(security, colWidths=[42*mm, 46*mm, 44*mm, 46*mm], style=line_style))
+        story.append(Spacer(1, 7))
+        story.append(Paragraph("Consultancy Unit, Rivers State University, Nkpolu-Oroworokwo, Port Harcourt, Rivers State", ParagraphStyle("gp_footer_addr", parent=normal, alignment=1, fontSize=8)))
+        story.append(Paragraph("Email: info@cmotd.org &nbsp;&nbsp; Phone NO.: +2349163505000", ParagraphStyle("gp_footer_contact", parent=normal, alignment=1, fontSize=8)))
+        doc.build(story)
+        run_query("UPDATE gateway_passes SET status='Generated', next_role=NULL, generated_at=?, generated_file_path=?, updated_at=? WHERE id=?", (now_iso(), str(path), now_iso(), gateway_pass_id))
+        log_gateway_event(gateway_pass_id, "Gateway Pass Generated", "Generated", str(path))
+        log_audit("GATEWAY_PASS_GENERATED", "Gateway Pass", gateway_pass_id, str(path), user()["id"], user()["role"])
+        return str(path)
+    except Exception as exc:
+        st.error(f"Could not generate PDF gateway pass: {exc}")
+        return None
+
+def gateway_pass_register(where_sql: str, params: tuple | list, title: str, allow_submit: bool = False, allow_generate: bool = False, key_prefix: str = "gp_register"):
+    st.subheader(title)
+    df = gateway_pass_summary_df(where_sql, params)
+    if df.empty:
+        empty_state("No gateway passes", "Gateway pass records will appear here."); return
+    show_cols = ["id", "pass_number", "facility_manager", "department", "movement_type", "destination", "expected_movement_date", "status", "approved_by", "updated_at"]
+    show = df[[c for c in show_cols if c in df.columns]].copy()
+    dataframe(show.drop(columns=["id"]) if "id" in show.columns else show)
+    selected = st.selectbox("Open gateway pass", [f"{r.pass_number} — {r.status} — #{int(r.id)}" for r in df.itertuples()], key=f"{key_prefix}_select_cmd")
+    gp_id = int(selected.rsplit("#", 1)[1])
+    row = df[df["id"] == gp_id].iloc[0]
+    gateway_pass_detail(gp_id)
+    if _is_utility() and row["status"] in ["Draft", "Returned for Correction"]:
+        edit_gateway_pass_form(gp_id)
+    if _is_utility() and row["status"] in ["Approved", "Generated", "Downloaded", "Completed"]:
+        gateway_pass_return_security_form(gp_id, key_prefix=f"{key_prefix}_return_security")
+    events = df_query("SELECT event, status, note, user_id, created_at FROM gateway_pass_events WHERE gateway_pass_id=? ORDER BY created_at DESC", (gp_id,))
+    with st.expander("Gateway pass history", expanded=False):
+        dataframe(events) if not events.empty else st.info("No events yet.")
+    if allow_submit and row["status"] in ["Draft", "Returned for Correction"]:
+        c1, c2 = st.columns(2)
+        if c1.button("Send to Procurement Manager", type="primary", key=f"{key_prefix}_submit_cmd_{gp_id}"):
+            submit_gateway_pass(gp_id)
+        if c2.button("Delete draft", key=f"{key_prefix}_delete_cmd_{gp_id}"):
+            if can_delete_draft(user()["role"], int(row.get("facility_manager_user_id") or 0), user()["id"], row["status"]):
+                run_query("DELETE FROM gateway_pass_items WHERE gateway_pass_id=?", (gp_id,)); run_query("DELETE FROM gateway_passes WHERE id=?", (gp_id,))
+                log_audit("DRAFT_DELETED", "Gateway Pass", gp_id, row.get("pass_number"), user()["id"], user()["role"], before_values={"status": row["status"]})
+                _rerun_success("Gateway pass draft deleted.")
+            else:
+                st.error("Only your own unsubmitted gateway pass draft can be deleted.")
+    if allow_generate:
+        ready = row["status"] in ["Approved", "Generated", "Downloaded", "Completed"]
+        if ready:
+            render_gateway_pass_preview(gp_id)
+        else:
+            st.info("The final preview and Generate button unlock after final approval by Admin or Approver / MD.")
+        if row["status"] == "Approved":
+            if st.button("Generate Final Gateway Pass PDF", type="primary", key=f"{key_prefix}_generate_cmd_{gp_id}"):
+                path = generate_gateway_pass_document(gp_id)
+                if path:
+                    # Do not write directly to the active radio widget key.
+                    # The Facility page applies this pending destination before
+                    # rendering its navigation on the next run.
+                    if _is_utility():
+                        st.session_state["facility_gp_pending_section"] = "History"
+                    st.session_state["pf_flash_success"] = "Gateway pass PDF generated. It is available in History for preview and download."
+                    st.rerun()
+        elif ready:
+            st.success("Gateway pass PDF has already been generated. Use the download button below.")
+        refreshed_df = gateway_pass_summary_df("gp.id=?", (gp_id,))
+        if not refreshed_df.empty:
+            refreshed = refreshed_df.iloc[0]
+            if refreshed["status"] in ["Generated", "Downloaded", "Completed"] or refreshed.get("generated_file_path"):
+                st.markdown("#### Download")
+                gateway_pass_download_button(refreshed)
+
+
+def facility_gateway_pass_page():
+    uid = int(user()["id"])
+    ready_count = int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE facility_manager_user_id=? AND status='Approved'", (uid,)).iloc[0, 0])
+    returned_count = int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE facility_manager_user_id=? AND status IN ('Returned for Correction','Returned')", (uid,)).iloc[0, 0])
+    sections = ["Create Draft", "Drafts / Returned", "Ready to Generate", "History"]
+    # A generation action changes the pass status from Approved to Generated.
+    # Apply the target before this radio is instantiated so Streamlit never
+    # raises a session-state error and the generated pass remains visible.
+    pending_section = st.session_state.pop("facility_gp_pending_section", None)
+    if pending_section in sections:
+        st.session_state["facility_gp_sections_cmd"] = pending_section
+    # When an approval routes back to the Facility Head, land on the unlocked
+    # generation queue instead of leaving the user on Create Draft.
+    if ready_count and st.session_state.get("facility_gp_sections_cmd") in (None, "Create Draft"):
+        st.session_state["facility_gp_sections_cmd"] = "Ready to Generate"
+    section = st.radio("Gateway Pass", sections, horizontal=True, key="facility_gp_sections_cmd")
+    if ready_count:
+        st.success(f"{ready_count} gateway pass(es) are approved and ready to generate.")
+    if returned_count:
+        st.warning(f"{returned_count} gateway pass(es) were returned for correction.")
+    if section == "Create Draft":
+        create_gateway_pass_form()
+    elif section == "Drafts / Returned":
+        gateway_pass_register("gp.facility_manager_user_id=? AND gp.status IN ('Draft','Returned for Correction','Returned')", (uid,), "Drafts / Returned", allow_submit=True, key_prefix="facility_gp_drafts_cmd")
+    elif section == "Ready to Generate":
+        # Ready queue must contain only approved, not already generated/downloaded.
+        # Generated items leave this queue and remain available under History.
+        gateway_pass_register("gp.facility_manager_user_id=? AND gp.status='Approved'", (uid,), "Approved Gateway Passes Ready to Generate", allow_generate=True, key_prefix="facility_gp_ready_cmd")
+    else:
+        gateway_pass_register("gp.facility_manager_user_id=?", (uid,), "Gateway Pass History", allow_generate=True, key_prefix="facility_gp_history_cmd")
+
+
+def finance_ready_df() -> pd.DataFrame:
+    req = df_query(
+        """
+        SELECT 'Purchase Request' entity_type, pr.id entity_id, pr.request_no "Request number", '' "PO number", '' Vendor,
+               pr.department_project Department, pr.category Category, pr.estimated_amount Amount,
+               COALESCE(ah.approved_by_role, pr.approved_by_role) "Approved by", COALESCE(pr.approved_at, ah.created_at) "Approval date",
+               COALESCE(pr.payment_status,'Approved for Payment') "Current payment status", 'Mark paid; record receipt separately' "Required finance action"
+        FROM purchase_requests pr
+        LEFT JOIN approval_history ah ON ah.entity_type='Purchase Request' AND ah.entity_id=pr.id AND ah.status_after='Approved'
+        WHERE (pr.next_role='finance' OR pr.status IN ('Approved','Awaiting Payment','Approved for Payment') OR pr.payment_status='Approved for Payment')
+          AND pr.status NOT IN ('Paid','Completed','Closed','Rejected')
+        ORDER BY COALESCE(pr.approved_at, pr.updated_at, pr.created_at) DESC
+        """
+    )
+    po = df_query(
+        """
+        SELECT 'Purchase Order' entity_type, po.id entity_id, COALESCE(pr.request_no,'') "Request number", po.po_no "PO number", COALESCE(v.name,'') Vendor,
+               COALESCE(pr.department_project,'') Department, COALESCE(pr.category,'') Category, po.total_amount Amount,
+               COALESCE(u.full_name, po.approved_by_role) "Approved by", po.updated_at "Approval date",
+               COALESCE(po.payment_status,'Unpaid') "Current payment status", 'Mark paid; record receipt separately' "Required finance action"
+        FROM purchase_orders po
+        LEFT JOIN purchase_requests pr ON pr.id=po.request_id
+        LEFT JOIN vendors v ON v.id=po.vendor_id
+        LEFT JOIN users u ON u.id=po.approved_by
+        WHERE po.status='Approved' AND COALESCE(po.payment_status,'Unpaid') NOT IN ('Paid')
+        ORDER BY po.updated_at DESC
+        """
+    )
+    return pd.concat([req, po], ignore_index=True) if not req.empty or not po.empty else pd.DataFrame()
+
+
+def approved_for_payment_page():
+    st.subheader("Approved for Payment")
+    st.caption("Finance sees only items already approved through the authorized workflow. Mark the payment as paid here, then record or upload the receipt separately under Finance → Receipts.")
+    if not can_pay(_current_role()):
+        st.warning("Only Finance/Admin can record payments."); return
+    df = finance_ready_df()
+    if df.empty:
+        empty_state("No approved payment items", "Approved requests and POs will appear here after final approval.")
+        return
+    display = df.copy(); display["Amount"] = display["Amount"].apply(money)
+    dataframe(display)
+    selected = st.selectbox("Open finance item", [f"{r.entity_type} | {getattr(r, 'Request_number', '')} | #{int(r.entity_id)}" for r in df.rename(columns={"Request number":"Request_number"}).itertuples()], key="finance_ready_select_cmd")
+    entity_id = int(selected.rsplit("#", 1)[1]); entity_type = selected.split(" | ", 1)[0]
+    row = df[(df["entity_id"] == entity_id) & (df["entity_type"] == entity_type)].iloc[0]
+    note = st.text_area("Finance note", key=f"finance_note_cmd_{entity_type}_{entity_id}")
+    method = st.selectbox("Payment method", RECEIPT_PAYMENT_METHODS if "RECEIPT_PAYMENT_METHODS" in globals() else PAYMENT_METHODS, key=f"finance_method_cmd_{entity_type}_{entity_id}")
+    st.info("After marking this item paid, use Finance → Receipts to enter or upload the receipt separately.")
+    c1, c2 = st.columns(2)
+    if c1.button("Mark Paid", type="primary", key=f"finance_paid_cmd_{entity_type}_{entity_id}"):
+        # Backend-only payee readiness guard. It does not add any Finance
+        # screen/control: it verifies a requester-confirmed recipient as part
+        # of the existing authorized payment action, or blocks only records
+        # explicitly marked with pending/rejected recipient details.
+        linked_po_for_payee = None
+        request_id_for_payee = entity_id if entity_type == "Purchase Request" else None
+        if entity_type != "Purchase Request":
+            po_rows_for_payee = df_query("SELECT * FROM purchase_orders WHERE id=?", (entity_id,))
+            linked_po_for_payee = po_rows_for_payee.iloc[0] if not po_rows_for_payee.empty else None
+            request_id_for_payee = int(linked_po_for_payee.get("request_id") or 0) if linked_po_for_payee is not None else None
+        try:
+            from services.payee_service import PaymentPayeeNotReadyError, assert_request_payee_payment_ready
+            assert_request_payee_payment_ready(request_id_for_payee, int(user()["id"]), str(user()["role"]))
+        except PaymentPayeeNotReadyError as exc:
+            st.error(str(exc)); return
+        amount = float(row["Amount"] or 0)
+        pno = make_ref("PAY")
+        if entity_type == "Purchase Request":
+            pay_id = run_insert(
+                "INSERT INTO payments (payment_no, request_id, amount, payment_method, payment_date, status, paid_by, notes, created_by, created_at, updated_at, next_role) VALUES (?, ?, ?, ?, ?, 'Paid', ?, ?, ?, ?, ?, 'auditor')",
+                (pno, entity_id, amount, method, date.today().isoformat(), user()["id"], note, user()["id"], now_iso(), now_iso()),
+            )
+            transition_request_status(entity_id, "Paid", "Payment Completed", note or "Finance marked payment as paid.", user()["id"], user()["role"], payment_status="Paid")
+            run_query(
+                "UPDATE purchase_requests SET next_role='procurement_manager', paid_at=COALESCE(paid_at, ?) WHERE id=?",
+                (now_iso(), entity_id),
+            )
+            create_notification(None, "Procurement Manager", "Paid request ready for closure", f"{row.get('Request number') or 'A request'} has been marked paid. Finance will record the receipt separately.", "Purchase Request", entity_id, "High", ["in_app", "browser_push"], action_label="Post-Payment Closure")
+            _notify_auditors("Payment marked paid", f"{row.get('Request number') or 'A request'} was marked paid by Finance and sent to Procurement Manager for closure.", "Purchase Request", entity_id)
+        else:
+            po = linked_po_for_payee if linked_po_for_payee is not None else df_query("SELECT * FROM purchase_orders WHERE id=?", (entity_id,)).iloc[0]
+            pay_id = run_insert(
+                "INSERT INTO payments (payment_no, po_id, vendor_id, amount, payment_method, payment_date, status, paid_by, notes, created_by, created_at, updated_at, next_role) VALUES (?, ?, ?, ?, ?, ?, 'Paid', ?, ?, ?, ?, ?, 'auditor')",
+                (pno, entity_id, po.get("vendor_id"), amount, method, date.today().isoformat(), user()["id"], note, user()["id"], now_iso(), now_iso()),
+            )
+            run_query("UPDATE purchase_orders SET payment_status='Paid', status='Paid', updated_at=? WHERE id=?", (now_iso(), entity_id))
+            if po.get("request_id"):
+                transition_request_status(int(po["request_id"]), "Paid", "Payment Completed", note or "Finance marked PO payment as paid.", user()["id"], user()["role"], payment_status="Paid")
+                run_query(
+                    "UPDATE purchase_requests SET next_role='procurement_manager', paid_at=COALESCE(paid_at, ?) WHERE id=?",
+                    (now_iso(), int(po["request_id"])),
+                )
+                create_notification(None, "Procurement Manager", "Paid request ready for closure", "A PO-linked request has been marked paid. Finance will record the receipt separately.", "Purchase Request", int(po["request_id"]), "High", ["in_app", "browser_push"], action_label="Post-Payment Closure")
+                _notify_auditors("Payment marked paid", "A PO-linked request was marked paid by Finance and sent to Procurement Manager for closure.", "Purchase Request", int(po["request_id"]))
+        log_audit(
+            "PAYMENT_MARKED_PAID",
+            entity_type,
+            entity_id,
+            {"payment_no": pno, "amount": amount, "receipt_pending": True},
+            user()["id"],
+            user()["role"],
+            after_values={"status": "Paid", "next_role": "procurement_manager", "receipt_status": "Pending Receipt"},
+        )
+        _rerun_success("Payment marked paid. Record or upload the receipt separately under Finance → Receipts.")
+    if c2.button("Add finance note only", key=f"finance_note_only_cmd_{entity_type}_{entity_id}"):
+        if entity_type == "Purchase Request":
+            run_query("UPDATE purchase_requests SET finance_note=?, updated_at=? WHERE id=?", (note, now_iso(), entity_id))
+        else:
+            add_workflow_event("Purchase Order", entity_id, "Finance Note Added", None, note, user()["id"])
+        log_audit("FINANCE_NOTE_ADDED", entity_type, entity_id, note, user()["id"], user()["role"])
+        st.success("Finance note saved.")
+
+
+def payments_page():
+    st.subheader("Payments")
+    _ensure_finance_doc_schema_ui()
+    role = _current_role()
+    if role == "Finance":
+        st.info("Finance cannot create or approve payment requests. Finance can only pay approved items and upload receipts.")
+    df = df_query("SELECT p.id, p.payment_no, v.name vendor, p.amount, p.payment_method, p.payment_date, p.status, p.notes, p.proof_path, p.finance_note FROM payments p LEFT JOIN vendors v ON p.vendor_id=v.id ORDER BY p.created_at DESC")
+    if not df.empty:
+        show = df.drop(columns=["id"]).copy(); show["amount"] = show["amount"].apply(money); dataframe(show); csv_download(show, "payments")
+    else:
+        st.info("No payment records yet.")
+    if can_create_payment_request(role):
+        st.markdown("##### Manual Payment Request")
+        with st.form("manual_payment_cmd"):
+            vendors = vendor_options(False)
+            v = st.selectbox("Vendor", list(vendors.keys()), key="manual_pay_vendor_cmd")
+            amount = st.number_input("Amount", min_value=0.0, step=1000.0, key="manual_pay_amount_cmd")
+            method = st.selectbox("Method", RECEIPT_PAYMENT_METHODS if "RECEIPT_PAYMENT_METHODS" in globals() else PAYMENT_METHODS, key="manual_pay_method_cmd")
+            notes = st.text_area("Notes", key="manual_pay_notes_cmd")
+            submitted = st.form_submit_button("Create Payment Request")
+        if submitted:
+            pno = make_ref("PAY")
+            pay_id = run_insert("INSERT INTO payments (payment_no, vendor_id, amount, payment_method, status, notes, created_by, created_at, updated_at, next_role) VALUES (?, ?, ?, ?, 'Pending Approval', ?, ?, ?, ?, 'approver')", (pno, vendors[v], amount, method, notes, user()["id"], now_iso(), now_iso()))
+            add_workflow_event("Payment", pay_id, "Created", "Pending Approval", pno, user()["id"])
+            create_notification(None, "Approver", "Payment pending approval", f"{pno} requires approval", "Payment", pay_id, "High", ["in_app", "browser_push"])
+            _rerun_success("Payment request created.")
+    if not df.empty and can_approve(role):
+        selected = st.selectbox("Approve payment request", df["payment_no"].tolist(), key="payment_select_cmd")
+        row = df[df["payment_no"] == selected].iloc[0]
+        finance_note = st.text_area("Approval note", key=f"payment_note_cmd_{int(row['id'])}")
+        c1, c2 = st.columns(2)
+        if row["status"] == "Pending Approval" and c1.button("Approve Payment", key=f"pay_approve_cmd_{int(row['id'])}"):
+            from core.db import transition_payment_status
+            transition_payment_status(int(row["id"]), "Approved", finance_note or "Payment approved.", user()["id"], role)
+            _rerun_success("Payment request approved.")
+        if row["status"] == "Pending Approval" and c2.button("Reject Payment", key=f"pay_reject_cmd_{int(row['id'])}"):
+            from core.db import transition_payment_status
+            transition_payment_status(int(row["id"]), "Rejected", finance_note or "Payment rejected.", user()["id"], role)
+            _rerun_success("Payment request rejected.")
+
+
+def invoices_page():
+    # Preserve the original invoice register behavior where possible, but remove Finance payment-request creation.
+    st.subheader("Invoices")
+    st.caption("Finance can upload/review invoices. Finance cannot create payment approval requests from invoices.")
+    df = df_query("""
+        SELECT inv.id, inv.invoice_no, inv.invoice_type, po.po_no, v.name vendor, inv.invoice_date, inv.due_date, inv.total_amount, inv.balance_due, inv.match_status, inv.mismatch_reasons, inv.status
+        FROM invoices inv LEFT JOIN purchase_orders po ON inv.po_id=po.id LEFT JOIN vendors v ON inv.vendor_id=v.id ORDER BY inv.created_at DESC
+    """)
+    if df.empty:
+        st.info("No invoices yet. Use the OCR/import pages to upload supplier invoices."); return
+    show = df.drop(columns=["id"]).copy(); show["total_amount"] = show["total_amount"].apply(money); show["balance_due"] = show["balance_due"].apply(money); dataframe(show)
+    selected = st.selectbox("Select invoice", [f"{r.invoice_no} — {r.status} — #{int(r.id)}" for r in df.itertuples()], key="invoice_select_cmd_restricted")
+    inv_id = int(selected.rsplit("#", 1)[1])
+    inv = df_query("SELECT * FROM invoices WHERE id=?", (inv_id,)).iloc[0]
+    dataframe(_redact_ui_df(pd.DataFrame([inv.to_dict()]), "invoices"))
+    if has_permission("review_invoice"):
+        c1, c2 = st.columns(2)
+        if c1.button("Mark Finance Review Complete", key=f"invoice_reviewed_cmd_{inv_id}"):
+            run_query("UPDATE invoices SET status='Finance Review', approval_status='Reviewed' WHERE id=?", (inv_id,)); add_workflow_event("Invoice", inv_id, "Finance Review", "Finance Review", "Invoice reviewed", user()["id"]); st.rerun()
+        if c2.button("Return Invoice", key=f"invoice_return_cmd_{inv_id}"):
+            run_query("UPDATE invoices SET status='Returned', approval_status='Returned' WHERE id=?", (inv_id,)); add_workflow_event("Invoice", inv_id, "Returned", "Returned", "Invoice returned for clarification", user()["id"]); st.rerun()
+    if can_create_payment_request(_current_role()):
+        if st.button("Create Payment Request for Approval", key=f"invoice_payment_request_cmd_{inv_id}"):
+            pno = make_ref("PAY")
+            pay_id = run_insert("INSERT INTO payments (payment_no, invoice_id, po_id, vendor_id, amount, payment_method, status, created_by, created_at, updated_at, next_role) SELECT ?, id, po_id, vendor_id, total_amount, 'Bank Transfer', 'Pending Approval', ?, ?, ?, 'approver' FROM invoices WHERE id=?", (pno, user()["id"], now_iso(), now_iso(), inv_id))
+            create_notification(None, "Approver", "Payment pending approval", f"{pno} requires approval", "Payment", pay_id, "High", ["in_app", "browser_push"])
+            add_workflow_event("Payment", pay_id, "Created from Invoice", "Pending Approval", pno, user()["id"])
+            st.success(f"Payment request {pno} created.")
+    csv_download(show, "invoices")
+
+
+def finance_dashboard():
+    st.subheader("Finance Attention Center")
+    metric_row([
+        ("Awaiting Payment", int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE next_role='finance' OR status IN ('Approved','Awaiting Payment','Approved for Payment') OR payment_status='Approved for Payment'").iloc[0,0]), "queue"),
+        ("Pending Receipt", int(df_query("SELECT COUNT(*) FROM payments WHERE status='Paid' AND receipt_id IS NULL").iloc[0,0]), "queue"),
+        ("Total Paid", int(df_query("SELECT COUNT(*) FROM payments WHERE status='Paid'").iloc[0,0]), "cumulative"),
+        ("Completed", int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Completed','Closed')").iloc[0,0]), "cumulative"),
+    ], cols=4)
+    c1, c2 = st.columns(2)
+    with c1:
+        df = df_query("SELECT payment_method, SUM(amount) total FROM receipt_records GROUP BY payment_method ORDER BY total DESC")
+        interactive_chart(_money_chart_df(df), "Receipts by Payment Method", "payment_method", "total", "finance_receipts_method_cmd", default="Bar")
+    with c2:
+        df = df_query("SELECT status, COUNT(*) count FROM payments GROUP BY status ORDER BY count DESC")
+        interactive_chart(df, "Payment Status Distribution", "status", "count", "finance_payment_status_cmd", default="Donut")
+
+
+def finance_workspace():
+    role_header("Finance Workspace", "Pay only approved items, upload receipts, and maintain income/budget records. Finance cannot approve anything.")
+    section = st.session_state.get("finance_section", "Financial Dashboard")
+    if section == "Financial Dashboard":
+        finance_metrics(); finance_dashboard()
+    elif section == "Approved for Payment":
+        approved_for_payment_page()
+    elif section == "Receipts":
+        receipts_page()
+    elif section == "Invoices":
+        invoices_page()
+    elif section == "Expenses":
+        expenses_page()
+    elif section == "Payments":
+        payments_page()
+    elif section == "Cash Advances":
+        cash_advances_page()
+    elif section == "Budgets":
+        budgets_page()
+    elif section == "Income":
+        income_page(manage=True)
+    elif section == "Vendor Payment Records":
+        payments_page()
+    elif section == "Reconciliation":
+        reconciliation_page()
+    elif section == "Financial Reports":
+        finance_reports()
+    elif section == "Settings":
+        settings_page()
+    else:
+        finance_metrics(); finance_dashboard()
+
+
+def executive_dashboard():
+    st.subheader("Executive Decision Center")
+    pending = int(df_query("SELECT COUNT(*) c FROM purchase_requests WHERE next_role='approver' OR status IN ('Submitted for Approval','Pending Approval','Pending Approver/MD Approval')").iloc[0, 0])
+    gp_waiting = int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE next_role='approver' OR status='Submitted for Approval'").iloc[0, 0])
+    metric_row([
+        ("Pending approvals", pending, None),
+        ("Gateway approvals", gp_waiting, None),
+        ("Total approved", int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Approved','Awaiting Payment','Paid','Completed','Closed')").iloc[0,0]), "cumulative"),
+    ], cols=3)
+    df = df_query("SELECT request_no, department_project, category, estimated_amount, status, updated_at FROM purchase_requests WHERE next_role='approver' OR status IN ('Submitted for Approval','Pending Approval','Pending Approver/MD Approval') ORDER BY estimated_amount DESC LIMIT 30")
+    if not df.empty:
+        df["estimated_amount"] = df["estimated_amount"].apply(money); dataframe(df)
+    c1, c2 = st.columns(2)
+    with c1:
+        by_cat = df_query("SELECT category, COUNT(*) count FROM purchase_requests WHERE next_role='approver' OR status IN ('Submitted for Approval','Pending Approval','Pending Approver/MD Approval') GROUP BY category ORDER BY count DESC")
+        interactive_chart(by_cat, "Pending Approvals by Category", "category", "count", "exec_pending_cat_cmd", default="Bar")
+    with c2:
+        by_value = df_query("SELECT category, SUM(estimated_amount) total FROM purchase_requests WHERE next_role='approver' OR status IN ('Submitted for Approval','Pending Approval','Pending Approver/MD Approval') GROUP BY category ORDER BY total DESC")
+        interactive_chart(_money_chart_df(by_value), "Approval Value by Category", "category", "total", "exec_value_cat_cmd", default="Donut")
+
+
+def executive_workspace():
+    role_header("Approver / MD Workspace", "Final approval authority for procurement, gateway passes, POs, and payment approval requests.")
+    section = st.session_state.get("executive_section", "Approval Dashboard")
+    if section == "Approval Dashboard":
+        executive_metrics(); executive_dashboard()
+    elif section == "Pending Approvals":
+        pending_approval_page()
+    elif section == "Quote Comparison":
+        quote_comparison_decision_page()
+    elif section == "PO Approval":
+        po_approval_page()
+    elif section == "Payment Approval":
+        payment_approval_page()
+    elif section == "Gateway Pass Approval":
+        gateway_pass_review_queue("Gateway Pass Approval")
+    elif section == "Availability / Away Notice":
+        availability_panel()
+    elif section == "My Approval History":
+        my_approval_history_page()
+    elif section == "Income":
+        income_page(manage=False)
+    elif section == "Settings":
+        settings_page()
+    else:
+        executive_metrics(); executive_dashboard()
+
+
+def _month_year_filters(key_prefix: str):
+    today = date.today()
+    c1, c2, c3, c4, c5 = st.columns(5)
+    month = c1.selectbox("Month", list(range(1, 13)), index=today.month-1, key=f"{key_prefix}_month")
+    year = c2.number_input("Year", min_value=2020, max_value=2100, value=today.year, step=1, key=f"{key_prefix}_year")
+    dept_options = ["All"] + department_options()
+    dept = c3.selectbox("Department", dept_options, key=f"{key_prefix}_dept")
+    project = c4.text_input("Project", value="", key=f"{key_prefix}_project")
+    status = c5.selectbox("Status", ["All", "Approved", "Awaiting Payment", "Paid", "Completed", "Rejected"], key=f"{key_prefix}_status")
+    return int(month), int(year), dept, project.strip(), status
+
+
+def _income_summary(month: int, year: int, dept: str = "All", project: str = "", status: str = "All") -> dict[str, float]:
+    mk = f"{year:04d}-{month:02d}"
+    params: list[Any] = [mk]
+    inc_sql = "SELECT COALESCE(SUM(amount),0) FROM income_entries WHERE month_key=? AND status='Active'"
+    if dept != "All": inc_sql += " AND department=?"; params.append(dept)
+    if project: inc_sql += " AND project LIKE ?"; params.append(f"%{project}%")
+    total_income = float(df_query(inc_sql, params).iloc[0,0])
+    pr_params: list[Any] = [mk]
+    pr_sql = "SELECT COALESCE(SUM(estimated_amount),0) FROM purchase_requests WHERE substr(COALESCE(approved_at,updated_at,created_at),1,7)=?"
+    if dept != "All": pr_sql += " AND department_project=?"; pr_params.append(dept)
+    if project: pr_sql += " AND department_project LIKE ?"; pr_params.append(f"%{project}%")
+    approved_unpaid = float(df_query(pr_sql + " AND status IN ('Approved','Awaiting Payment','Approved for Payment')", pr_params).iloc[0,0])
+    pending = float(df_query(pr_sql + " AND status IN ('Sent for Procurement Review','Submitted for Approval','Pending Approver/MD Approval','Pending Approval')", pr_params).iloc[0,0])
+    paid = float(df_query("SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='Paid' AND substr(COALESCE(payment_date,created_at),1,7)=?", (mk,)).iloc[0,0])
+    return {"Total Income/Budget Allocation": total_income, "Approved Unpaid Commitments": approved_unpaid, "Pending Commitments": pending, "Paid Expenses": paid, "Remaining Balance": total_income - paid - approved_unpaid}
+
+
+def income_page(manage: bool | None = None):
+    if manage is None:
+        manage = user()["role"] in ["Admin", "Finance"]
+    st.subheader("Income")
+    st.caption("Remaining Balance = Total Income or Budget Allocation - Paid Expenses - Approved Unpaid Commitments")
+    month, year, dept, project, status = _month_year_filters("income_cmd")
+    summary = _income_summary(month, year, dept, project, status)
+    metric_row([(k, money(v), None) for k, v in summary.items()], cols=3)
+    summary_df = pd.DataFrame([summary])
+    entries = df_query("SELECT entry_no, entry_date, month_key, department, project, source, entry_type, amount, notes, status, created_at FROM income_entries ORDER BY entry_date DESC, created_at DESC LIMIT 500")
+    if not entries.empty:
+        show = entries.copy(); show["amount"] = show["amount"].apply(money); dataframe(show)
+    else:
+        st.info("No income entries yet.")
+    c1, c2 = st.columns(2)
+    with c1:
+        chart_df = pd.DataFrame({"bucket": ["Income", "Paid", "Approved unpaid", "Remaining"], "amount": [summary["Total Income/Budget Allocation"], summary["Paid Expenses"], summary["Approved Unpaid Commitments"], summary["Remaining Balance"]]})
+        interactive_chart(chart_df, "Income vs Commitments", "bucket", "amount", "income_bucket_cmd", default="Bar")
+    with c2:
+        monthly = df_query("SELECT month_key, SUM(amount) amount FROM income_entries WHERE status='Active' GROUP BY month_key ORDER BY month_key")
+        interactive_chart(_money_chart_df(monthly, "amount"), "Income Trend", "month_key", "amount", "income_trend_cmd", default="Line", allow_pie=False)
+    if manage:
+        st.markdown("#### Add Income / Budget Allocation")
+        with st.form("income_entry_form_cmd"):
+            c1, c2, c3 = st.columns(3)
+            entry_date = c1.date_input("Entry date", date.today(), key="income_entry_date_cmd")
+            department = c2.selectbox("Department", department_options(), key="income_dept_cmd")
+            project_name = c3.text_input("Project", value="General", key="income_project_cmd")
+            c4, c5 = st.columns(2)
+            entry_type = selectbox_with_other("Entry type", ["Opening income / budget allocation", "Additional income", "Adjustment", "Other"], "income_type_cmd", "income_entry_type")
+            amount = c5.number_input("Amount", min_value=0.0, step=10000.0, key="income_amount_cmd")
+            source = st.text_input("Source", value=entry_type, key="income_source_cmd")
+            notes = st.text_area("Notes", key="income_notes_cmd")
+            submitted = st.form_submit_button("Save Income Entry", type="primary")
+        if submitted:
+            eno = make_ref("INC")
+            mk = entry_date.strftime("%Y-%m")
+            inc_id = run_insert("INSERT INTO income_entries (entry_no, entry_date, month_key, year, month, department, project, source, entry_type, amount, notes, status, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active', ?, ?, ?)", (eno, entry_date.isoformat(), mk, entry_date.year, entry_date.month, department, project_name or "General", source, entry_type, amount, notes, user()["id"], now_iso(), now_iso()))
+            log_audit("INCOME_ENTRY_CREATED", "Income", inc_id, {"entry_no": eno, "amount": amount, "department": department, "project": project_name}, user()["id"], user()["role"])
+            _rerun_success("Income entry saved.")
+    sheets = {"Summary": pd.DataFrame([summary]), "Income Entries": entries, "Payments": df_query("SELECT * FROM payments ORDER BY created_at DESC LIMIT 1000"), "Approved Commitments": df_query("SELECT * FROM purchase_requests WHERE status IN ('Approved','Awaiting Payment','Approved for Payment') ORDER BY updated_at DESC LIMIT 1000"), "Audit Logs": df_query("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 1000")}
+    _excel_download_button("Download Income Workbook", f"income_{year}_{month:02d}.xlsx", sheets, "income_download_cmd")
+
+
+def _report_sheets(month: int | None = None, year: int | None = None) -> dict[str, pd.DataFrame]:
+    where_month = ""
+    params: list[Any] = []
+    if year and month:
+        where_month = "WHERE substr(COALESCE(pr.updated_at, pr.created_at),1,7)=?"; params.append(f"{year:04d}-{month:02d}")
+    elif year:
+        where_month = "WHERE substr(COALESCE(pr.updated_at, pr.created_at),1,4)=?"; params.append(str(year))
+    detailed = df_query(f"SELECT pr.*, u.full_name requested_by_name FROM purchase_requests pr LEFT JOIN users u ON u.id=pr.requested_by {where_month} ORDER BY pr.created_at DESC", params)
+    summary = pd.DataFrame({
+        "metric": ["Total Submitted", "Total Approved", "Total Rejected", "Total Paid", "Total Completed"],
+        "value": [
+            int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status NOT IN ('Draft','FM Draft')").iloc[0,0]),
+            int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Approved','Awaiting Payment','Approved for Payment','Paid','Completed','Closed')").iloc[0,0]),
+            int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status='Rejected'").iloc[0,0]),
+            int(df_query("SELECT COUNT(*) FROM payments WHERE status='Paid'").iloc[0,0]),
+            int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Completed','Closed')").iloc[0,0]),
+        ],
+    })
+    dept = df_query("SELECT department_project Department, COUNT(*) Count, SUM(estimated_amount) Amount FROM purchase_requests GROUP BY department_project ORDER BY Amount DESC")
+    vendor = df_query("SELECT COALESCE(v.name,'No vendor') Vendor, COUNT(p.id) Payments, SUM(p.amount) Amount FROM payments p LEFT JOIN vendors v ON v.id=p.vendor_id GROUP BY Vendor ORDER BY Amount DESC")
+    monthly = df_query('SELECT substr(created_at,1,7) AS "Month", COUNT(*) AS "Requests", COALESCE(SUM(estimated_amount),0) AS "EstimatedAmount" FROM purchase_requests GROUP BY 1 ORDER BY 1')
+    yearly = df_query('SELECT substr(created_at,1,4) AS "Year", COUNT(*) AS "Requests", COALESCE(SUM(estimated_amount),0) AS "EstimatedAmount" FROM purchase_requests GROUP BY 1 ORDER BY 1')
+    approvals = df_query("SELECT * FROM approval_history ORDER BY created_at DESC LIMIT 5000")
+    payments = df_query("SELECT * FROM payments ORDER BY created_at DESC LIMIT 5000")
+    receipts = df_query("SELECT * FROM receipt_records ORDER BY created_at DESC LIMIT 5000")
+    audit = df_query("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 5000")
+    gateway = df_query("SELECT gp.*, u.full_name utility_head FROM gateway_passes gp LEFT JOIN users u ON u.id=gp.facility_manager_user_id ORDER BY gp.created_at DESC LIMIT 5000")
+    return {"Summary": summary, "Detailed Records": detailed, "Expenses by Department": dept, "Expenses by Vendor": vendor, "Monthly Breakdown": monthly, "Yearly Breakdown": yearly, "Approval History": approvals, "Payment History": payments, "Receipt Index": receipts, "Audit Logs": audit, "Gateway Pass Movement": gateway}
+
+
+def compliance_reports():
+    st.subheader("Compliance Reports")
+    st.caption("Auditor reporting is read-only and downloads Excel workbooks with multiple sheets.")
+    today = date.today()
+    c1, c2 = st.columns(2)
+    month = c1.selectbox("Monthly report month", list(range(1,13)), index=today.month-1, key="audit_report_month_cmd")
+    year = c2.number_input("Report year", min_value=2020, max_value=2100, value=today.year, step=1, key="audit_report_year_cmd")
+    c1, c2 = st.columns(2)
+    with c1:
+        by_dept = df_query("SELECT COALESCE(department_project,'Unknown') department, SUM(estimated_amount) total FROM purchase_requests WHERE status NOT IN ('Rejected','Archived') GROUP BY department ORDER BY total DESC")
+        interactive_chart(_money_chart_df(by_dept), "Expenses by Department", "department", "total", "audit_dept_spend_cmd", default="Horizontal Bar")
+        status_df = df_query("SELECT status, COUNT(*) count FROM purchase_requests GROUP BY status ORDER BY count DESC")
+        interactive_chart(status_df, "Status Distribution", "status", "count", "audit_status_cmd", default="Donut")
+    with c2:
+        trend = df_query("SELECT substr(created_at,1,7) AS month, COUNT(*) AS approvals FROM approval_history GROUP BY 1 ORDER BY 1")
+        interactive_chart(trend, "Approval Trend", "month", "approvals", "audit_approval_trend_cmd", default="Line", allow_pie=False)
+        vendor = df_query("SELECT COALESCE(v.name,'No vendor') vendor, SUM(p.amount) total FROM payments p LEFT JOIN vendors v ON v.id=p.vendor_id GROUP BY vendor ORDER BY total DESC LIMIT 15")
+        interactive_chart(_money_chart_df(vendor), "Vendor Spend Ranking", "vendor", "total", "audit_vendor_spend_cmd", default="Horizontal Bar")
+    sheets_month = _report_sheets(int(month), int(year))
+    sheets_year = _report_sheets(None, int(year))
+    c3, c4 = st.columns(2)
+    with c3:
+        _excel_download_button("Download Monthly Expenses Report", f"monthly_expenses_{int(year)}_{int(month):02d}.xlsx", sheets_month, "audit_month_expenses_cmd")
+        _excel_download_button("Download Monthly Operational Report", f"monthly_operational_{int(year)}_{int(month):02d}.xlsx", sheets_month, "audit_month_ops_cmd")
+    with c4:
+        _excel_download_button("Download Yearly Expenses Report", f"yearly_expenses_{int(year)}.xlsx", sheets_year, "audit_year_expenses_cmd")
+        _excel_download_button("Download Yearly Operational Report", f"yearly_operational_{int(year)}.xlsx", sheets_year, "audit_year_ops_cmd")
+    _excel_download_button("Download Full Audit Activity Workbook", f"audit_activity_{int(year)}.xlsx", sheets_year, "audit_full_activity_cmd")
+
+
+def finance_reports():
+    st.subheader("Financial Reports")
+    month, year, dept, project, status = _month_year_filters("finance_reports_cmd")
+    sheets = _report_sheets(month, year)
+    c1, c2 = st.columns(2)
+    with c1:
+        monthly_paid = df_query("SELECT substr(payment_date,1,7) AS month, COALESCE(SUM(amount),0) AS total FROM payments WHERE status='Paid' GROUP BY 1 ORDER BY 1")
+        interactive_chart(_money_chart_df(monthly_paid), "Payment Trend", "month", "total", "finance_report_payment_trend_cmd", default="Line", allow_pie=False)
+    with c2:
+        status_df = df_query("SELECT status, COUNT(*) count FROM payments GROUP BY status ORDER BY count DESC")
+        interactive_chart(status_df, "Payment Status", "status", "count", "finance_report_status_cmd", default="Donut")
+    _excel_download_button("Download Financial Excel Report", f"financial_report_{year}_{month:02d}.xlsx", sheets, "finance_report_download_cmd")
+
+
+def procurement_reports():
+    st.subheader("Procurement Reports")
+    month, year, dept, project, status = _month_year_filters("proc_reports_cmd")
+    sheets = _report_sheets(month, year)
+    c1, c2 = st.columns(2)
+    with c1:
+        status_df = df_query("SELECT status, COUNT(*) count FROM purchase_requests GROUP BY status ORDER BY count DESC")
+        interactive_chart(status_df, "Status Distribution", "status", "count", "proc_report_status_cmd", default="Bar")
+    with c2:
+        dept_df = df_query("SELECT department_project department, SUM(estimated_amount) total FROM purchase_requests GROUP BY department ORDER BY total DESC")
+        interactive_chart(_money_chart_df(dept_df), "Expenses by Project/Department", "department", "total", "proc_report_dept_cmd", default="Horizontal Bar")
+    _excel_download_button("Download Procurement Excel Report", f"procurement_report_{year}_{month:02d}.xlsx", sheets, "proc_report_download_cmd")
+
+
+def audit_dashboard():
+    st.subheader("Compliance Snapshot")
+    recent_notifs = df_query("SELECT title, message, entity_type, entity_id, created_at FROM notifications WHERE role='Auditor' OR user_id=? ORDER BY created_at DESC LIMIT 25", (user()["id"],))
+    if not recent_notifs.empty:
+        st.markdown("#### Recent activity notifications")
+        dataframe(recent_notifs)
+    metric_row([
+        ("Total Submitted", int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status NOT IN ('Draft','FM Draft')").iloc[0,0]), "cumulative"),
+        ("Total Approved", int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Approved','Awaiting Payment','Paid','Completed','Closed')").iloc[0,0]), "cumulative"),
+        ("Total Paid", int(df_query("SELECT COUNT(*) FROM payments WHERE status='Paid'").iloc[0,0]), "cumulative"),
+        ("Total Completed", int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Completed','Closed')").iloc[0,0]), "cumulative"),
+    ], cols=4)
+    c1, c2 = st.columns(2)
+    with c1:
+        logs_by_action = df_query("SELECT action, COUNT(*) count FROM audit_logs GROUP BY action ORDER BY count DESC LIMIT 15")
+        interactive_chart(logs_by_action, "Audit Events by Action", "action", "count", "audit_actions_cmd", default="Horizontal Bar")
+    with c2:
+        status_df = df_query("SELECT status, COUNT(*) count FROM gateway_passes GROUP BY status ORDER BY count DESC")
+        interactive_chart(status_df, "Gateway Pass Status", "status", "count", "audit_gateway_status_cmd", default="Donut")
+    logs = df_query("SELECT event_date, event_time, created_at, action, entity_type, entity_id, role, details FROM audit_logs ORDER BY created_at DESC LIMIT 25")
+    dataframe(_redact_ui_df(logs, "audit_logs")) if not logs.empty else st.info("No audit logs yet.")
+
+
+def audit_workspace():
+    role_header("Audit & Compliance Workspace", "Read-only review of procurement, finance, gateway pass, history and audit reports.")
+    section = st.session_state.get("audit_section", "Audit Dashboard")
+    if section == "Audit Dashboard":
+        audit_metrics(); audit_dashboard()
+    elif section == "Procurement Records":
+        auditor_records_page() if "auditor_records_page" in globals() else all_records_page()
+    elif section == "Document Archive":
+        document_archive(editable=False)
+    elif section == "Approval Trails":
+        approval_trails_page()
+    elif section == "Delegated Approval Review":
+        delegated_approval_review_page()
+    elif section == "Budget Audit":
+        budget_audit_page()
+    elif section in ["Utility / Facility Head Handoff Trail", "Facility Manager Handoff Trail"]:
+        facility_handoff_trail_page()
+    elif section == "Gateway Pass Audit":
+        gateway_pass_audit_page()
+    elif section == "Vendor History":
+        vendor_history_page()
+    elif section == "Expense Review":
+        expense_review_page()
+    elif section == "Compliance Reports":
+        compliance_reports()
+    elif section == "Income":
+        income_page(manage=False)
+    elif section == "Settings":
+        settings_page()
+    else:
+        audit_metrics(); audit_dashboard()
+
+
+def admin_console():
+    role_header("Admin Console", "System administration, approval override, reports, exports, income, audit logs and full procurement visibility.")
+    section = st.session_state.get("admin_section", "Admin Dashboard")
+    if section in ["Admin Dashboard", "System Overview"]:
+        admin_metrics(); admin_phase2_alerts() if "admin_phase2_alerts" in globals() else None; admin_overview()
+    elif section == "Budget Tracker":
+        budgets_page()
+    elif section == "Income":
+        income_page(manage=True)
+    elif section == "User Management":
+        user_management()
+    elif section == "Roles & Permissions":
+        roles_permissions_page()
+    elif section == "Approval Configuration":
+        approval_config_page() if "approval_config_page" in globals() else configuration_page()
+    elif section == "Import Center":
+        import_center()
+    elif section == "All Procurement Records":
+        all_records_page()
+    elif section == "Notifications Monitor":
+        notifications_monitor_page()
+    elif section == "Availability & Delegation Requests":
+        admin_availability_review_page() if "admin_availability_review_page" in globals() else availability_panel()
+    elif section == "Gateway Pass Management":
+        gateway_pass_management_page()
+    elif section == "Activity & History Logs":
+        activity_history_page(scope="all")
+    elif section == "Audit Logs":
+        audit_log_page(full=True)
+    elif section == "Backup / Export":
+        backup_export_page()
+    elif section == "Settings":
+        settings_page()
+    else:
+        admin_metrics(); admin_overview()
+
+
+def render_app():
+    if int(user().get("must_change_password") or 0):
+        role_header("Password Change Required", "An administrator has required a password update before you continue.")
+        change_password_panel()
+        return
+    role = user()["role"]
+    if role == "Admin":
+        admin_console()
+    elif role == "Procurement Manager":
+        procurement_workspace()
+    elif role == "Facility Manager":
+        facility_workspace()
+    elif role == "Finance":
+        finance_workspace()
+    elif role == "Approver":
+        executive_workspace()
+    elif role == "Auditor":
+        audit_workspace()
+    else:
+        role_header("ProcureFlow", "Your role is not configured.")
+        change_password_panel()
+
+# ---------------- Final visible-label-safe user management override ----------------
+def user_management():
+    """Admin user management with visible Utility Head / Facility Head label.
+
+    The DB still stores the legacy role value 'Facility Manager' for compatibility,
+    but no visible control uses that label.
+    """
+    st.subheader("User Management")
+    role_values = [r["name"] for r in run_query("SELECT name FROM roles ORDER BY name", fetch=True)] or ["Admin", "Procurement Manager", "Facility Manager", "Finance", "Approver", "Auditor"]
+    role_options = [(display_role(r), r) for r in role_values]
+    label_to_role = {label: value for label, value in role_options}
+
+    with st.expander("Create new user", expanded=True):
+        with st.form("cmd_create_user_form"):
+            c1, c2, c3 = st.columns(3)
+            username = c1.text_input("Username", key="cmd_new_username")
+            full_name = c2.text_input("Full name", key="cmd_new_full_name")
+            role_label = c3.selectbox("Role", [r[0] for r in role_options], key="cmd_new_role_label")
+            c4, c5 = st.columns(2)
+            password = c4.text_input("Temporary password", type="password", key="cmd_new_password")
+            force = c5.checkbox("Force password change on next login", value=True, key="cmd_new_force")
+            submitted = st.form_submit_button("Create User", type="primary")
+        if submitted:
+            role_value = label_to_role[role_label]
+            if not username or not full_name or len(password) < 6:
+                st.error("Username, full name, and a password of at least 6 characters are required.")
+            else:
+                try:
+                    uid = run_insert(
+                        "INSERT INTO users (username, full_name, role, password_hash, must_change_password, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+                        (username.strip(), full_name.strip(), role_value, hash_password(password), int(force), now_iso(), now_iso()),
+                    )
+                    log_audit("USER_CREATED", "User", uid, f"Created as {display_role(role_value)}", user().get("id"), user().get("role"))
+                    create_activity_log(user().get("id"), user().get("role"), "USER_CREATED", "User", uid, f"Created user {username} as {display_role(role_value)}", visibility_scope="admin")
+                    create_notification(uid, None, "Account created", "Your ProcureFlow account has been created.", "User", uid)
+                    st.success("User created.")
+                    _clear_dashboard_cache()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not create user: {exc}")
+
+    users = df_query("SELECT id, username, full_name, role, is_active, must_change_password, COALESCE(account_locked,0) account_locked, last_login_at, created_at FROM users ORDER BY role, username")
+    if not users.empty:
+        shown = users.copy()
+        shown["role"] = shown["role"].apply(display_role)
+        dataframe(shown)
+    else:
+        st.info("No users found.")
+        return
+
+    st.markdown("#### Edit account")
+    labels = [f"{r.username} - {display_role(r.role)} - #{int(r.id)}" for r in users.itertuples()]
+    selected_label = st.selectbox("Select user", labels, key="cmd_select_user")
+    selected_id = int(selected_label.rsplit("#", 1)[1])
+    selected = df_query("SELECT * FROM users WHERE id=?", (selected_id,)).iloc[0]
+
+    with st.form(f"cmd_edit_user_{selected_id}"):
+        c1, c2, c3 = st.columns(3)
+        edit_username = c1.text_input("Username", value=selected["username"] or "", key=f"cmd_edit_username_{selected_id}")
+        edit_full_name = c2.text_input("Full name", value=selected["full_name"] or "", key=f"cmd_edit_name_{selected_id}")
+        role_labels = [r[0] for r in role_options]
+        current_label = display_role(selected["role"])
+        edit_role_label = c3.selectbox("Role", role_labels, index=role_labels.index(current_label) if current_label in role_labels else 0, key=f"cmd_edit_role_{selected_id}")
+        c4, c5, c6 = st.columns(3)
+        is_active = c4.checkbox("Active", value=bool(selected["is_active"]), key=f"cmd_edit_active_{selected_id}")
+        must_change = c5.checkbox("Force password change", value=bool(selected["must_change_password"]), key=f"cmd_edit_force_{selected_id}")
+        locked = c6.checkbox("Locked", value=bool(selected.get("account_locked", 0)), key=f"cmd_edit_locked_{selected_id}")
+        save_user = st.form_submit_button("Save user changes")
+    if save_user:
+        edit_role = label_to_role[edit_role_label]
+        before = selected.to_dict()
+        run_query(
+            "UPDATE users SET username=?, full_name=?, role=?, is_active=?, must_change_password=?, account_locked=?, updated_at=? WHERE id=?",
+            (edit_username.strip(), edit_full_name.strip(), edit_role, int(is_active), int(must_change), int(locked), now_iso(), selected_id),
+        )
+        after = {"username": edit_username, "full_name": edit_full_name, "role": edit_role, "is_active": int(is_active), "must_change_password": int(must_change), "account_locked": int(locked)}
+        log_audit("USER_UPDATED", "User", selected_id, "Admin edited user", user().get("id"), user().get("role"), before, after)
+        create_activity_log(user().get("id"), user().get("role"), "USER_UPDATED", "User", selected_id, f"Updated user {edit_username}", json_dump(after), "admin")
+        if before.get("role") != edit_role:
+            create_notification(selected_id, None, "Role changed", f"Your role is now {display_role(edit_role)}.", "User", selected_id, "Important")
+        st.success("User updated.")
+        _clear_dashboard_cache()
+        st.rerun()
+
+    c1, c2, c3 = st.columns(3)
+    new_password = c1.text_input("Overwrite/reset password", type="password", key=f"cmd_admin_reset_pwd_{selected_id}")
+    force_after_reset = c1.checkbox("Force change after reset", value=True, key=f"cmd_admin_force_after_reset_{selected_id}")
+    if c1.button("Reset / Overwrite Password", key=f"cmd_admin_reset_btn_{selected_id}", disabled=not new_password):
+        run_query("UPDATE users SET password_hash=?, must_change_password=?, updated_at=? WHERE id=?", (hash_password(new_password), int(force_after_reset), now_iso(), selected_id))
+        log_audit("PASSWORD_RESET", "User", selected_id, "Admin reset/overwrote password", user().get("id"), user().get("role"))
+        st.success("Password reset securely. The old password was not required or exposed.")
+
+    if c2.button("Unlock user", key=f"cmd_unlock_{selected_id}"):
+        run_query("UPDATE users SET account_locked=0, failed_login_count=0, updated_at=? WHERE id=?", (now_iso(), selected_id))
+        log_audit("USER_UNLOCKED", "User", selected_id, "Admin unlocked account", user().get("id"), user().get("role"))
+        st.success("User unlocked.")
+
+    st.markdown("#### Automatic Utility Head / Facility Head -> Procurement Manager routing")
+    st.info("Manual linking is no longer required. Items sent for Procurement Review are routed by role using next_role='procurement_manager' and are visible to active Procurement Manager users.")
+    route_preview = df_query("""
+        SELECT request_no, status, next_role, requested_by, department_project, estimated_amount, updated_at
+        FROM purchase_requests
+        WHERE COALESCE(next_role,'') IN ('procurement_manager','approver','finance','auditor')
+        ORDER BY updated_at DESC LIMIT 100
+    """)
+    dataframe(route_preview) if not route_preview.empty else st.caption("No active routed records yet.")
+
+    st.markdown("#### Role permissions")
+    rp = df_query("SELECT role_name, permission_name FROM role_permissions ORDER BY role_name, permission_name")
+    if not rp.empty:
+        shown_rp = rp.copy(); shown_rp["role_name"] = shown_rp["role_name"].apply(display_role); dataframe(shown_rp)
+    with st.form("cmd_grant_revoke_perm_form"):
+        c1, c2, c3 = st.columns(3)
+        role_label_for_perm = c1.selectbox("Role", [r[0] for r in role_options], key="cmd_perm_role_select")
+        perm_list = [r["name"] for r in run_query("SELECT name FROM permissions ORDER BY name", fetch=True)]
+        perm_for_role = c2.selectbox("Permission", perm_list, key="cmd_perm_select")
+        action = c3.selectbox("Action", ["Grant", "Revoke"], key="cmd_perm_action")
+        perm_submit = st.form_submit_button("Apply permission change")
+    if perm_submit:
+        role_for_perm = label_to_role[role_label_for_perm]
+        unsafe = role_for_perm not in ["Admin", "Approver"] and perm_for_role in {"approve_request", "approve_payment", "approve_gateway_pass", "approve_po"}
+        if unsafe:
+            st.error("Approval permissions can only be assigned to Admin or Approver / MD.")
+            return
+        if action == "Grant":
+            run_query("INSERT OR IGNORE INTO role_permissions (role_name, permission_name, created_at) VALUES (?, ?, ?)", (role_for_perm, perm_for_role, now_iso()))
+        else:
+            run_query("DELETE FROM role_permissions WHERE role_name=? AND permission_name=?", (role_for_perm, perm_for_role))
+        log_audit("ROLE_PERMISSION_UPDATED", "Permission", None, f"{action} {perm_for_role} for {display_role(role_for_perm)}", user().get("id"), user().get("role"))
+        st.success("Permission updated.")
+        _clear_dashboard_cache()
+        st.rerun()
+
+# Cache invalidation helper used by admin/user actions and safe after definition.
+def _clear_dashboard_cache():
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+
+# ---------------- Final safe approval configuration override ----------------
+def approval_config_page():
+    st.subheader("Approval Configuration")
+    st.caption("Only Admin and Approver / MD may approve. Finance and Procurement Manager cannot be configured as approvers.")
+    with st.form("cmd_safe_approval_rule_form"):
+        c1, c2, c3 = st.columns(3)
+        category = c1.selectbox("Category", EXPENSE_CATEGORIES, key="cmd_safe_appr_cat")
+        threshold = c2.number_input("Threshold amount", min_value=0.0, step=10000.0, key="cmd_safe_appr_threshold")
+        primary = c3.selectbox("Primary approver role", ["Approver", "Admin"], key="cmd_safe_appr_primary")
+        c4, c5, c6 = st.columns(3)
+        backup = c4.selectbox("Backup approver role", ["None", "Approver", "Admin"], key="cmd_safe_appr_backup")
+        finance_required = c5.checkbox("Finance required after approval", value=True, key="cmd_safe_finance_req")
+        sourcing_required = c6.checkbox("Sourcing required", value=False, key="cmd_safe_sourcing_req")
+        timeout = st.number_input("Approval timeout hours", min_value=1, value=48, step=1, key="cmd_safe_timeout")
+        submit_rule = st.form_submit_button("Save approval rule", type="primary")
+    if submit_rule:
+        rid = run_insert(
+            """
+            INSERT INTO approval_rules (category, threshold_amount, approver_role, requires_sourcing, requires_finance, is_active, primary_approver_role, backup_approver_role, pm_fallback_enabled, finance_required, sourcing_required, approval_timeout_hours, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?, 0, ?, ?, ?, ?, ?)
+            """,
+            (category, threshold, primary, int(sourcing_required), int(finance_required), primary, None if backup == "None" else backup, int(finance_required), int(sourcing_required), int(timeout), now_iso(), now_iso()),
+        )
+        log_audit("APPROVAL_RULE_CREATED", "ApprovalRule", rid, f"{category} threshold {threshold}; approver={primary}; no PM/Finance approval", user().get("id"), user().get("role"))
+        st.success("Approval rule saved. Procurement Manager and Finance remain blocked from approval authority.")
+        st.rerun()
+
+    rules = df_query("SELECT * FROM approval_rules ORDER BY is_active DESC, category, threshold_amount")
+    if not rules.empty:
+        dataframe(rules)
+
+    st.markdown("### Delegation / Away Notice")
+    st.info("Delegation may notify Admin/Approver coverage, but it does not grant approval rights to Procurement Manager or Finance.")
+    current = df_query("SELECT * FROM approval_delegations ORDER BY updated_at DESC, created_at DESC")
+    dataframe(current) if not current.empty else st.caption("No delegation records yet.")
+    with st.form("cmd_safe_delegation_form"):
+        c1, c2 = st.columns(2)
+        enabled = c1.checkbox("Mark Approver / MD unavailable", value=False, key="cmd_safe_deleg_enabled")
+        delegate = c2.selectbox("Notify backup role", ["Admin", "Approver"], key="cmd_safe_delegate_role")
+        c3, c4 = st.columns(2)
+        start = c3.date_input("Start date", value=date.today(), key="cmd_safe_deleg_start")
+        end = c4.date_input("End date", value=date.today() + timedelta(days=7), key="cmd_safe_deleg_end")
+        reason = st.text_area("Reason", value="Approver unavailable; Admin/Approver coverage required.", key="cmd_safe_deleg_reason")
+        submit_deleg = st.form_submit_button("Save Away Notice")
+    if submit_deleg:
+        run_query("UPDATE approval_delegations SET enabled=0, updated_at=? WHERE primary_role='Approver'", (now_iso(),))
+        run_query(
+            "INSERT INTO approval_delegations (primary_role, delegate_role, enabled, start_date, end_date, reason, created_by, created_at, updated_at) VALUES ('Approver', ?, ?, ?, ?, ?, ?, ?, ?)",
+            (delegate, int(enabled), start.isoformat(), end.isoformat(), reason, user().get("id"), now_iso(), now_iso()),
+        )
+        log_audit("APPROVER_AWAY_NOTICE_UPDATED", "ApprovalDelegation", "Approver", reason, user().get("id"), user().get("role"))
+        create_notification(None, delegate, "Approver availability notice", reason, "ApprovalDelegation", None, "Important")
+        st.success("Away notice saved without granting Procurement Manager or Finance approval authority.")
+        st.rerun()
+
+
+def configuration_page():
+    approval_config_page()
+
+# ============================================================================
+# Logistics Officer fulfilment workspace
+# This final layer deliberately keeps Procurement commercial and gives delivery
+# execution, receiving, logistics exceptions and movement documentation to the
+# dedicated Logistics Officer role.
+# ============================================================================
+
+LOGISTICS_DELIVERY_STATUSES = ["Scheduled", "Sent to Vendor", "Dispatched", "In Transit", "Delayed", "Arrived"]
+LOGISTICS_EXCEPTION_TYPES = [
+    "Late delivery", "Partial delivery", "Damaged goods", "Incorrect goods",
+    "Missing items", "Rejected delivery", "Vendor return", "Replacement required", "Other",
+]
+
+
+def _logistics_date(value: Any, fallback: date | None = None) -> date:
+    """Return a safe date value for data migrated from older PO records."""
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except Exception:
+        return fallback or date.today()
+
+
+def _logistics_po_context(po_id: int) -> dict[str, Any] | None:
+    rows = run_query(
+        """
+        SELECT po.*, pr.request_no, pr.facility_manager_user_id, pr.requested_by,
+               pr.department_project, v.name AS vendor_name
+        FROM purchase_orders po
+        LEFT JOIN purchase_requests pr ON pr.id=po.request_id
+        LEFT JOIN vendors v ON v.id=po.vendor_id
+        WHERE po.id=?
+        """,
+        (po_id,),
+        fetch=True,
+    )
+    return dict(rows[0]) if rows else None
+
+
+def _notify_facility_for_logistics(po: dict[str, Any], title: str, message: str, importance: str = "Normal"):
+    owner_id = int(po.get("facility_manager_user_id") or po.get("requested_by") or 0)
+    if owner_id:
+        create_notification(
+            owner_id,
+            None,
+            title,
+            message,
+            "Purchase Order",
+            int(po["id"]),
+            importance,
+            ["in_app"],
+            action_label="Approved / Accepted Requests",
+        )
+
+
+def _record_logistics_exception(
+    po: dict[str, Any],
+    exception_type: str,
+    description: str,
+    payment_impact: bool = False,
+    source: str = "Logistics Officer",
+) -> int:
+    """Persist an operational exception and notify only the roles that need it."""
+    exception_no = make_ref("LEX")
+    exception_id = run_insert(
+        """
+        INSERT INTO logistics_exceptions
+        (exception_no, po_id, request_id, exception_type, description, payment_impact, status, raised_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'Open', ?, ?, ?)
+        """,
+        (
+            exception_no,
+            int(po["id"]),
+            po.get("request_id"),
+            exception_type,
+            description,
+            int(bool(payment_impact)),
+            user()["id"],
+            now_iso(),
+            now_iso(),
+        ),
+    )
+    run_query(
+        "UPDATE purchase_orders SET delivery_exception_status='Open', updated_at=? WHERE id=?",
+        (now_iso(), int(po["id"])),
+    )
+    summary = f"{po.get('po_no')} has a logistics exception: {exception_type}. {description}".strip()
+    create_notification(
+        None,
+        "Procurement Manager",
+        "Delivery exception requires commercial follow-up",
+        summary,
+        "Logistics Exception",
+        exception_id,
+        "High",
+        ["in_app", "browser_push"],
+        action_label="Commercial PO Management",
+    )
+    _notify_facility_for_logistics(po, "Delivery exception", summary, "High")
+    if payment_impact:
+        create_notification(
+            None,
+            "Finance",
+            "Delivery exception may affect invoice/payment matching",
+            summary,
+            "Logistics Exception",
+            exception_id,
+            "High",
+            ["in_app"],
+            action_label="Invoices",
+        )
+    add_workflow_event("Logistics Exception", exception_id, "Exception Raised", "Open", source, user()["id"])
+    create_activity_log(
+        user()["id"], user()["role"], "LOGISTICS_EXCEPTION_RAISED", "Logistics Exception", exception_id,
+        f"{exception_no} raised for {po.get('po_no')}", description, "workflow", po.get("request_id"),
+    )
+    log_audit(
+        "LOGISTICS_EXCEPTION_RAISED", "Logistics Exception", exception_id, description,
+        user()["id"], user()["role"], after_values={"po_id": int(po["id"]), "exception_type": exception_type, "payment_impact": bool(payment_impact)},
+    )
+    return exception_id
+
+
+def commercial_purchase_orders_page():
+    st.subheader("Commercial PO Management")
+    st.caption("Procurement creates POs, sends them for approval, and commercially releases approved POs to Logistics. Delivery follow-up and receiving are handled by Logistics Officer.")
+    create_tab, register_tab = st.tabs(["Create PO", "Commercial PO Register"])
+    with create_tab:
+        create_po_form()
+    with register_tab:
+        commercial_po_register()
+
+
+def commercial_po_register():
+    df = df_query(
+        """
+        SELECT po.id, po.po_no, pr.request_no, v.name AS vendor, po.po_date,
+               po.expected_delivery_date, po.status, po.total_amount, po.payment_status,
+               po.receiving_status, po.logistics_status, po.next_role, po.updated_at
+        FROM purchase_orders po
+        LEFT JOIN purchase_requests pr ON po.request_id=pr.id
+        LEFT JOIN vendors v ON po.vendor_id=v.id
+        ORDER BY po.updated_at DESC, po.created_at DESC
+        """
+    )
+    if df.empty:
+        empty_state("No purchase orders", "Create a PO from an approved request.")
+        return
+    show = df.drop(columns=["id"]).copy()
+    show["total_amount"] = show["total_amount"].apply(money)
+    dataframe(show)
+    selected = st.selectbox(
+        "Open commercial PO",
+        [f"{r.po_no} — {r.status} — #{int(r.id)}" for r in df.itertuples()],
+        key="pm_commercial_po_select",
+    )
+    po_id = int(selected.rsplit("#", 1)[1])
+    commercial_po_detail(po_id)
+    csv_download(df, "commercial_purchase_orders")
+
+
+def commercial_po_detail(po_id: int):
+    po = _logistics_po_context(po_id)
+    if not po:
+        st.error("Purchase order not found.")
+        return
+    st.markdown(f"### {po['po_no']} {badge(po.get('status') or 'Draft')}", unsafe_allow_html=True)
+    metric_row(
+        [
+            ("Vendor", po.get("vendor_name") or "—", None),
+            ("Total", money(po.get("total_amount") or 0), None),
+            ("Commercial Status", po.get("status") or "—", None),
+            ("Logistics Handover", po.get("logistics_status") or "Not Released", None),
+        ],
+        cols=4,
+    )
+    items = df_query(
+        "SELECT item_name, quantity, unit_price, total, category FROM purchase_order_items WHERE po_id=?",
+        (po_id,),
+    )
+    if not items.empty:
+        shown = items.copy()
+        shown["unit_price"] = shown["unit_price"].apply(money)
+        shown["total"] = shown["total"].apply(money)
+        dataframe(shown)
+    with st.expander("Commercial handover information", expanded=False):
+        dataframe(pd.DataFrame([{
+            "Expected delivery date": po.get("expected_delivery_date") or "—",
+            "Vendor delivery contact": po.get("vendor_delivery_contact") or "—",
+            "Delivery address": po.get("delivery_address") or "—",
+            "Delivery instructions": po.get("delivery_instructions") or "—",
+            "Released to Logistics": po.get("released_to_logistics_at") or "—",
+        }]))
+
+    status = str(po.get("status") or "")
+    if status == "Draft":
+        if st.button("Send for PO Approval", type="primary", key=f"pm_po_submit_approval_{po_id}"):
+            run_query(
+                "UPDATE purchase_orders SET status='Pending Approval', next_role='approver', updated_at=? WHERE id=?",
+                (now_iso(), po_id),
+            )
+            add_workflow_event("Purchase Order", po_id, "Submitted for PO Approval", "Pending Approval", "Submitted by Procurement Manager", user()["id"])
+            log_audit("PO_SUBMITTED_FOR_APPROVAL", "Purchase Order", po_id, "Submitted by Procurement Manager", user()["id"], user()["role"], before_values={"status": status}, after_values={"status": "Pending Approval", "next_role": "approver"})
+            create_notification(None, "Approver", "PO pending approval", f"{po['po_no']} requires PO approval.", "Purchase Order", po_id, "High", ["in_app", "browser_push"], action_label="PO Approval")
+            _rerun_success("Purchase order sent for approval.")
+    elif status == "Pending Approval":
+        st.info("Awaiting Approver/Admin decision. Procurement cannot approve its own purchase order.")
+    elif status == "Approved":
+        st.success("PO approved. Release it to Logistics when the commercial order is ready for fulfilment.")
+        release_note = st.text_area("Handover note for Logistics", key=f"pm_po_release_note_{po_id}")
+        if st.button("Release to Logistics", type="primary", key=f"pm_po_release_{po_id}"):
+            run_query(
+                """
+                UPDATE purchase_orders
+                SET status='Released to Logistics', next_role='logistics_officer', logistics_status='Awaiting Handover',
+                    released_to_logistics_at=?, released_to_logistics_by=?, updated_at=?
+                WHERE id=?
+                """,
+                (now_iso(), user()["id"], now_iso(), po_id),
+            )
+            add_workflow_event("Purchase Order", po_id, "Released to Logistics", "Released to Logistics", release_note or "Commercial PO released to Logistics Officer", user()["id"])
+            create_activity_log(user()["id"], user()["role"], "PO_RELEASED_TO_LOGISTICS", "Purchase Order", po_id, f"{po['po_no']} released to Logistics", release_note, "workflow", po.get("request_id"))
+            log_audit("PO_RELEASED_TO_LOGISTICS", "Purchase Order", po_id, release_note or "Commercial PO released to Logistics", user()["id"], user()["role"], before_values={"status": status}, after_values={"status": "Released to Logistics", "next_role": "logistics_officer"})
+            create_notification(None, "Logistics Officer", "PO delivery handover", f"{po['po_no']} has been released by Procurement and is ready for delivery planning.", "Purchase Order", po_id, "High", ["in_app", "browser_push"], action_label="PO Delivery Handover")
+            _notify_facility_for_logistics(po, "PO released to Logistics", f"{po['po_no']} is now with Logistics for delivery coordination.")
+            _rerun_success("PO released to Logistics Officer.")
+    else:
+        st.info("This PO is in fulfilment. Logistics owns delivery tracking and receiving; Procurement retains commercial oversight only.")
+
+
+def logistics_dashboard():
+    st.subheader("Logistics Dashboard")
+    st.caption("Coordinate delivery and movements after Procurement releases an approved PO. This role does not source vendors, create POs, or approve commercial records.")
+    def count(sql: str, params: tuple = ()) -> int:
+        frame = df_query(sql, params)
+        return int(frame.iloc[0, 0] or 0) if not frame.empty else 0
+    metrics = [
+        ("Awaiting PO Handover", count("SELECT COUNT(*) FROM purchase_orders WHERE status='Released to Logistics' OR (next_role='logistics_officer' AND COALESCE(logistics_status,'')='Awaiting Handover')"), "released by Procurement"),
+        ("Scheduled / In Transit", count("SELECT COUNT(*) FROM purchase_orders WHERE next_role='logistics_officer' AND status IN ('Scheduled','Sent to Vendor','Dispatched','In Transit')"), "active deliveries"),
+        ("Arrivals Expected Today", count("SELECT COUNT(*) FROM purchase_orders WHERE expected_delivery_date=? AND status IN ('Released to Logistics','Scheduled','Sent to Vendor','Dispatched','In Transit','Arrived')", (date.today().isoformat(),)), "delivery plan"),
+        ("Receiving Pending", count("SELECT COUNT(*) FROM purchase_orders WHERE next_role='logistics_officer' AND status IN ('Arrived','Awaiting Delivery','Partially Received') AND COALESCE(receiving_status,'Pending Receipt') IN ('Pending Receipt','Partially Received','Disputed')"), "record receipt"),
+        ("Partial Deliveries", count("SELECT COUNT(*) FROM purchase_orders WHERE receiving_status='Partially Received' OR status='Partially Received'"), "follow up required"),
+        ("Delivery Exceptions", count("SELECT COUNT(*) FROM logistics_exceptions WHERE status IN ('Open','In Progress')"), "raise or resolve"),
+        ("Gateway Passes to Coordinate", count("SELECT COUNT(*) FROM gateway_passes WHERE status IN ('Approved','Generated','Downloaded') AND COALESCE(logistics_status,'Not Coordinated') NOT IN ('Completed','Exited')"), "approved movements"),
+    ]
+    metric_row(metrics, cols=4)
+    recent = df_query(
+        """
+        SELECT po.po_no, v.name AS vendor, po.expected_delivery_date, po.status,
+               po.logistics_status, po.receiving_status, po.updated_at
+        FROM purchase_orders po LEFT JOIN vendors v ON v.id=po.vendor_id
+        WHERE po.status IN ('Released to Logistics','Scheduled','Sent to Vendor','Dispatched','In Transit','Delayed','Arrived','Partially Received')
+           OR po.next_role='logistics_officer'
+        ORDER BY po.updated_at DESC LIMIT 20
+        """
+    )
+    if not recent.empty:
+        st.markdown("#### Current delivery queue")
+        dataframe(recent)
+    else:
+        st.success("No POs are currently waiting for logistics fulfilment.")
+
+
+def po_delivery_handover_page():
+    st.subheader("PO Delivery Handover")
+    st.caption("Approved POs released by Procurement appear here. Add the delivery plan before tracking dispatch and arrival.")
+    df = df_query(
+        """
+        SELECT po.id, po.po_no, pr.request_no, v.name AS vendor, po.expected_delivery_date,
+               po.total_amount, po.status, po.logistics_status, po.delivery_instructions
+        FROM purchase_orders po
+        LEFT JOIN purchase_requests pr ON pr.id=po.request_id
+        LEFT JOIN vendors v ON v.id=po.vendor_id
+        WHERE po.status='Released to Logistics'
+           OR (po.next_role='logistics_officer' AND COALESCE(po.logistics_status,'')='Awaiting Handover')
+        ORDER BY po.released_to_logistics_at DESC, po.updated_at DESC
+        """
+    )
+    if df.empty:
+        empty_state("No POs awaiting handover", "Procurement will release approved POs to Logistics here.")
+        return
+    display = df.drop(columns=["id"]).copy()
+    display["total_amount"] = display["total_amount"].apply(money)
+    dataframe(display)
+    selected = st.selectbox("Open PO handover", [f"{r.po_no} — {r.vendor} — #{int(r.id)}" for r in df.itertuples()], key="log_handover_po_select")
+    po_id = int(selected.rsplit("#", 1)[1])
+    po = _logistics_po_context(po_id)
+    if not po:
+        st.error("Purchase order not found.")
+        return
+    with st.form(f"log_handover_form_{po_id}"):
+        c1, c2 = st.columns(2)
+        vendor_contact = c1.text_input("Vendor delivery contact", value=str(po.get("vendor_delivery_contact") or ""))
+        expected = c2.date_input("Expected delivery date", value=_logistics_date(po.get("expected_delivery_date"), date.today() + timedelta(days=7)))
+        delivery_address = st.text_input("Delivery address", value=str(po.get("delivery_address") or po.get("department_project") or ""))
+        c3, c4, c5 = st.columns(3)
+        driver_name = c3.text_input("Driver name", value=str(po.get("driver_name") or ""))
+        driver_phone = c4.text_input("Driver phone", value=str(po.get("driver_phone") or ""))
+        vehicle_number = c5.text_input("Vehicle number", value=str(po.get("vehicle_number") or ""))
+        c6, c7 = st.columns(2)
+        waybill = c6.text_input("Waybill / dispatch number", value=str(po.get("waybill_number") or ""))
+        initial_status = c7.selectbox("Initial delivery status", ["Scheduled", "Sent to Vendor"], index=1 if str(po.get("status")) == "Sent to Vendor" else 0)
+        instructions = st.text_area("Delivery instructions", value=str(po.get("delivery_instructions") or ""))
+        submitted = st.form_submit_button("Save Delivery Handover", type="primary")
+    if submitted:
+        run_query(
+            """
+            UPDATE purchase_orders
+            SET vendor_delivery_contact=?, expected_delivery_date=?, delivery_address=?, driver_name=?, driver_phone=?,
+                vehicle_number=?, waybill_number=?, delivery_instructions=?, status=?, logistics_status=?,
+                next_role='logistics_officer', delivery_updated_by=?, delivery_updated_at=?,
+                sent_to_vendor_date=CASE WHEN ?='Sent to Vendor' THEN COALESCE(sent_to_vendor_date, ?) ELSE sent_to_vendor_date END,
+                updated_at=?
+            WHERE id=?
+            """,
+            (
+                vendor_contact.strip(), expected.isoformat(), delivery_address.strip(), driver_name.strip(), driver_phone.strip(),
+                vehicle_number.strip(), waybill.strip(), instructions.strip(), initial_status, initial_status,
+                user()["id"], now_iso(), initial_status, date.today().isoformat(), now_iso(), po_id,
+            ),
+        )
+        add_workflow_event("Purchase Order", po_id, "Logistics Handover Planned", initial_status, instructions or "Delivery plan recorded by Logistics Officer", user()["id"])
+        create_activity_log(user()["id"], user()["role"], "PO_LOGISTICS_HANDOVER_PLANNED", "Purchase Order", po_id, f"Delivery plan recorded for {po['po_no']}", instructions, "workflow", po.get("request_id"))
+        log_audit("PO_LOGISTICS_HANDOVER_PLANNED", "Purchase Order", po_id, instructions or "Delivery plan recorded", user()["id"], user()["role"], after_values={"status": initial_status, "expected_delivery_date": expected.isoformat()})
+        create_notification(None, "Procurement Manager", "Delivery handover planned", f"Logistics planned delivery for {po['po_no']} ({initial_status}).", "Purchase Order", po_id, "Normal", ["in_app"], action_label="Commercial PO Management")
+        _notify_facility_for_logistics(po, "Delivery planned", f"Delivery coordination has started for {po['po_no']}. Expected date: {expected.isoformat()}.")
+        _rerun_success("Delivery handover saved.")
+
+
+def delivery_tracking_page():
+    st.subheader("Delivery Tracking")
+    st.caption("Update vendor dispatch, transit, delay and arrival status. This is a logistics operation; it does not change supplier selection or approval authority.")
+    df = df_query(
+        """
+        SELECT po.id, po.po_no, v.name AS vendor, po.expected_delivery_date, po.status,
+               po.logistics_status, po.waybill_number, po.delivery_updated_at
+        FROM purchase_orders po
+        LEFT JOIN vendors v ON v.id=po.vendor_id
+        WHERE po.next_role='logistics_officer'
+           OR po.status IN ('Released to Logistics','Scheduled','Sent to Vendor','Dispatched','In Transit','Delayed','Arrived','Awaiting Delivery','Partially Received')
+        ORDER BY po.expected_delivery_date, po.updated_at DESC
+        """
+    )
+    if df.empty:
+        empty_state("No active delivery tracking", "Delivery tracking begins after a PO is released to Logistics.")
+        return
+    dataframe(df.drop(columns=["id"]))
+    selected = st.selectbox("Open delivery", [f"{r.po_no} — {r.status} — #{int(r.id)}" for r in df.itertuples()], key="log_tracking_po_select")
+    po_id = int(selected.rsplit("#", 1)[1])
+    po = _logistics_po_context(po_id)
+    if not po:
+        return
+    current_status = str(po.get("status") or "Scheduled")
+    status_values = ["Scheduled", "Sent to Vendor", "Dispatched", "In Transit", "Delayed", "Arrived"]
+    selected_index = status_values.index(current_status) if current_status in status_values else 0
+    with st.form(f"log_tracking_form_{po_id}"):
+        c1, c2 = st.columns(2)
+        new_status = c1.selectbox("Delivery status", status_values, index=selected_index)
+        expected = c2.date_input("Expected delivery date", value=_logistics_date(po.get("expected_delivery_date"), date.today()))
+        waybill = st.text_input("Waybill / dispatch number", value=str(po.get("waybill_number") or ""))
+        note = st.text_area("Tracking update / reason for delay")
+        submitted = st.form_submit_button("Save Tracking Update", type="primary")
+    if submitted:
+        if new_status == "Delayed" and not note.strip():
+            st.error("Provide the reason for the delay so Procurement and the Facility team can act on it.")
+            return
+        actual_delivery = date.today().isoformat() if new_status == "Arrived" else po.get("actual_delivery_date")
+        run_query(
+            """
+            UPDATE purchase_orders
+            SET status=?, logistics_status=?, next_role='logistics_officer', expected_delivery_date=?, waybill_number=?,
+                actual_delivery_date=?, delivery_updated_by=?, delivery_updated_at=?, updated_at=?
+            WHERE id=?
+            """,
+            (new_status, new_status, expected.isoformat(), waybill.strip(), actual_delivery, user()["id"], now_iso(), now_iso(), po_id),
+        )
+        add_workflow_event("Purchase Order", po_id, "Delivery Tracking Updated", new_status, note or f"Status updated to {new_status}", user()["id"])
+        create_activity_log(user()["id"], user()["role"], "DELIVERY_TRACKING_UPDATED", "Purchase Order", po_id, f"{po['po_no']} moved to {new_status}", note, "workflow", po.get("request_id"))
+        log_audit("DELIVERY_TRACKING_UPDATED", "Purchase Order", po_id, note or new_status, user()["id"], user()["role"], before_values={"status": current_status}, after_values={"status": new_status, "expected_delivery_date": expected.isoformat()})
+        if new_status in {"Delayed", "Arrived"}:
+            title = "Delivery delayed" if new_status == "Delayed" else "Delivery arrived"
+            msg = f"{po['po_no']} is now {new_status.lower()}. {note}".strip()
+            create_notification(None, "Procurement Manager", title, msg, "Purchase Order", po_id, "High" if new_status == "Delayed" else "Normal", ["in_app"], action_label="Commercial PO Management")
+            _notify_facility_for_logistics(po, title, msg, "High" if new_status == "Delayed" else "Normal")
+        _rerun_success("Delivery tracking updated.")
+
+
+def logistics_receiving_page():
+    st.subheader("Receiving Slips")
+    st.caption("Record delivered quantity, condition, delivery note and proof of delivery. Finance receives a receipt notice; Procurement receives the delivery/completion update.")
+    record_tab, register_tab = st.tabs(["Record Receiving Slip", "Receiving Register"])
+    with record_tab:
+        if not has_permission("receive_goods"):
+            st.info("Your role cannot record receiving slips.")
+        else:
+            pos = df_query(
+                """
+                SELECT po.id, po.po_no, v.name AS vendor, po.vendor_id, po.status, po.expected_delivery_date
+                FROM purchase_orders po
+                LEFT JOIN vendors v ON v.id=po.vendor_id
+                WHERE (po.next_role='logistics_officer' OR po.status IN ('Arrived','Awaiting Delivery','Partially Received','Scheduled','Sent to Vendor','Dispatched','In Transit'))
+                  AND po.status NOT IN ('Fully Received','Paid','Closed','Cancelled')
+                ORDER BY po.updated_at DESC
+                """
+            )
+            if pos.empty:
+                st.info("No released POs are currently available for receiving.")
+            else:
+                label = st.selectbox("PO", [f"{r.po_no} — {r.vendor} — #{int(r.id)}" for r in pos.itertuples()], key="log_receiving_po_select")
+                po_id = int(label.rsplit("#", 1)[1])
+                po = _logistics_po_context(po_id)
+                items = df_query("SELECT id, item_name, quantity FROM purchase_order_items WHERE po_id=?", (po_id,))
+                with st.form(f"log_receiving_form_{po_id}"):
+                    c1, c2, c3 = st.columns(3)
+                    recv_date = c1.date_input("Date received", date.today())
+                    delivery_note = c2.text_input("Delivery note number")
+                    rec_status = c3.selectbox("Receipt status", RECEIVING_STATUSES, index=RECEIVING_STATUSES.index("Fully Received"))
+                    discrepancy = st.text_area("Discrepancy notes")
+                    received_rows: list[tuple[int, str, float, float, str]] = []
+                    for _, item in items.iterrows():
+                        a, b, c, d = st.columns([1.45, 0.7, 0.95, 1.05])
+                        a.write(item["item_name"])
+                        b.write(f"Ordered {item['quantity']}")
+                        quantity_received = c.number_input("Received", min_value=0.0, value=float(item["quantity"]), key=f"log_recv_qty_{po_id}_{int(item['id'])}")
+                        condition = d.selectbox("Condition", ["Good", "Damaged", "Incomplete", "Wrong Item"], key=f"log_recv_cond_{po_id}_{int(item['id'])}")
+                        received_rows.append((int(item["id"]), str(item["item_name"]), float(item["quantity"]), float(quantity_received), str(condition)))
+                    attachment = st.file_uploader("Proof of delivery / delivery note", type=["pdf", "jpg", "jpeg", "png"], key=f"log_recv_upload_{po_id}")
+                    submitted = st.form_submit_button("Save Receiving Slip", type="primary")
+                if submitted:
+                    path, _ = save_upload(attachment, "logistics_receiving")
+                    has_item_issue = any(received < ordered or condition != "Good" for _, _, ordered, received, condition in received_rows)
+                    resolved_status = rec_status
+                    if has_item_issue and rec_status == "Fully Received":
+                        resolved_status = "Partially Received"
+                    slip_no = make_ref("GRN")
+                    slip_id = run_insert(
+                        """
+                        INSERT INTO receiving_slips
+                        (slip_no, po_id, vendor_id, received_by, logistics_officer_id, date_received, delivery_note_no,
+                         discrepancy_notes, attachment_path, proof_of_delivery_path, status, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (slip_no, po_id, po.get("vendor_id"), user()["id"], user()["id"], recv_date.isoformat(), delivery_note.strip(), discrepancy.strip(), path, path, resolved_status, now_iso(), now_iso()),
+                    )
+                    for po_item_id, item_name, ordered, received, condition in received_rows:
+                        item_note = "" if condition == "Good" and received >= ordered else (discrepancy.strip() or condition)
+                        run_query(
+                            """
+                            INSERT INTO receiving_slip_items
+                            (slip_id, po_item_id, item_name, quantity_ordered, quantity_received, item_condition, discrepancy_notes, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (slip_id, po_item_id, item_name, ordered, received, condition, item_note, now_iso()),
+                        )
+                    if resolved_status == "Fully Received":
+                        po_status, next_role, logistics_status = "Fully Received", "finance", "Delivered"
+                    elif resolved_status == "Partially Received":
+                        po_status, next_role, logistics_status = "Partially Received", "logistics_officer", "Partially Received"
+                    elif resolved_status in {"Disputed", "Returned"}:
+                        po_status, next_role, logistics_status = resolved_status, "procurement_manager", resolved_status
+                    else:
+                        po_status, next_role, logistics_status = "Partially Received", "logistics_officer", resolved_status
+                    run_query(
+                        """
+                        UPDATE purchase_orders
+                        SET status=?, receiving_status=?, logistics_status=?, next_role=?, actual_delivery_date=?,
+                            delivery_updated_by=?, delivery_updated_at=?, updated_at=?
+                        WHERE id=?
+                        """,
+                        (po_status, resolved_status, logistics_status, next_role, recv_date.isoformat(), user()["id"], now_iso(), now_iso(), po_id),
+                    )
+                    add_workflow_event("Receiving Slip", slip_id, "Receiving Recorded", resolved_status, slip_no, user()["id"])
+                    add_workflow_event("Purchase Order", po_id, "Receiving Status Updated", po_status, f"Receiving slip {slip_no}", user()["id"])
+                    create_activity_log(user()["id"], user()["role"], "RECEIVING_SLIP_RECORDED", "Receiving Slip", slip_id, f"{slip_no} recorded for {po['po_no']}", discrepancy, "workflow", po.get("request_id"))
+                    log_audit("RECEIVING_SLIP_RECORDED", "Receiving Slip", slip_id, discrepancy or resolved_status, user()["id"], user()["role"], after_values={"po_id": po_id, "status": resolved_status})
+                    create_notification(None, "Finance", "Goods receipt recorded", f"{po['po_no']} has a receiving slip ({slip_no}) for invoice/payment review.", "Receiving Slip", slip_id, "Important", ["in_app"], action_label="Receipts")
+                    create_notification(None, "Procurement Manager", "Delivery receipt recorded", f"Logistics recorded {resolved_status.lower()} for {po['po_no']} ({slip_no}).", "Receiving Slip", slip_id, "Important", ["in_app"], action_label="Commercial PO Management")
+                    if has_item_issue or resolved_status in {"Disputed", "Returned", "Partially Received"}:
+                        _record_logistics_exception(
+                            po,
+                            "Partial delivery" if resolved_status == "Partially Received" else ("Rejected delivery" if resolved_status == "Returned" else "Delivery discrepancy"),
+                            discrepancy.strip() or "Receiving record includes quantity or condition discrepancies.",
+                            payment_impact=bool(resolved_status in {"Disputed", "Returned"}),
+                            source=f"Receiving slip {slip_no}",
+                        )
+                    _rerun_success(f"Receiving slip {slip_no} saved.")
+    with register_tab:
+        df = df_query(
+            """
+            SELECT rs.id, rs.slip_no, po.po_no, v.name AS vendor, rs.date_received, rs.status,
+                   rs.delivery_note_no, rs.discrepancy_notes, u.full_name AS recorded_by
+            FROM receiving_slips rs
+            LEFT JOIN purchase_orders po ON po.id=rs.po_id
+            LEFT JOIN vendors v ON v.id=rs.vendor_id
+            LEFT JOIN users u ON u.id=COALESCE(rs.logistics_officer_id, rs.received_by)
+            ORDER BY rs.created_at DESC
+            """
+        )
+        if df.empty:
+            empty_state("No receiving slips", "Recorded deliveries will appear here.")
+        else:
+            dataframe(df.drop(columns=["id"]))
+            selected = st.selectbox("Open receiving slip", [f"{r.slip_no} — #{int(r.id)}" for r in df.itertuples()], key="log_receiving_register_select")
+            slip_id = int(selected.rsplit("#", 1)[1])
+            items = df_query("SELECT item_name, quantity_ordered, quantity_received, item_condition, discrepancy_notes FROM receiving_slip_items WHERE slip_id=?", (slip_id,))
+            dataframe(items)
+
+
+def delivery_exceptions_page():
+    st.subheader("Delivery Exceptions & Returns")
+    st.caption("Logistics records delivery problems. Procurement and the Facility/Utility team are notified automatically. Finance is notified only where invoice/payment matching may be affected.")
+    create_tab, register_tab = st.tabs(["Raise Exception", "Open / Resolved Exceptions"])
+    with create_tab:
+        pos = df_query(
+            """
+            SELECT po.id, po.po_no, v.name AS vendor, po.status, po.expected_delivery_date
+            FROM purchase_orders po LEFT JOIN vendors v ON v.id=po.vendor_id
+            WHERE po.status NOT IN ('Closed','Cancelled','Paid')
+            ORDER BY po.updated_at DESC
+            """
+        )
+        if pos.empty:
+            st.info("No POs are available for an exception record.")
+        else:
+            with st.form("log_exception_form"):
+                po_label = st.selectbox("Purchase order", [f"{r.po_no} — {r.status} — #{int(r.id)}" for r in pos.itertuples()])
+                exception_type = st.selectbox("Exception type", LOGISTICS_EXCEPTION_TYPES)
+                description = st.text_area("What happened and what action is required")
+                payment_impact = st.checkbox("May affect invoice matching or payment", value=False)
+                submitted = st.form_submit_button("Raise Delivery Exception", type="primary")
+            if submitted:
+                if not description.strip():
+                    st.error("Describe the delivery exception before saving it.")
+                else:
+                    po_id = int(po_label.rsplit("#", 1)[1])
+                    po = _logistics_po_context(po_id)
+                    if po:
+                        exception_id = _record_logistics_exception(po, exception_type, description.strip(), payment_impact)
+                        _rerun_success(f"Delivery exception {exception_id} raised and routed to Procurement/Facility.")
+    with register_tab:
+        df = df_query(
+            """
+            SELECT le.id, le.exception_no, po.po_no, le.exception_type, le.description,
+                   le.payment_impact, le.status, le.created_at, le.resolution_note
+            FROM logistics_exceptions le
+            LEFT JOIN purchase_orders po ON po.id=le.po_id
+            ORDER BY CASE le.status WHEN 'Open' THEN 0 WHEN 'In Progress' THEN 1 ELSE 2 END, le.updated_at DESC
+            """
+        )
+        if df.empty:
+            empty_state("No delivery exceptions", "Delivery exceptions and returns will be recorded here.")
+        else:
+            shown = df.drop(columns=["id"]).copy()
+            shown["payment_impact"] = shown["payment_impact"].apply(lambda x: "Yes" if int(x or 0) else "No")
+            dataframe(shown)
+            open_rows = df[df["status"].isin(["Open", "In Progress"])]
+            if not open_rows.empty:
+                selected = st.selectbox("Resolve exception", [f"{r.exception_no} — {r.po_no} — #{int(r.id)}" for r in open_rows.itertuples()], key="log_exception_resolve_select")
+                exception_id = int(selected.rsplit("#", 1)[1])
+                resolution = st.text_area("Resolution note", key=f"log_exception_resolution_{exception_id}")
+                if st.button("Mark Resolved", key=f"log_exception_resolve_btn_{exception_id}"):
+                    if not resolution.strip():
+                        st.error("Enter the resolution note before closing the exception.")
+                    else:
+                        row = df[df["id"] == exception_id].iloc[0]
+                        run_query("UPDATE logistics_exceptions SET status='Resolved', resolved_by=?, resolution_note=?, updated_at=? WHERE id=?", (user()["id"], resolution.strip(), now_iso(), exception_id))
+                        po_rows = df_query("SELECT id FROM purchase_orders WHERE po_no=?", (row["po_no"],))
+                        if not po_rows.empty:
+                            run_query("UPDATE purchase_orders SET delivery_exception_status='Resolved', updated_at=? WHERE id=?", (now_iso(), int(po_rows.iloc[0]["id"])))
+                        add_workflow_event("Logistics Exception", exception_id, "Exception Resolved", "Resolved", resolution.strip(), user()["id"])
+                        log_audit("LOGISTICS_EXCEPTION_RESOLVED", "Logistics Exception", exception_id, resolution.strip(), user()["id"], user()["role"])
+                        _rerun_success("Delivery exception marked resolved.")
+
+
+def gateway_pass_coordination_page():
+    st.subheader("Gateway Pass Coordination")
+    st.caption("Coordinate approved/active movements only. Logistics cannot submit, review, approve, reject, or generate a gateway pass.")
+    df = df_query(
+        """
+        SELECT gp.id, gp.pass_number, gp.status, gp.movement_type, gp.origin_location, gp.destination,
+               gp.expected_movement_date, gp.expected_return_date, gp.vehicle_number, gp.driver_name,
+               gp.logistics_status, gp.logistics_delivery_reference, fm.full_name AS facility_manager
+        FROM gateway_passes gp
+        LEFT JOIN users fm ON fm.id=gp.facility_manager_user_id
+        WHERE gp.status IN ('Approved','Generated','Downloaded')
+           OR COALESCE(gp.logistics_status,'') IN ('Scheduled','Entered','Exited','Completed')
+        ORDER BY gp.updated_at DESC, gp.created_at DESC
+        """
+    )
+    if df.empty:
+        empty_state("No approved gateway passes to coordinate", "Approved Facility/Utility gateway passes will appear here for movement coordination.")
+        return
+    dataframe(df.drop(columns=["id"]))
+    selected = st.selectbox("Open gateway pass for coordination", [f"{r.pass_number} — {r.status} — #{int(r.id)}" for r in df.itertuples()], key="log_gateway_select")
+    gp_id = int(selected.rsplit("#", 1)[1])
+    gp = df_query("SELECT * FROM gateway_passes WHERE id=?", (gp_id,)).iloc[0]
+    movement_states = ["Scheduled", "Entered", "Exited", "Completed"]
+    current_state = str(gp.get("logistics_status") or "Scheduled")
+    with st.form(f"log_gateway_coord_form_{gp_id}"):
+        c1, c2, c3 = st.columns(3)
+        movement_date = c1.date_input("Movement date", value=_logistics_date(gp.get("logistics_movement_date") or gp.get("expected_movement_date"), date.today()))
+        driver_name = c2.text_input("Driver name", value=str(gp.get("driver_name") or ""))
+        driver_phone = c3.text_input("Driver phone", value=str(gp.get("driver_phone") or ""))
+        c4, c5, c6 = st.columns(3)
+        vehicle_number = c4.text_input("Vehicle number", value=str(gp.get("vehicle_number") or ""))
+        delivery_ref = c5.text_input("Delivery / movement reference", value=str(gp.get("logistics_delivery_reference") or ""))
+        status = c6.selectbox("Movement status", movement_states, index=movement_states.index(current_state) if current_state in movement_states else 0)
+        waybill = st.text_input("Waybill / delivery document number", value=str(gp.get("logistics_waybill_number") or ""))
+        note = st.text_area("Coordination note", value=str(gp.get("logistics_note") or ""))
+        attachment = st.file_uploader("Waybill / delivery proof", type=["pdf", "jpg", "jpeg", "png"], key=f"log_gateway_upload_{gp_id}")
+        submitted = st.form_submit_button("Save Movement Coordination", type="primary")
+    if submitted:
+        path, _ = save_upload(attachment, "logistics_gateway")
+        run_query(
+            """
+            UPDATE gateway_passes
+            SET driver_name=?, driver_phone=?, vehicle_number=?, logistics_movement_date=?, logistics_delivery_reference=?,
+                logistics_waybill_number=?, logistics_status=?, logistics_note=?, logistics_updated_by=?, logistics_updated_at=?, updated_at=?
+            WHERE id=?
+            """,
+            (driver_name.strip(), driver_phone.strip(), vehicle_number.strip(), movement_date.isoformat(), delivery_ref.strip(), waybill.strip(), status, note.strip(), user()["id"], now_iso(), now_iso(), gp_id),
+        )
+        if path:
+            run_insert(
+                """
+                INSERT INTO logistics_documents
+                (related_entity_type, related_entity_id, gateway_pass_id, document_type, file_name, file_path, notes, uploaded_by, created_at)
+                VALUES ('Gateway Pass', ?, ?, 'Waybill / Movement Proof', ?, ?, ?, ?, ?)
+                """,
+                (gp_id, gp_id, Path(path).name, path, note.strip(), user()["id"], now_iso()),
+            )
+        add_workflow_event("Gateway Pass", gp_id, "Logistics Coordination Updated", status, note or f"Movement status {status}", user()["id"])
+        log_audit("GATEWAY_PASS_LOGISTICS_COORDINATED", "Gateway Pass", gp_id, note or status, user()["id"], user()["role"], after_values={"logistics_status": status})
+        fm_id = int(gp.get("facility_manager_user_id") or 0)
+        if fm_id:
+            create_notification(fm_id, None, "Gateway pass movement updated", f"{gp['pass_number']} movement coordination is {status.lower()}.", "Gateway Pass", gp_id, "Normal", ["in_app"], action_label="Gateway Pass")
+        create_notification(None, "Procurement Manager", "Gateway pass movement update", f"Logistics updated {gp['pass_number']} to {status.lower()}.", "Gateway Pass", gp_id, "Normal", ["in_app"], action_label="Gateway Pass Review")
+        _rerun_success("Gateway pass movement coordination saved.")
+
+
+def logistics_documents_page():
+    st.subheader("Logistics Documents")
+    st.caption("Store waybills, delivery notes, signed proof of delivery, photos and movement documents against the correct PO or gateway pass.")
+    upload_tab, register_tab = st.tabs(["Upload Document", "Document Register"])
+    with upload_tab:
+        entity_type = st.selectbox("Related record", ["Purchase Order", "Gateway Pass"], key="log_doc_entity_type")
+        if entity_type == "Purchase Order":
+            records = df_query("SELECT id, po_no AS ref FROM purchase_orders ORDER BY updated_at DESC LIMIT 500")
+        else:
+            records = df_query("SELECT id, pass_number AS ref FROM gateway_passes ORDER BY updated_at DESC LIMIT 500")
+        if records.empty:
+            st.info("No related records are available yet.")
+        else:
+            with st.form("log_doc_upload_form"):
+                label = st.selectbox("Related record", [f"{r.ref} — #{int(r.id)}" for r in records.itertuples()])
+                doc_type = st.selectbox("Document type", ["Waybill", "Delivery Note", "Proof of Delivery", "Delivery Photo", "Vehicle / Driver Record", "Other"])
+                notes = st.text_area("Notes")
+                uploaded = st.file_uploader("Upload logistics document", type=["pdf", "jpg", "jpeg", "png", "docx", "xlsx"])
+                submitted = st.form_submit_button("Save Document", type="primary")
+            if submitted:
+                if uploaded is None:
+                    st.error("Choose a document to upload.")
+                else:
+                    entity_id = int(label.rsplit("#", 1)[1])
+                    path, _ = save_upload(uploaded, "logistics_documents")
+                    po_id = entity_id if entity_type == "Purchase Order" else None
+                    gp_id = entity_id if entity_type == "Gateway Pass" else None
+                    doc_id = run_insert(
+                        """
+                        INSERT INTO logistics_documents
+                        (related_entity_type, related_entity_id, po_id, gateway_pass_id, document_type, file_name, file_path, notes, uploaded_by, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (entity_type, entity_id, po_id, gp_id, doc_type, uploaded.name, path, notes.strip(), user()["id"], now_iso()),
+                    )
+                    add_workflow_event(entity_type, entity_id, "Logistics Document Uploaded", None, f"{doc_type}: {uploaded.name}", user()["id"])
+                    log_audit("LOGISTICS_DOCUMENT_UPLOADED", "Logistics Document", doc_id, f"{doc_type}: {uploaded.name}", user()["id"], user()["role"])
+                    _rerun_success("Logistics document saved.")
+    with register_tab:
+        df = df_query(
+            """
+            SELECT ld.id, ld.related_entity_type, ld.related_entity_id, ld.document_type, ld.file_name,
+                   ld.notes, u.full_name AS uploaded_by, ld.created_at
+            FROM logistics_documents ld LEFT JOIN users u ON u.id=ld.uploaded_by
+            ORDER BY ld.created_at DESC
+            """
+        )
+        if df.empty:
+            empty_state("No logistics documents", "Uploaded logistics documents will appear here.")
+        else:
+            dataframe(df.drop(columns=["id"]))
+
+
+def logistics_workspace():
+    role_header("Logistics Officer Workspace", "Coordinate delivery, receiving, movement documentation, exceptions and proof-of-delivery after Procurement releases a commercial PO.")
+    section = st.session_state.get("logistics_section", "Logistics Dashboard")
+    if section == "Logistics Dashboard":
+        logistics_dashboard()
+    elif section == "PO Delivery Handover":
+        po_delivery_handover_page()
+    elif section == "Delivery Tracking":
+        delivery_tracking_page()
+    elif section == "Receiving Slips":
+        logistics_receiving_page()
+    elif section == "Delivery Exceptions & Returns":
+        delivery_exceptions_page()
+    elif section == "Gateway Pass Coordination":
+        gateway_pass_coordination_page()
+    elif section == "Logistics Documents":
+        logistics_documents_page()
+    elif section == "My Activity History":
+        activity_history_page(scope="mine")
+    elif section == "Settings":
+        settings_page()
+    else:
+        logistics_dashboard()
+
+
+# Procurement remains a commercial workspace. Receiving/fulfilment is no
+# longer exposed in this navigation; legacy "Purchase Orders" deep-links are
+# retained as an alias so old bookmarks do not break.
+def procurement_workspace():
+    role_header("Procurement Manager Workspace", "Review Utility Head / Facility Head submissions, source vendors, make commercial recommendations, create POs and release approved POs to Logistics. This role cannot approve normal procurement/payment requests or record receiving slips.")
+    section = st.session_state.get("procurement_section", "Operations Dashboard")
+    if section == "Operations Dashboard":
+        procurement_dashboard_metrics(); procurement_dashboard()
+    elif section == "Purchase Requests":
+        requests_page(mode="procurement")
+    elif section in ["Utility Head / Facility Head Inbox", "Facility Manager Inbox"]:
+        facility_manager_inbox()
+    elif section == "Import Center":
+        import_center()
+    elif section == "Sourcing":
+        sourcing_page()
+    elif section == "Vendor Quotes":
+        quote_page()
+    elif section == "Vendor Recommendation":
+        sourcing_page()
+    elif section in ["Commercial PO Management", "Purchase Orders"]:
+        commercial_purchase_orders_page()
+    elif section == "Vendors":
+        vendors_page()
+    elif section == "Gateway Pass Review":
+        gateway_pass_review_queue("Gateway Pass Review")
+    elif section == "Post-Payment Closure":
+        post_payment_closure_page()
+    elif section == "Availability / Away Notice":
+        availability_panel()
+    elif section == "Procurement Documents":
+        document_archive(editable=True)
+    elif section == "Procurement Reports":
+        procurement_reports()
+    elif section == "Income":
+        income_page(manage=False)
+    elif section == "My Activity History":
+        activity_history_page(scope="mine")
+    elif section == "Settings":
+        settings_page()
+    else:
+        procurement_dashboard_metrics(); procurement_dashboard()
+
+
+def render_app():
+    if int(user().get("must_change_password") or 0):
+        role_header("Password Change Required", "An administrator has required a password update before you continue.")
+        change_password_panel()
+        return
+    role = user()["role"]
+    if role == "Admin":
+        admin_console()
+    elif role == "Procurement Manager":
+        procurement_workspace()
+    elif role == "Facility Manager":
+        facility_workspace()
+    elif role == "Logistics Officer":
+        logistics_workspace()
+    elif role == "Finance":
+        finance_workspace()
+    elif role == "Approver":
+        executive_workspace()
+    elif role == "Auditor":
+        audit_workspace()
+    else:
+        role_header("ProcureFlow", "Your role is not configured.")
+        change_password_panel()
+
+# ============================================================================
+# Low-value approval authority and Facility gateway usability patch
+# ============================================================================
+# Procurement Manager now has policy-based authority for transactions up to
+# ₦100,000.  This is intentionally narrower than `can_approve`: the latter
+# remains reserved for Admin/Approver and is still used for all higher-value
+# and gateway-pass decisions.
+from core.db import transition_payment_status, transition_po_status
+from core.permissions import can_approve_low_value
+from core.workflow import (
+    LOW_VALUE_APPROVAL_MODE,
+    PROCUREMENT_MANAGER_APPROVAL_THRESHOLD,
+    approval_amount,
+    is_low_value_approval,
+    required_approval_role_for_amount,
+)
+
+
+def _threshold_amount_label(value: Any) -> str:
+    return money(approval_amount(value))
+
+
+def _is_pm_low_value_authority(role: str, amount: Any) -> bool:
+    return role == "Procurement Manager" and can_approve_low_value(role) and is_low_value_approval(amount)
+
+
+def _threshold_approval_mode(role: str, amount: Any) -> tuple[str, str | None]:
+    if _is_pm_low_value_authority(role, amount):
+        return LOW_VALUE_APPROVAL_MODE, "Approver"
+    return "Normal Approval Mode", None
+
+
+def _notify_approver_of_pm_threshold_approval(
+    entity_type: str,
+    entity_id: int,
+    reference: str,
+    amount: Any,
+    note: str | None = None,
+):
+    """Give Approver/MD visibility without sending a low-value item for a second approval."""
+    message = (
+        f"Procurement Manager approved {reference} for {_threshold_amount_label(amount)} "
+        f"under the ₦100,000 low-value authority."
+    )
+    if note:
+        message = f"{message} Note: {note}"
+    create_notification(
+        None,
+        "Approver",
+        "Procurement Manager low-value approval audit",
+        message,
+        entity_type,
+        entity_id,
+        "Important",
+        ["in_app", "browser_push"],
+        action_label="My Approval History",
+    )
+
+
+def _approval_guard(
+    entity: str,
+    amount: Any,
+    new_status: str,
+    allow_approver_for_low_value: bool = False,
+) -> tuple[bool, str]:
+    """Enforce the ₦100,000 chain before an approval/rejection is saved.
+
+    A Procurement Manager may not approve a request they personally created.
+    In that narrow segregation-of-duties case, an Approver / MD may decide a
+    low-value PM-originated request even though ordinary low-value requests are
+    owned by the Procurement Manager.
+    """
+    role = _current_role()
+    low_value = is_low_value_approval(amount)
+    if role == "Procurement Manager":
+        if not low_value:
+            return False, "Only the Approver / MD can approve or reject transactions above ₦100,000."
+        if new_status not in {"Approved", "Rejected", "Returned"}:
+            return False, "Procurement Manager can use low-value authority only for approval, rejection, or return decisions."
+        return True, ""
+    if role == "Approver" and low_value and not allow_approver_for_low_value:
+        return False, "This transaction is within the ₦100,000 Procurement Manager approval authority. The Approver / MD receives an audit trail instead."
+    if not can_approve(role):
+        return False, "You are not authorized to approve or reject this transaction."
+    return True, ""
+
+
+def _pm_originated_request(requester_id: Any) -> bool:
+    """Return true where a request was created by a Procurement Manager."""
+    try:
+        owner_id = int(requester_id or 0)
+    except (TypeError, ValueError):
+        return False
+    if not owner_id:
+        return False
+    owners = df_query("SELECT role FROM users WHERE id=?", (owner_id,))
+    return not owners.empty and str(owners.iloc[0].get("role") or "") == "Procurement Manager"
+
+
+def _submit_request_to_final_approval(pr_id: int, pr, event: str, note: str):
+    """Submit one request using amount routing plus self-approval separation."""
+    owner_is_pm = _pm_originated_request(pr.get("requested_by"))
+    next_role_override = "approver" if owner_is_pm else None
+    mode = "Segregation of Duties — PM-Originated Request" if owner_is_pm else "Normal Approval Mode"
+    transition_request_status(
+        pr_id,
+        "Submitted for Approval",
+        event,
+        note,
+        user()["id"],
+        _current_role(),
+        approval_mode=mode,
+        next_role_override=next_role_override,
+    )
+    target_note = (
+        "This request was created by Procurement Manager and requires independent Approver / MD approval."
+        if owner_is_pm
+        else "This request exceeds ₦100,000 and requires Approver / MD approval."
+    )
+    create_notification(
+        None,
+        "Approver",
+        "Request pending approval",
+        f"{pr['request_no']} requires approval. {target_note}",
+        "Purchase Request",
+        pr_id,
+        "High",
+        ["in_app", "browser_push"],
+        action_label="Pending Approvals",
+    )
+    create_notification(
+        None,
+        "Admin",
+        "Request submitted for approval",
+        f"{pr['request_no']} has been routed to Approver / MD. {target_note}",
+        "Purchase Request",
+        pr_id,
+        "Important",
+        ["in_app"],
+    )
+    _rerun_success("Request submitted to Approver / MD.")
+
+
+def approval_action(entity: str, entity_id: int, old_status: str, new_status: str, action: str, reason: str = ""):
+    """Apply a value-aware approval consistently to requests, POs, and payments."""
+    role = _current_role()
+    if entity == "Purchase Request":
+        rows = df_query("SELECT request_no, estimated_amount, requested_by FROM purchase_requests WHERE id=?", (entity_id,))
+        if rows.empty:
+            st.error("Purchase request not found.")
+            return
+        row = rows.iloc[0]
+        amount = row.get("estimated_amount")
+        pm_originated = _pm_originated_request(row.get("requested_by"))
+        allowed, message = _approval_guard(
+            entity, amount, new_status,
+            allow_approver_for_low_value=(role == "Approver" and pm_originated),
+        )
+        if not allowed:
+            st.error(message)
+            return
+        approval_mode, original_approver = _threshold_approval_mode(role, amount)
+        if role == "Approver" and pm_originated and is_low_value_approval(amount):
+            approval_mode = "Segregation of Duties — PM-Originated Request"
+            original_approver = None
+        payment_status = "Approved for Payment" if new_status == "Approved" else None
+        transition_request_status(
+            entity_id,
+            new_status,
+            action,
+            reason or f"{action} by {display_role(role)}",
+            user()["id"],
+            role,
+            approval_mode,
+            None,
+            original_approver,
+            payment_status=payment_status,
+        )
+        if new_status == "Approved":
+            create_notification(
+                None,
+                "Finance",
+                "Approved item ready for Finance",
+                f"{row['request_no']} has been approved and is ready for payment review.",
+                entity,
+                entity_id,
+                "Important",
+                ["in_app", "browser_push"],
+                action_label="Approved for Payment",
+            )
+            if _is_pm_low_value_authority(role, amount):
+                _notify_approver_of_pm_threshold_approval(entity, entity_id, str(row["request_no"]), amount, reason)
+        _rerun_success(f"{entity} {action.lower()}.")
+        return
+
+    if entity == "Purchase Order":
+        rows = df_query("SELECT po_no, total_amount FROM purchase_orders WHERE id=?", (entity_id,))
+        if rows.empty:
+            st.error("Purchase order not found.")
+            return
+        row = rows.iloc[0]
+        amount = row.get("total_amount")
+        allowed, message = _approval_guard(entity, amount, new_status)
+        if not allowed:
+            st.error(message)
+            return
+        approval_mode, original_approver = _threshold_approval_mode(role, amount)
+        transition_po_status(
+            entity_id,
+            new_status,
+            reason or f"{action} by {display_role(role)}",
+            user()["id"],
+            role,
+            approval_mode,
+            None,
+            original_approver,
+        )
+        if new_status == "Approved" and _is_pm_low_value_authority(role, amount):
+            _notify_approver_of_pm_threshold_approval(entity, entity_id, str(row["po_no"]), amount, reason)
+        _rerun_success(f"{entity} {action.lower()}.")
+        return
+
+    if entity == "Payment":
+        rows = df_query("SELECT payment_no, amount FROM payments WHERE id=?", (entity_id,))
+        if rows.empty:
+            st.error("Payment request not found.")
+            return
+        row = rows.iloc[0]
+        amount = row.get("amount")
+        allowed, message = _approval_guard(entity, amount, new_status)
+        if not allowed:
+            st.error(message)
+            return
+        approval_mode, original_approver = _threshold_approval_mode(role, amount)
+        transition_payment_status(
+            entity_id,
+            new_status,
+            reason or f"{action} by {display_role(role)}",
+            user()["id"],
+            role,
+            approval_mode=approval_mode,
+            original_approver_role=original_approver,
+        )
+        if new_status == "Approved":
+            create_notification(
+                None,
+                "Finance",
+                "Payment request approved",
+                f"{row['payment_no']} has been approved and is ready for Finance processing.",
+                entity,
+                entity_id,
+                "Important",
+                ["in_app", "browser_push"],
+                action_label="Payments",
+            )
+            if _is_pm_low_value_authority(role, amount):
+                _notify_approver_of_pm_threshold_approval(entity, entity_id, str(row["payment_no"]), amount, reason)
+        _rerun_success(f"{entity} {action.lower()}.")
+        return
+
+    st.error("Unsupported approval record.")
+
+
+def request_actions(pr_id: int, pr, key_scope: str | None = None):
+    """Show only role-safe next actions, including the value-based authority."""
+    scope = key_scope or "default"
+    prefix = f"{scope}_pr_{pr_id}"
+    role = _current_role()
+    status = str(pr.get("status") or "")
+    amount = approval_amount(pr.get("estimated_amount"))
+    low_value = is_low_value_approval(amount)
+    requester_id = int(pr.get("requested_by") or 0)
+    is_pm_own_request = role == "Procurement Manager" and requester_id == int(user()["id"])
+
+    st.markdown("#### Guided next action")
+    if role in {"Procurement Manager", "Approver", "Admin"}:
+        st.caption(
+            f"Approval authority: Procurement Manager approves ₦100,000 and below; "
+            f"Approver / MD approves above ₦100,000. Current value: {_threshold_amount_label(amount)}."
+        )
+    actions: list[tuple[str, str, str, str]] = []
+    draft_statuses = ["Draft", "FM Draft", "Returned for Correction", "Returned to Facility Manager"]
+    review_statuses = [
+        "Sent for Procurement Review", "Submitted to Procurement Manager", "Submitted",
+        "Procurement Review", "Reviewed by Procurement",
+    ]
+
+    if status in draft_statuses:
+        if role in ["Facility Manager", "Admin"] and not (role == "Admin" and requester_id == int(user()["id"])):
+            actions.append(("Send to Procurement Manager", "Sent for Procurement Review", "Sent for Procurement Review", "Sent for procurement review"))
+        elif role == "Procurement Manager":
+            actions.append(("Mark Requires Sourcing / Start Vendor Quotes", "__sourcing__", "Sourcing Required", "Supplier comparison required before approval"))
+            # Preserve segregation of duties: a PM-created request goes to
+            # Approver / MD even when its value is within the normal PM limit.
+            if is_pm_own_request:
+                actions.append(("Submit to Approver/Admin", "Submitted for Approval", "Submitted for Independent Approval", "PM-originated request submitted for independent approval"))
+            elif low_value:
+                actions.append(("Approve Low-Value Request (≤ ₦100,000)", "Approved", "Approved Low-Value Request", "Approved under Procurement Manager low-value authority"))
+                actions.append(("Reject Low-Value Request", "Rejected", "Rejected Low-Value Request", "Rejected under Procurement Manager low-value authority"))
+            else:
+                actions.append(("Submit to Approver/Admin", "Submitted for Approval", "Submitted for Approval", "Submitted by Procurement Manager for final approval"))
+
+    if status in review_statuses and role in ["Procurement Manager", "Admin"]:
+        if status != "Reviewed by Procurement":
+            actions.append(("Mark Reviewed", "Reviewed by Procurement", "Reviewed by Procurement", "Reviewed by Procurement Manager"))
+        actions.append(("Mark Requires Sourcing / Start Vendor Quotes", "__sourcing__", "Sourcing Required", "Supplier comparison required before approval"))
+        if role == "Procurement Manager" and low_value:
+            actions.append(("Approve Low-Value Request (≤ ₦100,000)", "Approved", "Approved Low-Value Request", "Approved under Procurement Manager low-value authority"))
+            actions.append(("Reject Low-Value Request", "Rejected", "Rejected Low-Value Request", "Rejected under Procurement Manager low-value authority"))
+        elif role == "Admin" or not low_value:
+            actions.append(("Submit to Approver/Admin", "Submitted for Approval", "Submitted for Approval", "Submitted for final approval"))
+        actions.append(("Return for Correction", "Returned for Correction", "Returned for Correction", "Returned for correction"))
+
+    if status in ["Requires Sourcing", "Vendor Quote Collection"] and role in ["Procurement Manager", "Admin"]:
+        actions.append(("Open / Continue Sourcing", "__open_sourcing__", "Sourcing Continued", "Continue vendor quote collection"))
+
+    if status == "Vendor Recommendation" and role in ["Procurement Manager", "Admin"]:
+        actions.append(("Open / Continue Sourcing", "__open_sourcing__", "Sourcing Continued", "Continue vendor quote collection"))
+        if role == "Procurement Manager" and low_value and not _pm_originated_request(requester_id):
+            actions.append(("Approve Low-Value Request (≤ ₦100,000)", "Approved", "Approved Low-Value Request", "Vendor recommendation approved under Procurement Manager low-value authority"))
+            actions.append(("Reject Low-Value Request", "Rejected", "Rejected Low-Value Request", "Rejected under Procurement Manager low-value authority"))
+        elif role == "Admin" or not low_value or _pm_originated_request(requester_id):
+            actions.append(("Submit Vendor Recommendation to Approver/Admin", "Submitted for Approval", "Submitted for Approval", "Vendor recommendation submitted for final approval"))
+        actions.append(("Return for Correction", "Returned for Correction", "Returned for Correction", "Returned for correction"))
+
+    pending_statuses = ["Submitted for Approval", "Pending Approver/MD Approval", "Pending Approval"]
+    if status in pending_statuses:
+        if role == "Procurement Manager" and low_value and not _pm_originated_request(requester_id):
+            actions.extend([
+                ("Approve Low-Value Request (≤ ₦100,000)", "Approved", "Approved Low-Value Request", "Approved under Procurement Manager low-value authority"),
+                ("Reject Low-Value Request", "Rejected", "Rejected Low-Value Request", "Rejected under Procurement Manager low-value authority"),
+                ("Return for Correction", "Returned for Correction", "Returned for Correction", "Returned for correction"),
+            ])
+        elif role == "Procurement Manager" and low_value and _pm_originated_request(requester_id):
+            st.info("This Procurement Manager-created request is awaiting independent Approver / MD approval.")
+        elif can_approve(role) and not (role == "Approver" and low_value and not _pm_originated_request(requester_id)):
+            actions.extend([
+                ("Approve Request", "Approved", "Approved", "Approved"),
+                ("Reject Request", "Rejected", "Rejected", "Rejected"),
+                ("Return for Correction", "Returned for Correction", "Returned for Correction", "Returned for correction"),
+            ])
+        elif role == "Approver" and low_value:
+            st.info("This low-value request is assigned to Procurement Manager for approval. You will receive its audit record once the decision is made.")
+
+    if status == "Approved" and role in ["Procurement Manager", "Admin"] and has_permission("create_po"):
+        actions.append(("Open Purchase Orders / Create PO", "__open_po__", "PO Action", "Create purchase order for approved request"))
+
+    if role == "Finance" and status in ["Approved", "Awaiting Payment", "Approved for Payment"]:
+        st.info("This item is approved. Use Finance → Approved for Payment to record payment and upload receipt.")
+
+    if not actions:
+        st.info("No direct action is available for this request at its current status or your role.")
+        return
+
+    # Direct role-safe guided action buttons with semantic colors.
+    st.markdown(
+        """
+        <style>
+        [data-testid="stVerticalBlock"]:has(.pf-guided-action-approve) button {
+            background: #1769E8 !important;
+            color: #FFFFFF !important;
+            border: 1px solid #1769E8 !important;
+        }
+
+        [data-testid="stVerticalBlock"]:has(.pf-guided-action-reject) button {
+            background: #E57373 !important;
+            color: #FFFFFF !important;
+            border: 1px solid #E57373 !important;
+        }
+
+        [data-testid="stVerticalBlock"]:has(.pf-guided-action-return) button {
+            background: #D69E2E !important;
+            color: #FFFFFF !important;
+            border: 1px solid #D69E2E !important;
+        }
+
+        [data-testid="stVerticalBlock"]:has(.pf-guided-action-complete) button {
+            background: #38A169 !important;
+            color: #FFFFFF !important;
+            border: 1px solid #38A169 !important;
+        }
+
+        [data-testid="stVerticalBlock"]:has(.pf-guided-action-hold) button {
+            background: #718096 !important;
+            color: #FFFFFF !important;
+            border: 1px solid #718096 !important;
+        }
+
+        [data-testid="stVerticalBlock"]:has(.pf-guided-action-neutral) button {
+            background: #4A5568 !important;
+            color: #FFFFFF !important;
+            border: 1px solid #4A5568 !important;
+        }
+
+        [data-testid="stVerticalBlock"]:has(.pf-guided-action-approve) button:hover,
+        [data-testid="stVerticalBlock"]:has(.pf-guided-action-reject) button:hover,
+        [data-testid="stVerticalBlock"]:has(.pf-guided-action-return) button:hover,
+        [data-testid="stVerticalBlock"]:has(.pf-guided-action-complete) button:hover,
+        [data-testid="stVerticalBlock"]:has(.pf-guided-action-hold) button:hover,
+        [data-testid="stVerticalBlock"]:has(.pf-guided-action-neutral) button:hover {
+            color: #FFFFFF !important;
+            filter: brightness(0.97);
+        }
+
+        .pf-guided-action-marker {
+            display: none;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    def _guided_action_tone(label: str) -> str:
+        normalized = " ".join(str(label or "").strip().lower().split())
+
+        if any(
+            token in normalized
+            for token in ("reject", "decline", "rescind", "cancel")
+        ):
+            return "reject"
+
+        if any(
+            token in normalized
+            for token in (
+                "return",
+                "send back",
+                "request changes",
+                "request change",
+                "revise",
+                "revision",
+            )
+        ):
+            return "return"
+
+        if any(
+            token in normalized
+            for token in (
+                "complete",
+                "close",
+                "mark paid",
+                "paid",
+                "verify",
+                "confirm",
+                "archive",
+            )
+        ):
+            return "complete"
+
+        if any(
+            token in normalized
+            for token in ("hold", "pause", "defer", "pending")
+        ):
+            return "hold"
+
+        if any(
+            token in normalized
+            for token in (
+                "approve",
+                "submit",
+                "open",
+                "create po",
+                "po",
+                "sourcing",
+                "forward",
+                "release",
+            )
+        ):
+            return "approve"
+
+        return "neutral"
+
+    reason = st.text_area(
+        "Comment / reason",
+        key=f"reason_threshold_{prefix}",
+        placeholder=(
+            "Required for Reject or Return actions; "
+            "optional for other actions."
+        ),
+    )
+
+    clicked_action = None
+    maximum_buttons_per_row = 4
+
+    for row_start in range(
+        0,
+        len(actions),
+        maximum_buttons_per_row,
+    ):
+        row_actions = actions[
+            row_start:row_start + maximum_buttons_per_row
+        ]
+
+        button_columns = st.columns(
+            len(row_actions),
+            gap="small",
+        )
+
+        for offset, action in enumerate(row_actions):
+            label = action[0]
+            action_index = row_start + offset
+            tone = _guided_action_tone(label)
+
+            with button_columns[offset]:
+                st.markdown(
+                    (
+                        '<div class="pf-guided-action-marker '
+                        f'pf-guided-action-{tone}" '
+                        'aria-hidden="true"></div>'
+                    ),
+                    unsafe_allow_html=True,
+                )
+
+                if st.button(
+                    label,
+                    key=(
+                        f"guided_action_button_"
+                        f"{prefix}_{action_index}"
+                    ),
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    clicked_action = action
+
+    if clicked_action is None:
+        return
+
+    label, new_status, event, note = clicked_action
+
+    if any(
+        word in label
+        for word in ("Reject", "Return")
+    ) and not reason.strip():
+        st.error(
+            "Please enter a reason before using this action."
+        )
+        return
+
+    if new_status in [
+        "__sourcing__",
+        "__open_sourcing__",
+    ]:
+        create_sourcing_for_request(pr_id)
+        _navigate_procurement_section(
+            "Sourcing",
+            (
+                "Sourcing task is ready. "
+                "Add vendor quotes from the Sourcing tab."
+            ),
+        )
+        return
+
+    if new_status == "__open_po__":
+        _navigate_procurement_section(
+            "Commercial PO Management"
+        )
+        return
+
+    if new_status in ["Approved", "Rejected"]:
+        approval_action(
+            "Purchase Request",
+            pr_id,
+            status,
+            new_status,
+            event,
+            reason or note,
+        )
+        return
+
+    if new_status == "Submitted for Approval":
+        _submit_request_to_final_approval(
+            pr_id,
+            pr,
+            event,
+            reason or note,
+        )
+        return
+
+    update_request_status(
+        pr_id,
+        new_status,
+        event,
+        reason or note,
+    )
+
+
+def request_next_action_board():
+    """Procurement command board with separate low/high-value decisions."""
+    role = _current_role()
+    if role not in ["Procurement Manager", "Admin"]:
+        st.info("This command board is reserved for Procurement Manager actions.")
+        return
+    st.caption("Work through review, sourcing, value-based approval, vendor recommendation, and PO creation without manually changing statuses.")
+    review_statuses = ("Draft", "Sent for Procurement Review", "Submitted to Procurement Manager", "Submitted", "Procurement Review", "Reviewed by Procurement", "Vendor Recommendation")
+    cards: list[dict[str, Any]] = [
+        {
+            "title": "Low-value requests: Procurement Manager approval (≤ ₦100,000)",
+            "statuses": review_statuses,
+            "button": "Approve Low-Value Request",
+            "new_status": "__threshold_approve__",
+            "event": "Approved Low-Value Request",
+            "note": "Approved under Procurement Manager low-value authority",
+            "extra_sql": " AND COALESCE(estimated_amount,0) <= ? AND COALESCE(requested_by,0) NOT IN (SELECT id FROM users WHERE role='Procurement Manager')",
+            "extra_params": (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD,),
+        },
+        {
+            "title": "My PM drafts: submit directly to Approver/Admin",
+            "statuses": ("Draft",),
+            "button": "Submit to Approver/Admin",
+            "new_status": "Submitted for Approval",
+            "event": "Submitted for Independent Approval",
+            "note": "PM-originated request submitted for independent Approver / MD approval",
+            "extra_sql": " AND requested_by=?",
+            "extra_params": (user()["id"],),
+        },
+        {
+            "title": "Facility submissions: mark reviewed",
+            "statuses": ("Sent for Procurement Review", "Submitted to Procurement Manager", "Submitted", "Procurement Review"),
+            "button": "Mark Reviewed",
+            "new_status": "Reviewed by Procurement",
+            "event": "Reviewed by Procurement",
+            "note": "Reviewed by Procurement Manager",
+            "extra_sql": "",
+            "extra_params": (),
+        },
+        {
+            "title": "Requests requiring sourcing / vendor quotes",
+            "statuses": ("Sent for Procurement Review", "Submitted to Procurement Manager", "Submitted", "Procurement Review", "Reviewed by Procurement"),
+            "button": "Create / Open Sourcing Task",
+            "new_status": "__sourcing__",
+            "event": "Sourcing Required",
+            "note": "Supplier comparison required before approval",
+            "extra_sql": "",
+            "extra_params": (),
+        },
+        {
+            "title": "Active sourcing: continue vendor quote collection",
+            "statuses": ("Requires Sourcing", "Vendor Quote Collection"),
+            "button": "Open Sourcing Tab",
+            "new_status": "__open_sourcing__",
+            "event": "Sourcing Continued",
+            "note": "Continue vendor quote collection",
+            "extra_sql": "",
+            "extra_params": (),
+        },
+        {
+            "title": "High-value vendor recommendations: submit to Approver/Admin",
+            "statuses": ("Vendor Recommendation",),
+            "button": "Submit Recommendation to Approver/Admin",
+            "new_status": "Submitted for Approval",
+            "event": "Submitted for Approval",
+            "note": "Vendor recommendation submitted for Approver / MD approval",
+            "extra_sql": " AND COALESCE(estimated_amount,0) > ?",
+            "extra_params": (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD,),
+        },
+        {
+            "title": "Approved requests needing PO",
+            "statuses": ("Approved",),
+            "button": "Open PO Creation",
+            "new_status": "__open_po__",
+            "event": "PO Action",
+            "note": "Create purchase order for approved request",
+            "extra_sql": " AND linked_po_id IS NULL",
+            "extra_params": (),
+        },
+    ]
+    selected_title = st.selectbox("Action board", [c["title"] for c in cards], key="pr_action_board_choice_threshold")
+    card = next(c for c in cards if c["title"] == selected_title)
+    statuses = tuple(card["statuses"])
+    placeholders = ",".join(["?"] * len(statuses))
+    params: list[Any] = list(statuses) + list(card["extra_params"])
+    df = df_query(
+        f"""
+        SELECT id, request_no, department_project, category, estimated_amount, status, updated_at
+        FROM purchase_requests
+        WHERE status IN ({placeholders}) {card['extra_sql']}
+        ORDER BY updated_at DESC, created_at DESC
+        """,
+        params,
+    )
+    if df.empty:
+        st.success(f"No request currently needs: {selected_title.lower()}.")
+        return
+    show = df.copy()
+    show["estimated_amount"] = show["estimated_amount"].apply(money)
+    dataframe(show.drop(columns=["id"]))
+    selected = st.selectbox("Select request", [f"{r.request_no} — {r.status} — {money(r.estimated_amount)} — #{int(r.id)}" for r in df.itertuples()], key="pr_action_board_request_threshold")
+    pr_id = int(selected.rsplit("#", 1)[1])
+    selected_row = df[df["id"] == pr_id].iloc[0]
+    note = st.text_area("Comment / note", value=card["note"], key="pr_action_board_note_threshold")
+    if st.button(card["button"], type="primary", key="pr_apply_guided_action_threshold"):
+        new_status = card["new_status"]
+        if new_status in ["__sourcing__", "__open_sourcing__"]:
+            create_sourcing_for_request(pr_id)
+            _navigate_procurement_section("Sourcing", "Sourcing task is ready. Add vendor quotes from the Sourcing tab.")
+            return
+        if new_status == "__open_po__":
+            _navigate_procurement_section("Commercial PO Management")
+            return
+        if new_status == "__threshold_approve__":
+            approval_action("Purchase Request", pr_id, str(selected_row["status"]), "Approved", card["event"], note or card["note"])
+            return
+        if new_status == "Submitted for Approval":
+            _submit_request_to_final_approval(pr_id, selected_row, card["event"], note or card["note"])
+            return
+        update_request_status(pr_id, new_status, card["event"], note or card["note"])
+
+
+def commercial_po_detail(po_id: int):
+    """Commercial PO detail with the low/high-value approval split."""
+    po = _logistics_po_context(po_id)
+    if not po:
+        st.error("Purchase order not found.")
+        return
+    amount = approval_amount(po.get("total_amount"))
+    low_value = is_low_value_approval(amount)
+    st.markdown(f"### {po['po_no']} {badge(po.get('status') or 'Draft')}", unsafe_allow_html=True)
+    metric_row(
+        [
+            ("Vendor", po.get("vendor_name") or "—", None),
+            ("Total", money(amount), None),
+            ("Commercial Status", po.get("status") or "—", None),
+            ("Logistics Handover", po.get("logistics_status") or "Not Released", None),
+        ],
+        cols=4,
+    )
+    st.caption("Approval authority: Procurement Manager approves ₦100,000 and below; Approver / MD approves above ₦100,000.")
+    items = df_query("SELECT item_name, quantity, unit_price, total, category FROM purchase_order_items WHERE po_id=?", (po_id,))
+    if not items.empty:
+        shown = items.copy()
+        shown["unit_price"] = shown["unit_price"].apply(money)
+        shown["total"] = shown["total"].apply(money)
+        dataframe(shown)
+    with st.expander("Commercial handover information", expanded=False):
+        dataframe(pd.DataFrame([{
+            "Expected delivery date": po.get("expected_delivery_date") or "—",
+            "Vendor delivery contact": po.get("vendor_delivery_contact") or "—",
+            "Delivery address": po.get("delivery_address") or "—",
+            "Delivery instructions": po.get("delivery_instructions") or "—",
+            "Released to Logistics": po.get("released_to_logistics_at") or "—",
+        }]))
+
+    status = str(po.get("status") or "")
+    if status == "Draft":
+        note = st.text_area("Approval / handover note", key=f"pm_po_threshold_note_{po_id}")
+        if low_value:
+            st.info("This PO is within the Procurement Manager approval authority.")
+            c1, c2 = st.columns(2)
+            if c1.button("Approve Low-Value PO (≤ ₦100,000)", type="primary", key=f"pm_po_low_approve_{po_id}"):
+                approval_action("Purchase Order", po_id, status, "Approved", "Approved Low-Value PO", note or "Approved under Procurement Manager low-value authority")
+            if c2.button("Reject Low-Value PO", key=f"pm_po_low_reject_{po_id}"):
+                if not note.strip():
+                    st.error("Please enter a reason before rejecting this PO.")
+                else:
+                    approval_action("Purchase Order", po_id, status, "Rejected", "Rejected Low-Value PO", note)
+        else:
+            if st.button("Send for PO Approval", type="primary", key=f"pm_po_submit_approval_{po_id}"):
+                run_query("UPDATE purchase_orders SET status='Pending Approval', next_role='approver', updated_at=? WHERE id=?", (now_iso(), po_id))
+                add_workflow_event("Purchase Order", po_id, "Submitted for PO Approval", "Pending Approval", note or "Submitted by Procurement Manager", user()["id"])
+                create_activity_log(user()["id"], user()["role"], "PO_SUBMITTED_FOR_APPROVAL", "Purchase Order", po_id, f"{po['po_no']} sent to Approver / MD", note, "workflow", po.get("request_id"))
+                log_audit("PO_SUBMITTED_FOR_APPROVAL", "Purchase Order", po_id, note or "Submitted by Procurement Manager", user()["id"], user()["role"], before_values={"status": status}, after_values={"status": "Pending Approval", "next_role": "approver"})
+                create_notification(None, "Approver", "PO pending approval", f"{po['po_no']} requires approval because it is above ₦100,000.", "Purchase Order", po_id, "High", ["in_app", "browser_push"], action_label="PO Approval")
+                _rerun_success("Purchase order sent to Approver / MD.")
+    elif status == "Pending Approval":
+        if low_value:
+            st.info("This legacy low-value PO is awaiting Procurement Manager approval.")
+            note = st.text_area("Approval note", key=f"pm_po_pending_low_note_{po_id}")
+            if st.button("Approve Low-Value PO (≤ ₦100,000)", type="primary", key=f"pm_po_pending_low_approve_{po_id}"):
+                approval_action("Purchase Order", po_id, status, "Approved", "Approved Low-Value PO", note or "Approved under Procurement Manager low-value authority")
+        else:
+            st.info("Awaiting Approver/Admin decision. Procurement cannot approve a PO above ₦100,000.")
+    elif status == "Approved":
+        st.success("PO approved. Release it to Logistics when the commercial order is ready for fulfilment.")
+        release_note = st.text_area("Handover note for Logistics", key=f"pm_po_release_note_{po_id}")
+        if st.button("Release to Logistics", type="primary", key=f"pm_po_release_{po_id}"):
+            run_query(
+                """
+                UPDATE purchase_orders
+                SET status='Released to Logistics', next_role='logistics_officer', logistics_status='Awaiting Handover',
+                    released_to_logistics_at=?, released_to_logistics_by=?, updated_at=?
+                WHERE id=?
+                """,
+                (now_iso(), user()["id"], now_iso(), po_id),
+            )
+            add_workflow_event("Purchase Order", po_id, "Released to Logistics", "Released to Logistics", release_note or "Commercial PO released to Logistics Officer", user()["id"])
+            create_activity_log(user()["id"], user()["role"], "PO_RELEASED_TO_LOGISTICS", "Purchase Order", po_id, f"{po['po_no']} released to Logistics", release_note, "workflow", po.get("request_id"))
+            log_audit("PO_RELEASED_TO_LOGISTICS", "Purchase Order", po_id, release_note or "Commercial PO released to Logistics", user()["id"], user()["role"], before_values={"status": status}, after_values={"status": "Released to Logistics", "next_role": "logistics_officer"})
+            create_notification(None, "Logistics Officer", "PO delivery handover", f"{po['po_no']} has been released by Procurement and is ready for delivery planning.", "Purchase Order", po_id, "High", ["in_app", "browser_push"], action_label="PO Delivery Handover")
+            _notify_facility_for_logistics(po, "PO released to Logistics", f"{po['po_no']} is now with Logistics for delivery coordination.")
+            _rerun_success("PO released to Logistics Officer.")
+    else:
+        st.info("This PO is in fulfilment. Logistics owns delivery tracking and receiving; Procurement retains commercial oversight only.")
+
+
+def low_value_approvals_page():
+    """Procurement Manager queue for low-value requests, POs and payment requests."""
+    st.subheader("Low-Value Approvals")
+    st.caption("Procurement Manager approval authority applies to purchase requests, purchase orders, and standalone payment requests of ₦100,000 and below. Approver / MD receives a permanent audit trail for every PM approval.")
+    req_tab, po_tab, pay_tab = st.tabs(["Purchase Requests", "Purchase Orders", "Payment Requests"])
+
+    with req_tab:
+        reqs = df_query(
+            """
+            SELECT id, request_no, department_project, category, estimated_amount, status, updated_at
+            FROM purchase_requests
+            WHERE COALESCE(estimated_amount,0) <= ?
+              AND COALESCE(requested_by,0) NOT IN (SELECT id FROM users WHERE role='Procurement Manager')
+              AND status IN ('Draft','Sent for Procurement Review','Submitted to Procurement Manager','Submitted','Procurement Review','Reviewed by Procurement','Vendor Recommendation','Submitted for Approval','Pending Approver/MD Approval','Pending Approval')
+            ORDER BY updated_at DESC, created_at DESC
+            """,
+            (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD,),
+        )
+        if reqs.empty:
+            empty_state("No low-value purchase requests awaiting action", "Requests within the Procurement Manager approval limit will appear here.")
+        else:
+            shown = reqs.copy(); shown["estimated_amount"] = shown["estimated_amount"].apply(money); dataframe(shown.drop(columns=["id"]))
+            selected = st.selectbox("Open low-value purchase request", [f"{r.request_no} — {r.status} — #{int(r.id)}" for r in reqs.itertuples()], key="pm_low_request_select")
+            request_detail(int(selected.rsplit("#", 1)[1]), actions=True, key_scope="pm_low_value_request")
+
+    with po_tab:
+        pos = df_query(
+            """
+            SELECT id, po_no, total_amount, status, expected_delivery_date, updated_at
+            FROM purchase_orders
+            WHERE COALESCE(total_amount,0) <= ? AND status IN ('Draft','Pending Approval')
+            ORDER BY updated_at DESC, created_at DESC
+            """,
+            (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD,),
+        )
+        if pos.empty:
+            empty_state("No low-value purchase orders awaiting action", "Draft low-value POs created by Procurement will appear here.")
+        else:
+            shown = pos.copy(); shown["total_amount"] = shown["total_amount"].apply(money); dataframe(shown.drop(columns=["id"]))
+            selected = st.selectbox("Open low-value purchase order", [f"{r.po_no} — {r.status} — #{int(r.id)}" for r in pos.itertuples()], key="pm_low_po_select")
+            commercial_po_detail(int(selected.rsplit("#", 1)[1]))
+
+    with pay_tab:
+        payments = df_query(
+            """
+            SELECT id, payment_no, amount, payment_method, status, notes, created_at
+            FROM payments
+            WHERE COALESCE(amount,0) <= ?
+              AND status='Pending Approval'
+              AND COALESCE(next_role,'procurement_manager')='procurement_manager'
+            ORDER BY created_at DESC
+            """,
+            (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD,),
+        )
+        if payments.empty:
+            empty_state("No low-value payment requests awaiting action", "Standalone payment requests at or below ₦100,000 will appear here.")
+        else:
+            shown = payments.copy(); shown["amount"] = shown["amount"].apply(money); dataframe(shown.drop(columns=["id"]))
+            selected = st.selectbox("Open low-value payment request", [f"{r.payment_no} — {money(r.amount)} — #{int(r.id)}" for r in payments.itertuples()], key="pm_low_payment_select")
+            pay_id = int(selected.rsplit("#", 1)[1])
+            payment = payments[payments["id"] == pay_id].iloc[0]
+            note = st.text_area("Approval note", key=f"pm_low_payment_note_{pay_id}")
+            c1, c2 = st.columns(2)
+            if c1.button("Approve Low-Value Payment (≤ ₦100,000)", type="primary", key=f"pm_low_payment_approve_{pay_id}"):
+                approval_action("Payment", pay_id, str(payment["status"]), "Approved", "Approved Low-Value Payment", note or "Approved under Procurement Manager low-value authority")
+            if c2.button("Reject Low-Value Payment", key=f"pm_low_payment_reject_{pay_id}"):
+                if not note.strip():
+                    st.error("Please enter a reason before rejecting this payment request.")
+                else:
+                    approval_action("Payment", pay_id, str(payment["status"]), "Rejected", "Rejected Low-Value Payment", note)
+
+
+def payments_page():
+    """Preserve the existing payments screen while routing pending approval by value."""
+    st.subheader("Payments")
+    _ensure_finance_doc_schema_ui()
+    role = _current_role()
+    if role == "Finance":
+        st.info("Finance cannot create or approve payment requests. Finance can only pay approved items and upload receipts.")
+    df = df_query("SELECT p.id, p.payment_no, v.name vendor, p.amount, p.payment_method, p.payment_date, p.status, p.next_role, p.notes, p.proof_path, p.finance_note FROM payments p LEFT JOIN vendors v ON p.vendor_id=v.id ORDER BY p.created_at DESC")
+    if not df.empty:
+        show = df.drop(columns=["id"]).copy(); show["amount"] = show["amount"].apply(money); dataframe(show); csv_download(show, "payments")
+    else:
+        st.info("No payment records yet.")
+    if can_create_payment_request(role):
+        st.markdown("##### Manual Payment Request")
+        with st.form("manual_payment_cmd"):
+            vendors = vendor_options(False)
+            v = st.selectbox("Vendor", list(vendors.keys()), key="manual_pay_vendor_cmd")
+            amount = st.number_input("Amount", min_value=0.0, step=1000.0, key="manual_pay_amount_cmd")
+            method = st.selectbox("Method", RECEIPT_PAYMENT_METHODS if "RECEIPT_PAYMENT_METHODS" in globals() else PAYMENT_METHODS, key="manual_pay_method_cmd")
+            notes = st.text_area("Notes", key="manual_pay_notes_cmd")
+            submitted = st.form_submit_button("Create Payment Request")
+        if submitted:
+            pno = make_ref("PAY")
+            target_role = required_approval_role_for_amount(amount)
+            pay_id = run_insert(
+                "INSERT INTO payments (payment_no, vendor_id, amount, payment_method, status, notes, created_by, created_at, updated_at, next_role) VALUES (?, ?, ?, ?, 'Pending Approval', ?, ?, ?, ?, ?)",
+                (pno, vendors[v], amount, method, notes, user()["id"], now_iso(), now_iso(), target_role),
+            )
+            add_workflow_event("Payment", pay_id, "Created", "Pending Approval", pno, user()["id"])
+            target_notification_role = "Procurement Manager" if target_role == "procurement_manager" else "Approver"
+            target_label = "Procurement Manager" if target_role == "procurement_manager" else "Approver / MD"
+            create_notification(
+                None,
+                target_notification_role,
+                "Payment pending approval",
+                f"{pno} requires {target_label} approval.",
+                "Payment",
+                pay_id,
+                "High",
+                ["in_app", "browser_push"],
+                action_label="Low-Value Approvals" if target_role == "procurement_manager" else "Payment Approval",
+            )
+            _rerun_success(f"Payment request created and routed to {target_label}.")
+
+    # The Approver / MD keeps the same payment approval screen but sees only
+    # items above the PM threshold. Low-value items are handled from the PM
+    # workspace and then appear here as an audit notification/history record.
+    if not df.empty and can_approve(role):
+        eligible = df[(df["status"] == "Pending Approval") & (df["amount"].fillna(0).astype(float) > PROCUREMENT_MANAGER_APPROVAL_THRESHOLD)]
+        if eligible.empty:
+            st.info("No payment requests above ₦100,000 are awaiting Approver / MD approval.")
+        else:
+            selected = st.selectbox("Approve payment request", eligible["payment_no"].tolist(), key="payment_select_cmd")
+            row = eligible[eligible["payment_no"] == selected].iloc[0]
+            finance_note = st.text_area("Approval note", key=f"payment_note_cmd_{int(row['id'])}")
+            c1, c2 = st.columns(2)
+            if c1.button("Approve Payment", key=f"pay_approve_cmd_{int(row['id'])}"):
+                approval_action("Payment", int(row["id"]), str(row["status"]), "Approved", "Approved Payment", finance_note or "Payment approved.")
+            if c2.button("Reject Payment", key=f"pay_reject_cmd_{int(row['id'])}"):
+                if not finance_note.strip():
+                    st.error("Please enter a reason before rejecting this payment request.")
+                else:
+                    approval_action("Payment", int(row["id"]), str(row["status"]), "Rejected", "Rejected Payment", finance_note)
+
+
+def my_approval_history_page():
+    """Keep the Approver's own history and add a read-only PM approval audit."""
+    role = _current_role()
+    if role == "Approver":
+        st.subheader("My Approval History & Procurement Manager Approval Audit")
+        st.caption("This includes your own approvals and the permanent audit trail for low-value decisions approved by Procurement Manager.")
+        df = df_query(
+            """
+            SELECT ah.created_at, ah.entity_type, ah.entity_id, ah.action, ah.status_before,
+                   ah.status_after, ah.reason, ah.approval_mode, ah.delegation_reason,
+                   ah.original_approver_role, u.full_name AS approved_by
+            FROM approval_history ah
+            LEFT JOIN users u ON u.id=ah.approved_by_user_id
+            WHERE ah.user_id=? OR ah.approved_by_user_id=?
+               OR (ah.approved_by_role='Procurement Manager' AND ah.approval_mode=?)
+            ORDER BY ah.created_at DESC
+            """,
+            (user()["id"], user()["id"], LOW_VALUE_APPROVAL_MODE),
+        )
+    else:
+        st.subheader("My Approval History")
+        df = df_query(
+            """
+            SELECT ah.created_at, ah.entity_type, ah.entity_id, ah.action, ah.status_before,
+                   ah.status_after, ah.reason, ah.approval_mode, ah.delegation_reason,
+                   ah.original_approver_role
+            FROM approval_history ah
+            WHERE ah.user_id=? OR ah.approved_by_user_id=?
+            ORDER BY ah.created_at DESC
+            """,
+            (user()["id"], user()["id"]),
+        )
+    dataframe(df) if not df.empty else st.info("No approval actions recorded yet.")
+
+
+def procurement_workspace():
+    role_header(
+        "Procurement Manager Workspace",
+        "Review Facility/Utility submissions, source vendors, approve low-value transactions up to ₦100,000, submit higher values to Approver / MD, create POs, and release approved POs to Logistics.",
+    )
+    section = st.session_state.get("procurement_section", "Operations Dashboard")
+    if section == "Operations Dashboard":
+        procurement_dashboard_metrics(); procurement_dashboard()
+    elif section == "Purchase Requests":
+        requests_page(mode="procurement")
+    elif section == "Low-Value Approvals":
+        low_value_approvals_page()
+    elif section in ["Utility Head / Facility Head Inbox", "Facility Manager Inbox"]:
+        facility_manager_inbox()
+    elif section == "Import Center":
+        import_center()
+    elif section == "Sourcing":
+        sourcing_page()
+    elif section == "Vendor Quotes":
+        quote_page()
+    elif section == "Vendor Recommendation":
+        sourcing_page()
+    elif section in ["Commercial PO Management", "Purchase Orders"]:
+        commercial_purchase_orders_page()
+    elif section == "Vendors":
+        vendors_page()
+    elif section == "Gateway Pass Review":
+        gateway_pass_review_queue("Gateway Pass Review")
+    elif section == "Post-Payment Closure":
+        post_payment_closure_page()
+    elif section == "Availability / Away Notice":
+        availability_panel()
+    elif section == "Procurement Documents":
+        document_archive(editable=True)
+    elif section == "Procurement Reports":
+        procurement_reports()
+    elif section == "Income":
+        income_page(manage=False)
+    elif section == "My Activity History":
+        activity_history_page(scope="mine")
+    elif section == "Settings":
+        settings_page()
+    else:
+        procurement_dashboard_metrics(); procurement_dashboard()
+
+
+# ---------------------------------------------------------------------------
+# Approver / MD value-threshold queue filters
+# ---------------------------------------------------------------------------
+# The navigation itself remains unchanged.  These overrides only keep PM-owned
+# low-value work out of Approver decision queues while retaining the mandated
+# audit history visibility.  A low-value request created by Procurement Manager
+# remains an independent-approval exception to prevent self-approval.
+
+def _approver_request_queue_df() -> pd.DataFrame:
+    return df_query(
+        """
+        SELECT pr.id, pr.request_no, pr.department_project, pr.category, pr.priority,
+               pr.estimated_amount, pr.status, pr.updated_at, pr.next_role,
+               u.full_name AS requested_by, u.role AS requester_role
+        FROM purchase_requests pr
+        LEFT JOIN users u ON u.id=pr.requested_by
+        WHERE pr.status IN ('Submitted for Approval','Pending Approver/MD Approval','Pending Approval')
+          AND (
+              COALESCE(pr.estimated_amount,0) > ?
+              OR (COALESCE(pr.estimated_amount,0) <= ? AND u.role='Procurement Manager')
+          )
+        ORDER BY pr.updated_at DESC, pr.created_at DESC
+        """,
+        (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD, PROCUREMENT_MANAGER_APPROVAL_THRESHOLD),
+    )
+
+
+def pending_approval_page():
+    st.subheader("Pending Approvals")
+    st.caption("Approver / MD decides requests above ₦100,000 and independently decides Procurement Manager-created requests. Low-value Facility/Utility requests are approved by Procurement Manager and appear in your audit history after a decision.")
+    df = _approver_request_queue_df()
+    if df.empty:
+        empty_state("No requests awaiting your approval", "High-value requests and Procurement Manager-originated requests will appear here.")
+        return
+    shown = df.drop(columns=["id"]).copy()
+    shown["estimated_amount"] = shown["estimated_amount"].apply(money)
+    dataframe(shown)
+    selected = st.selectbox(
+        "Open request",
+        [f"{r.request_no} — {money(r.estimated_amount)} — #{int(r.id)}" for r in df.itertuples()],
+        key="approver_threshold_request_select",
+    )
+    request_detail(int(selected.rsplit("#", 1)[1]), actions=True, key_scope="approver_threshold_request")
+    csv_download(df.drop(columns=["id"]), "approver_pending_requests")
+
+
+def po_approval_page():
+    st.subheader("PO Approval")
+    st.caption("Approver / MD decides purchase orders above ₦100,000. Procurement Manager decides POs at or below ₦100,000.")
+    df = df_query(
+        """
+        SELECT po.id, po.po_no, po.total_amount, po.status, po.po_date,
+               po.expected_delivery_date, COALESCE(v.name,'') AS vendor
+        FROM purchase_orders po
+        LEFT JOIN vendors v ON v.id=po.vendor_id
+        WHERE po.status='Pending Approval' AND COALESCE(po.total_amount,0) > ?
+        ORDER BY po.updated_at DESC, po.created_at DESC
+        """,
+        (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD,),
+    )
+    if df.empty:
+        empty_state("No purchase orders awaiting your approval", "High-value purchase orders will appear here.")
+        return
+    shown = df.drop(columns=["id"]).copy()
+    shown["total_amount"] = shown["total_amount"].apply(money)
+    dataframe(shown)
+    selected = st.selectbox(
+        "Open purchase order",
+        [f"{r.po_no} — {money(r.total_amount)} — #{int(r.id)}" for r in df.itertuples()],
+        key="approver_threshold_po_select",
+    )
+    po_id = int(selected.rsplit("#", 1)[1])
+    row = df[df["id"] == po_id].iloc[0]
+    st.markdown(f"#### {row['po_no']} {badge(row['status'])}", unsafe_allow_html=True)
+    items = df_query("SELECT item_name, quantity, unit_price, total, category FROM purchase_order_items WHERE po_id=?", (po_id,))
+    if not items.empty:
+        item_show = items.copy()
+        item_show["unit_price"] = item_show["unit_price"].apply(money)
+        item_show["total"] = item_show["total"].apply(money)
+        dataframe(item_show)
+    note = st.text_area("Approval note", key=f"approver_threshold_po_note_{po_id}")
+    c1, c2 = st.columns(2)
+    if c1.button("Approve PO", type="primary", key=f"approver_threshold_po_approve_{po_id}"):
+        approval_action("Purchase Order", po_id, str(row["status"]), "Approved", "Approved Purchase Order", note or "Approved by Approver / MD")
+    if c2.button("Reject PO", key=f"approver_threshold_po_reject_{po_id}"):
+        if not note.strip():
+            st.error("Please enter a reason before rejecting this PO.")
+        else:
+            approval_action("Purchase Order", po_id, str(row["status"]), "Rejected", "Rejected Purchase Order", note)
+
+
+def quote_comparison_decision_page():
+    st.subheader("Quote Comparison")
+    st.caption("Approver / MD decides vendor recommendations above ₦100,000. Low-value recommendations are completed by Procurement Manager and remain visible in the audit trail.")
+    df = df_query(
+        """
+        SELECT st.id, st.sourcing_no, st.request_id, pr.request_no, pr.estimated_amount,
+               st.status, st.approval_status, st.reason_for_recommendation,
+               u.role AS requester_role
+        FROM sourcing_tasks st
+        JOIN purchase_requests pr ON st.request_id=pr.id
+        LEFT JOIN users u ON u.id=pr.requested_by
+        WHERE (st.status='Vendor Recommendation' OR st.approval_status='Recommended')
+          AND (
+              COALESCE(pr.estimated_amount,0) > ?
+              OR (COALESCE(pr.estimated_amount,0) <= ? AND u.role='Procurement Manager')
+          )
+        ORDER BY st.updated_at DESC, st.created_at DESC
+        """,
+        (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD, PROCUREMENT_MANAGER_APPROVAL_THRESHOLD),
+    )
+    if df.empty:
+        empty_state("No vendor recommendations awaiting your decision", "High-value vendor recommendations will appear here.")
+        return
+    show = df.drop(columns=["id", "request_id"]).copy()
+    show["estimated_amount"] = show["estimated_amount"].apply(money)
+    dataframe(show)
+    selected = st.selectbox(
+        "Open vendor recommendation",
+        [f"{r.sourcing_no} — {r.request_no} — {money(r.estimated_amount)} — #{int(r.id)}" for r in df.itertuples()],
+        key="approver_threshold_quote_select",
+    )
+    task_id = int(selected.rsplit("#", 1)[1])
+    task = df[df["id"] == task_id].iloc[0]
+    quote_comparison(task_id, allow_recommend=False)
+    note = st.text_area("Approval note", key=f"approver_threshold_quote_note_{task_id}")
+    c1, c2 = st.columns(2)
+    if c1.button("Approve Recommended Vendor", type="primary", key=f"approver_threshold_quote_approve_{task_id}"):
+        approval_action(
+            "Purchase Request", int(task["request_id"]), "Vendor Recommendation", "Approved",
+            "Approved Vendor Recommendation", note or "Vendor recommendation approved by Approver / MD",
+        )
+        run_query("UPDATE sourcing_tasks SET approval_status='Approved', updated_at=? WHERE id=?", (now_iso(), task_id))
+    if c2.button("Return for More Information", key=f"approver_threshold_quote_return_{task_id}"):
+        if not note.strip():
+            st.error("Please enter a reason before returning this recommendation.")
+        else:
+            transition_request_status(
+                int(task["request_id"]), "Returned for Correction", "Vendor Recommendation Returned", note,
+                user()["id"], _current_role(),
+            )
+            run_query("UPDATE sourcing_tasks SET approval_status='Returned', updated_at=? WHERE id=?", (now_iso(), task_id))
+            _rerun_success("Vendor recommendation returned for more information.")
+
+
+def executive_dashboard():
+    st.subheader("Executive Decision Center")
+    queued = _approver_request_queue_df()
+    pending = len(queued)
+    gp_waiting = int(df_query("SELECT COUNT(*) c FROM gateway_passes WHERE next_role='approver' OR status='Submitted for Approval'").iloc[0, 0])
+    metric_row([
+        ("Pending approvals", pending, None),
+        ("Gateway approvals", gp_waiting, None),
+        ("Total approved", int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Approved','Awaiting Payment','Paid','Completed','Closed')").iloc[0,0]), "cumulative"),
+    ], cols=3)
+    if not queued.empty:
+        display = queued[["request_no", "department_project", "category", "estimated_amount", "status", "updated_at"]].copy()
+        display["estimated_amount"] = display["estimated_amount"].apply(money)
+        dataframe(display)
+        chart = queued.groupby("category", dropna=False).size().reset_index(name="count")
+        values = queued.groupby("category", dropna=False)["estimated_amount"].sum().reset_index(name="total")
+        c1, c2 = st.columns(2)
+        with c1:
+            interactive_chart(chart, "Pending Approvals by Category", "category", "count", "exec_pending_cat_cmd", default="Bar")
+        with c2:
+            interactive_chart(_money_chart_df(values), "Approval Value by Category", "category", "total", "exec_value_cat_cmd", default="Donut")
+    else:
+        st.success("No request is awaiting Approver / MD decision.")
+
+# ===========================================================================
+# Auditor Evidence Ledger + secure payee/bank draft extension
+# Scope: Auditor views and the Procurement/Facility request drafting/editing
+# forms only. Other role workspaces and workflow controls remain unchanged.
+# ===========================================================================
+from services.payee_service import (
+    PayeeValidationError,
+    get_masked_payee_for_request,
+    save_payee_details,
+    validate_payee_payload,
+)
+from modules.auditor_hardening import audit_workspace as _secure_auditor_workspace
+
+
+def _payment_payee_draft_inputs(prefix: str, *, expandable: bool = True) -> tuple[dict[str, Any], Any | None]:
+    """Render encrypted payee controls only on the permitted draft forms.
+
+    ``expandable=False`` is used inside the draft-detail editor so Streamlit
+    does not receive nested expanders.
+    """
+    def _render_inputs() -> tuple[dict[str, Any], Any | None]:
+        st.caption("Provide payment recipient details only when known. These details are encrypted and visible only to authorized payment and audit personnel.")
+        known_choice = st.radio(
+            "Is the payment recipient known now?",
+            ["Yes", "No — to be confirmed after sourcing/vendor selection"],
+            horizontal=True,
+            key=f"{prefix}_payee_known",
+        )
+        known = known_choice == "Yes"
+        payload: dict[str, Any] = {"recipient_known": known, "currency": "NGN"}
+        attachment = None
+        if known:
+            c1, c2, c3 = st.columns(3)
+            payload["payee_type"] = c1.selectbox(
+                "Payee Type", ["Vendor", "Individual", "Organisation", "Government Agency", "Other"], key=f"{prefix}_payee_type"
+            )
+            payload["payee_name"] = c2.text_input("Payee Full / Legal Name", key=f"{prefix}_payee_name")
+            payload["account_name"] = c3.text_input("Account Name", key=f"{prefix}_account_name")
+            c4, c5, c6 = st.columns(3)
+            payload["bank_name"] = c4.text_input("Bank Name", key=f"{prefix}_bank_name")
+            payload["account_number"] = c5.text_input("Account Number", max_chars=18, key=f"{prefix}_account_number")
+            payload["currency"] = c6.selectbox("Currency", ["NGN", "USD", "GBP", "EUR", "Other"], key=f"{prefix}_currency")
+            c7, c8 = st.columns(2)
+            payload["payment_reference"] = c7.text_input("Payment Reference / Purpose", key=f"{prefix}_payment_reference")
+            payload["contact_email"] = c8.text_input("Payee Email (optional)", key=f"{prefix}_payee_email")
+            payload["contact_phone"] = st.text_input("Payee Phone (optional)", key=f"{prefix}_payee_phone")
+            payload["confirmation"] = st.checkbox(
+                "I confirm that these payment details were obtained from an authorized source.",
+                key=f"{prefix}_payee_confirm",
+            )
+            attachment = st.file_uploader(
+                "Optional payee evidence: account confirmation, invoice, quote, bank-detail letter, or approval evidence",
+                type=["pdf", "docx", "jpg", "jpeg", "png", "xlsx"],
+                key=f"{prefix}_payee_evidence",
+            )
+        else:
+            payload["delayed_reason"] = st.text_area(
+                "Reason for delayed payee details",
+                key=f"{prefix}_payee_delayed_reason",
+                help="The request workflow remains unchanged, but payment readiness stays blocked until authorized details are completed and verified.",
+            )
+        return payload, attachment
+
+    if expandable:
+        with st.expander("Payment Payee / Bank Details", expanded=False):
+            return _render_inputs()
+    return _render_inputs()
+
+
+def _save_request_payee_or_show_error(request_id: int, payload: dict[str, Any], evidence: Any | None, subfolder: str, reason: str | None = None) -> bool:
+    """Persist only masked/encrypted payee data; never put raw values in request notes."""
+    try:
+        normalized = validate_payee_payload(payload)
+        evidence_path, evidence_hash = save_upload(evidence, subfolder) if evidence else (None, None)
+        normalized["source_attachment_path"] = evidence_path
+        normalized["source_attachment_hash"] = evidence_hash
+        result = save_payee_details(request_id, normalized, int(user()["id"]), str(user()["role"]), reason=reason)
+        if result.duplicate_warning:
+            st.warning("A possible duplicate payee account fingerprint was detected and recorded for Finance/Audit review.")
+        return True
+    except PayeeValidationError as exc:
+        st.error(str(exc))
+        return False
+    except Exception as exc:
+        # Do not expose encryption/database internals or bank values in the UI.
+        log_audit("PAYEE_DETAILS_SAVE_FAILED", "Payment Payee Details", request_id, {"error_type": type(exc).__name__}, user()["id"], user()["role"], after_values={"outcome": "failed"})
+        st.error("Secure payee details could not be saved. Please retry or contact the system administrator.")
+        return False
+
+
+def create_request_form():
+    if not has_permission("create_request") or is_read_only(_current_role()):
+        st.info("Your role can view requests but cannot create requests.")
+        return
+    st.caption("Create a draft request. Procurement can route it to Approver/Admin after review.")
+    c1, c2, c3 = st.columns(3)
+    dept = selectbox_with_other("Department / Project", department_options() + ["Other"], "req_dept_cmd", "department_project")
+    req_date = c2.date_input("Request date", date.today(), key="req_date_cmd")
+    req_required = c3.date_input("Required date", date.today() + timedelta(days=7), key="req_required_cmd")
+    c4, c5, c6 = st.columns(3)
+    cat = selectbox_with_other("Category", EXPENSE_CATEGORIES, "req_cat_cmd", "category")
+    priority = c5.selectbox("Priority", PRIORITIES, index=1, key="req_priority_cmd")
+    vendor_pref = c6.text_input("Vendor preference", key="req_vendor_pref_cmd")
+    justification = st.text_area("Business justification", key="req_justification_cmd")
+    attachment = st.file_uploader("Supporting document", type=["docx", "pdf", "jpg", "jpeg", "png", "xlsx"], key="req_attachment_cmd")
+    payee_payload, payee_evidence = _payment_payee_draft_inputs("req_cmd")
+    vendor_details = _suggested_vendor_detail_inputs("req_cmd", cat)
+    items, estimated = _request_line_items("req_line_rows_cmd", "req_cmd", cat)
+    st.metric("Estimated request value", format_kpi_value(money(estimated)))
+    if st.button("Create Draft Request", type="primary", key="create_draft_request_cmd"):
+        if not justification.strip() or not any(i[0].strip() for i in items):
+            st.error("Business justification and at least one item are required.")
+            return
+        try:
+            validate_payee_payload(payee_payload)
+        except PayeeValidationError as exc:
+            st.error(str(exc))
+            return
+        _save_custom_value("department_project", dept); _save_custom_value("category", cat)
+        vendor_names = [str(v.get("name") or "").strip() for v in vendor_details if str(v.get("name") or "").strip()]
+        vendor_pref_full = ", ".join(dict.fromkeys([v for v in [vendor_pref.strip(), *vendor_names] if v]))
+        path, _ = save_upload(attachment, "requests")
+        req_no = make_ref("PR")
+        req_id = run_insert(
+            """
+            INSERT INTO purchase_requests (request_no, requested_by, department_project, request_date, required_date, category, justification, priority, estimated_amount, vendor_preference, status, source_type, attachments_json, notes, approval_history_json, next_role, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Draft', 'Manual', ?, '', '[]', NULL, ?, ?)
+            """,
+            (req_no, user()["id"], dept, req_date.isoformat(), req_required.isoformat(), cat, justification, priority, estimated, vendor_pref_full, json_dump([path] if path else []), now_iso(), now_iso()),
+        )
+        # Secure payee record is separate from the request notes/vendor fields.
+        if not _save_request_payee_or_show_error(req_id, payee_payload, payee_evidence, "payee_evidence"):
+            return
+        for item, qty, unit, total, icat in items:
+            if item.strip():
+                _save_custom_value("category", icat)
+                run_query("INSERT INTO purchase_request_items (request_id, item_name, description, quantity, unit_price, total, category, suggested_vendor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (req_id, item.strip(), item.strip(), qty, unit, total, icat, vendor_pref_full, now_iso()))
+        _save_suggested_vendors_for_request(req_id, vendor_details, cat, "Procurement Manager draft")
+        add_workflow_event("Purchase Request", req_id, "Draft Created", "Draft", req_no, user()["id"])
+        log_audit("DRAFT_CREATED", "Purchase Request", req_id, {"request_no": req_no, "amount": estimated, "department": dept}, user()["id"], user()["role"], after_values={"status": "Draft"})
+        _clear_line_state("req_line_rows_cmd", "req_cmd_")
+        _rerun_success(f"Created {req_no}")
+
+
+def create_fm_draft_form():
+    if not has_permission("create_request") or not _is_utility():
+        st.info("Only Utility Head / Facility Head can create this draft type.")
+        return
+    pm_id = _resolve_active_procurement_manager(
+        facility_manager_user_id=int(user()["id"]),
+    )
+    if pm_id:
+        pm = df_query("SELECT full_name FROM users WHERE id=?", (pm_id,))
+        st.info(f"Automatic routing is active. Procurement Manager queue: {pm.iloc[0]['full_name'] if not pm.empty else 'active Procurement Manager'}")
+    else:
+        st.warning("No active Procurement Manager user exists. Create one in Admin → User Management.")
+    c1, c2, c3 = st.columns(3)
+    dept = c1.selectbox("Department / Project", department_options(), key="uf_dept_cmd")
+    req_required = c2.date_input("Required date", date.today() + timedelta(days=7), key="uf_required_cmd")
+    cat = c3.selectbox("Category", EXPENSE_CATEGORIES, key="uf_cat_cmd")
+    c4, c5 = st.columns(2)
+    priority = c4.selectbox("Priority", PRIORITIES, index=1, key="uf_priority_cmd")
+    vendor_pref = c5.text_input("Vendor preference", key="uf_vendor_pref_cmd")
+    justification = st.text_area("Business justification", key="uf_justification_cmd")
+    attachment = st.file_uploader("Supporting document", type=["docx", "pdf", "jpg", "jpeg", "png", "xlsx"], key="uf_support_cmd")
+    payee_payload, payee_evidence = _payment_payee_draft_inputs("uf_cmd")
+    vendor_details = _suggested_vendor_detail_inputs("uf_cmd", cat)
+    items, estimated = _request_line_items("uf_line_rows_cmd", "uf_cmd", cat)
+    st.metric("Estimated draft value", format_kpi_value(money(estimated)))
+    if st.button("Create Utility / Facility Draft", type="primary", key="uf_create_draft_cmd"):
+        if not justification.strip() or not any(i[0].strip() for i in items):
+            st.error("Business justification and at least one item are required.")
+            return
+        try:
+            validate_payee_payload(payee_payload)
+        except PayeeValidationError as exc:
+            st.error(str(exc))
+            return
+        vendor_names = [v["name"] for v in vendor_details if v.get("name")]
+        vendor_pref_full = ", ".join(dict.fromkeys([v for v in [vendor_pref.strip(), *vendor_names] if v]))
+        path, _ = save_upload(attachment, "requests")
+        req_no = make_ref("UF")
+        pr_id = run_insert(
+            """
+            INSERT INTO purchase_requests (request_no, requested_by, department_project, request_date, required_date, category, justification, priority, estimated_amount, vendor_preference, status, source_type, attachments_json, notes, approval_history_json, facility_manager_user_id, assigned_procurement_manager_id, next_role, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FM Draft', 'Utility Head / Facility Head', ?, '', '[]', ?, ?, NULL, ?, ?)
+            """,
+            (req_no, user()["id"], dept, date.today().isoformat(), req_required.isoformat(), cat, justification, priority, estimated, vendor_pref_full, json_dump([path] if path else []), user()["id"], pm_id, now_iso(), now_iso()),
+        )
+        if not _save_request_payee_or_show_error(pr_id, payee_payload, payee_evidence, "payee_evidence"):
+            return
+        for item, qty, unit, total, icat in items:
+            if item.strip():
+                run_query("INSERT INTO purchase_request_items (request_id, item_name, description, quantity, unit_price, total, category, suggested_vendor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (pr_id, item.strip(), item.strip(), qty, unit, total, icat, vendor_pref_full, now_iso()))
+        _save_suggested_vendors_for_request(pr_id, vendor_details, cat, "Utility / Facility draft")
+        if pm_id:
+            ensure_thread("Purchase Request", pr_id, user()["id"], pm_id)
+        add_workflow_event("Purchase Request", pr_id, "Draft Created", "FM Draft", req_no, user()["id"])
+        log_audit("DRAFT_CREATED", "Purchase Request", pr_id, {"request_no": req_no, "amount": estimated, "department": dept}, user()["id"], user()["role"], after_values={"status": "FM Draft"})
+        create_notification(
+            int(user()["id"]),
+            None,
+            "Draft request created",
+            f"{req_no} was saved and is ready for review or submission.",
+            "Purchase Request",
+            int(pr_id),
+            "Normal",
+            ["in_app"],
+            action_label="My Draft Requests",
+        )
+        _clear_line_state("uf_line_rows_cmd", "uf_cmd_")
+        st.success(f"Created draft {req_no}.")
+        st.rerun()
+
+
+_original_request_detail_for_payee = request_detail
+
+
+def _editable_payee_area(request_id: int) -> None:
+    current = user()
+    pr_df = df_query("SELECT requested_by, facility_manager_user_id, status FROM purchase_requests WHERE id=?", (request_id,))
+    if pr_df.empty:
+        return
+    pr = pr_df.iloc[0]
+    role = current.get("role")
+    own_draft = (
+        role == "Procurement Manager" and int(pr.get("requested_by") or 0) == int(current.get("id") or 0)
+    ) or (
+        role == "Facility Manager" and int(pr.get("facility_manager_user_id") or pr.get("requested_by") or 0) == int(current.get("id") or 0)
+    )
+    if not own_draft or str(pr.get("status")) not in {"Draft", "FM Draft", "Returned for Correction", "Returned to Facility Manager"}:
+        return
+    existing = get_masked_payee_for_request(request_id)
+    with st.expander("Payment Payee / Bank Details", expanded=False):
+        if existing:
+            st.caption("Current secure payee status (masked)")
+            st.json(existing)
+        st.caption("Replace details only when corrected information is available. Raw account values are never shown here after saving.")
+        if st.checkbox("Replace payment payee details", key=f"payee_edit_toggle_{request_id}"):
+            payload, evidence = _payment_payee_draft_inputs(f"payee_edit_{request_id}", expandable=False)
+            reason = st.text_area("Reason for update", key=f"payee_edit_reason_{request_id}")
+            if st.button("Save secure payee update", key=f"payee_edit_save_{request_id}"):
+                if _save_request_payee_or_show_error(request_id, payload, evidence, "payee_evidence"):
+                    log_audit("PAYEE_DETAILS_EDITED_ON_DRAFT", "Purchase Request", request_id, {"reason_provided": bool(reason.strip())}, current["id"], current["role"])
+                    _rerun_success("Secure payment payee details updated.")
+
+
+def request_detail(pr_id: int, actions=True, key_scope: str | None = None):
+    _original_request_detail_for_payee(pr_id, actions=actions, key_scope=key_scope)
+    _editable_payee_area(pr_id)
+
+
+# Replace the final run-time Auditor resolution only; no other role workspace
+# or side navigation is redirected by this assignment.
+audit_workspace = _secure_auditor_workspace
+
+# All existing UI upload calls resolve this global at run time. The override
+# adds content validation/ZIP safety and upload audit evidence without
+# redesigning any role-specific screen.
+from services.document_service import DocumentSecurityError, secure_save_upload
+
+
+def save_upload(uploaded_file, folder: str):
+    if not uploaded_file:
+        return None, None
+    try:
+        path, fhash = secure_save_upload(uploaded_file, folder)
+        current = st.session_state.get("user") or {}
+        if path:
+            log_audit(
+                "DOCUMENT_UPLOADED", "Document", None,
+                {"file_name": getattr(uploaded_file, "name", "upload"), "sha256": fhash, "folder": folder},
+                current.get("id"), current.get("role"),
+            )
+        return path, fhash
+    except DocumentSecurityError as exc:
+        current = st.session_state.get("user") or {}
+        log_audit(
+            "DOCUMENT_UPLOAD_BLOCKED", "Document", None,
+            {"file_name": getattr(uploaded_file, "name", "upload"), "reason": str(exc)},
+            current.get("id"), current.get("role"), after_values={"outcome": "blocked"},
+        )
+        raise
+
+# =============================================================================
+# 2026 Cloud SQL + E2E workflow overrides
+# =============================================================================
+# These definitions intentionally appear last: this codebase contains historical
+# Streamlit overrides, and Python resolves the final name at runtime.
+
+
+def _table_exists_local(table: str) -> bool:
+    from core.db import table_exists
+    return table_exists(table)
+
+
+def _sqlite_table_names() -> list[str]:
+    """Backend-neutral table list retained under the legacy helper name."""
+    from core.db import is_postgres
+    try:
+        if is_postgres():
+            rows = run_query(
+                "SELECT table_name name FROM information_schema.tables WHERE table_schema=current_schema() AND table_type='BASE TABLE' ORDER BY table_name",
+                fetch=True,
+            )
+        else:
+            rows = run_query(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                fetch=True,
+            )
+        return [str(row["name"]) for row in rows]
+    except Exception:
+        return []
+
+
+def _sqlite_table_columns(table_name: str) -> list[dict[str, Any]]:
+    """Backend-neutral column metadata retained for the Admin viewer."""
+    from core.db import is_postgres, table_exists
+    if not table_exists(table_name):
+        return []
+    try:
+        if is_postgres():
+            rows = run_query(
+                """SELECT ordinal_position cid, column_name name, data_type type,
+                          CASE WHEN is_nullable='NO' THEN 1 ELSE 0 END notnull,
+                          column_default dflt_value, 0 pk
+                   FROM information_schema.columns
+                   WHERE table_schema=current_schema() AND table_name=? ORDER BY ordinal_position""",
+                (table_name,), fetch=True,
+            )
+            return [dict(row) for row in rows]
+        from core.db import get_conn
+        conn = get_conn()
+        try:
+            cur = conn.cursor(); cur.execute(f'PRAGMA table_info("{str(table_name).replace(chr(34), chr(34)*2)}")')
+            return [dict(row) for row in cur.fetchall()]
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+
+def _section_block_navigation(options: list[tuple[str, str]], key: str, default: str) -> str:
+    """Responsive button-block navigation with an explicit active state."""
+    state_key = f"{key}_active"
+    allowed = [label for label, _ in options]
+    if st.session_state.get(state_key) not in allowed:
+        st.session_state[state_key] = default if default in allowed else allowed[0]
+    for start in range(0, len(options), 3):
+        row = options[start:start + 3]
+        cols = st.columns(len(row))
+        for col, (label, icon) in zip(cols, row):
+            active = st.session_state[state_key] == label
+            if col.button(
+                f"{icon}  {label}", key=f"{key}_{start}_{label}", use_container_width=True,
+                type="primary" if active else "secondary",
+            ):
+                st.session_state[state_key] = label
+                st.rerun()
+    return str(st.session_state[state_key])
+
+
+def _suggested_vendor_detail_inputs(prefix: str, default_category: str) -> list[dict[str, Any]]:
+    """Capture each vendor's own quote instead of a shared global price."""
+    vendor_details: list[dict[str, Any]] = []
+    with st.expander("Suggested vendors and quotations (optional)", expanded=False):
+        st.caption("Each vendor keeps its own contact information, quoted amount, currency, date, and supporting quotation.")
+        count = st.number_input("Number of suggested vendors", min_value=0, max_value=8, value=0, step=1, key=f"{prefix}_vendor_count")
+        for idx in range(int(count or 0)):
+            st.markdown(f"###### Vendor {idx + 1}")
+            c1, c2, c3 = st.columns([1.4, 1, 1])
+            name = c1.text_input("Vendor name", key=f"{prefix}_vendor_name_{idx}")
+            phone = c2.text_input("Phone", key=f"{prefix}_vendor_phone_{idx}")
+            email = c3.text_input("Email", key=f"{prefix}_vendor_email_{idx}")
+            c4, c5 = st.columns([1.5, .7])
+            address = c4.text_area("Address / location", key=f"{prefix}_vendor_address_{idx}")
+            rating = c5.slider("Initial rating", 1, 5, 3, key=f"{prefix}_vendor_rating_{idx}")
+            c6, c7, c8 = st.columns([1, .7, .8])
+            quoted_price = c6.number_input("Quoted price", min_value=0.0, step=1000.0, key=f"{prefix}_vendor_price_{idx}")
+            currency = c7.selectbox("Currency", ["NGN", "USD", "EUR", "GBP"], key=f"{prefix}_vendor_currency_{idx}")
+            quote_date = c8.date_input("Quote date", date.today(), key=f"{prefix}_vendor_quote_date_{idx}")
+            notes = st.text_area("What the vendor can supply / quotation note", key=f"{prefix}_vendor_notes_{idx}")
+            quote_document = st.file_uploader(
+                "Vendor quotation / supporting document", type=["pdf", "png", "jpg", "jpeg", "docx", "xlsx"],
+                key=f"{prefix}_vendor_quote_file_{idx}",
+            )
+            if name.strip():
+                vendor_details.append({
+                    "name": name.strip(), "phone": phone.strip(), "email": email.strip(),
+                    "address": address.strip(), "rating": int(rating), "notes": notes.strip(),
+                    "supply_description": notes.strip(), "category": default_category,
+                    "quoted_price": float(quoted_price or 0), "currency": currency,
+                    "quote_date": quote_date.isoformat(), "quote_document": quote_document,
+                })
+    return vendor_details
+
+
+def _save_suggested_vendors_for_request(request_id: int, vendor_details: list[dict[str, Any]], category: str, source_label: str) -> list[str]:
+    from services.vendor_quote_service import save_vendor_quote
+    names: list[str] = []
+    for vendor in vendor_details or []:
+        if not str(vendor.get("name") or "").strip():
+            continue
+        quote_document = vendor.pop("quote_document", None)
+        if quote_document:
+            path, checksum = save_upload(quote_document, "vendor_quotes")
+            vendor["quote_document_path"] = path
+            vendor["quote_document_hash"] = checksum
+        vendor["category"] = vendor.get("category") or category
+        quote_id = save_vendor_quote(int(request_id), vendor, int(user()["id"]), str(user()["role"]))
+        names.append(str(vendor["name"]))
+        add_workflow_event("Vendor Quote", quote_id, "Suggested Vendor Quote Added", "Draft", source_label, user()["id"])
+    if names:
+        run_query(
+            "UPDATE purchase_requests SET vendor_preference=?, updated_at=? WHERE id=?",
+            (", ".join(dict.fromkeys(names)), now_iso(), int(request_id)),
+        )
+    return names
+
+
+def _vendor_quote_management_panel(request_id: int) -> None:
+    from services.vendor_quote_service import save_vendor_quote, select_vendor_quote
+    quotes = df_query(
+        """SELECT vq.id, vq.vendor_id, COALESCE(v.name,vq.vendor_name) vendor_name, v.phone, v.email, v.address,
+                  vq.supply_description, vq.vendor_rating, vq.quotation_total, vq.currency, vq.quote_date,
+                  vq.quote_document_path, vq.is_selected, vq.is_recommended
+           FROM vendor_quotes vq LEFT JOIN vendors v ON v.id=vq.vendor_id
+           WHERE vq.request_id=? ORDER BY vq.is_selected DESC, vq.created_at""",
+        (int(request_id),),
+    )
+    with st.expander("Vendor quotations and comparison", expanded=not quotes.empty):
+        if quotes.empty:
+            st.info("No vendor quotation has been attached to this request yet.")
+        else:
+            for row in quotes.itertuples():
+                selected = bool(getattr(row, "is_selected", 0))
+                heading = f"{'✓ SELECTED — ' if selected else ''}{row.vendor_name} · {row.currency or 'NGN'} {float(row.quotation_total or 0):,.2f}"
+                # Each quotation is its own padded card so vendor details and
+                # prices cannot visually run into the expander border or the
+                # next vendor's record.
+                with st.container(border=True):
+                    st.markdown(f"##### {heading}")
+                    c1, c2, c3 = st.columns(3)
+                    c1.caption(f"Phone: {row.phone or '—'}")
+                    c2.caption(f"Email: {row.email or '—'}")
+                    c3.caption(f"Quote date: {row.quote_date or '—'}")
+                    if row.supply_description:
+                        st.write(row.supply_description)
+                    items = df_query(
+                        """SELECT COALESCE(vqi.item_description, pri.item_name) item, vqi.quantity,
+                                  vqi.unit_price, vqi.line_total, vqi.currency
+                           FROM vendor_quote_items vqi LEFT JOIN purchase_request_items pri ON pri.id=vqi.request_item_id
+                           WHERE vqi.vendor_quote_id=? ORDER BY vqi.id""",
+                        (int(row.id),),
+                    )
+                    if not items.empty:
+                        dataframe(items)
+                    if row.quote_document_path and Path(str(row.quote_document_path)).is_file():
+                        st.download_button("Download quotation", Path(str(row.quote_document_path)).read_bytes(), file_name=Path(str(row.quote_document_path)).name, key=f"quote_dl_{row.id}")
+                    if _current_role() in {"Procurement Manager", "Approver", "Admin"} and not selected:
+                        if st.button("Select this vendor and approved total", key=f"select_vendor_quote_{request_id}_{row.id}"):
+                            select_vendor_quote(int(request_id), int(row.id), int(user()["id"]), str(user()["role"]))
+                            _rerun_success(f"{row.vendor_name} selected for this request.")
+        if _current_role() not in {"Procurement Manager", "Admin"}:
+            return
+        st.markdown("#### Add or update a vendor quotation")
+        vendors = vendor_options(False)
+        if not vendors:
+            st.info("Create a vendor in the Vendor Register first.")
+            return
+        selected_label = st.selectbox("Vendor", list(vendors.keys()), key=f"request_vendor_quote_vendor_{request_id}")
+        vendor_id = vendors[selected_label]
+        c1, c2, c3 = st.columns(3)
+        currency = c1.selectbox("Currency", ["NGN", "USD", "EUR", "GBP"], key=f"request_vendor_quote_currency_{request_id}")
+        quote_date = c2.date_input("Quote date", date.today(), key=f"request_vendor_quote_date_{request_id}")
+        overall_total = c3.number_input("Vendor quotation total", min_value=0.0, step=1000.0, key=f"request_vendor_quote_total_{request_id}")
+        request_items = df_query("SELECT id, item_name, description, quantity FROM purchase_request_items WHERE request_id=? ORDER BY id", (int(request_id),))
+        line_items: list[dict[str, Any]] = []
+        if not request_items.empty:
+            st.caption("Vendor price per request line item")
+            for item in request_items.itertuples():
+                c4, c5, c6 = st.columns([1.5, .65, .85])
+                c4.write(item.item_name)
+                qty = c5.number_input("Quantity", min_value=0.0, value=float(item.quantity or 1), key=f"vq_qty_{request_id}_{item.id}")
+                unit = c6.number_input("Unit price", min_value=0.0, step=1000.0, key=f"vq_unit_{request_id}_{item.id}")
+                line_items.append({"request_item_id": int(item.id), "item_description": item.item_name, "quantity": qty, "unit_price": unit, "line_total": qty * unit})
+        supply = st.text_area("What this vendor can supply / notes", key=f"request_vendor_quote_supply_{request_id}")
+        quote_file = st.file_uploader("Quotation document", type=["pdf", "png", "jpg", "jpeg", "docx", "xlsx"], key=f"request_vendor_quote_file_{request_id}")
+        if st.button("Save vendor quotation", type="primary", key=f"save_request_vendor_quote_{request_id}"):
+            vendor_row = df_query("SELECT * FROM vendors WHERE id=?", (int(vendor_id),))
+            if vendor_row.empty:
+                st.error("Vendor not found.")
+                return
+            vendor_data = vendor_row.iloc[0].to_dict()
+            path, checksum = save_upload(quote_file, "vendor_quotes") if quote_file else (None, None)
+            vendor_data.update({
+                "quoted_price": overall_total, "currency": currency, "quote_date": quote_date.isoformat(),
+                "notes": supply, "supply_description": supply, "quote_document_path": path,
+                "quote_document_hash": checksum,
+            })
+            save_vendor_quote(int(request_id), vendor_data, int(user()["id"]), str(user()["role"]), line_items=line_items)
+            _rerun_success("Vendor quotation saved against the correct vendor.")
+
+
+def _render_payee_bank_details(request_id: int, *, allow_replacement: bool = False) -> None:
+    from services.payee_service import audit_payee_reveal, get_full_payee_details, get_masked_payee_for_request
+    role = _current_role()
+    current_user_id = int(user().get("id") or 0)
+    request_access = df_query(
+        """
+        SELECT requested_by, facility_manager_user_id, status
+        FROM purchase_requests
+        WHERE id=?
+        """,
+        (int(request_id),),
+    )
+    owner_can_review = False
+    if not request_access.empty:
+        access = request_access.iloc[0]
+        def _safe_user_id(value: Any) -> int:
+            try:
+                if pd.isna(value):
+                    return 0
+                return int(value or 0)
+            except (TypeError, ValueError, OverflowError):
+                return 0
+        owner_can_review = role == "Facility Manager" and current_user_id in {
+            _safe_user_id(access.get("requested_by")),
+            _safe_user_id(access.get("facility_manager_user_id")),
+        }
+    full_allowed = role in {"Procurement Manager", "Finance", "Admin"} or owner_can_review
+    rows = df_query(
+        """SELECT ppd.id, ppd.created_at, ppd.updated_at, ppd.created_by_user_id, ppd.updated_by_user_id,
+                  ppd.replaced_at, ppd.replacement_reason, u.full_name updated_by_name
+           FROM payment_payee_details ppd LEFT JOIN users u ON u.id=ppd.updated_by_user_id
+           WHERE ppd.purchase_request_id=? AND COALESCE(ppd.is_current,1)=1 ORDER BY ppd.id DESC LIMIT 1""",
+        (int(request_id),),
+    )
+    if rows.empty:
+        st.warning("No approved payee is linked to this request.")
+        return
+    meta = rows.iloc[0].to_dict(); payee_id = int(meta["id"])
+    data = get_full_payee_details(payee_id) if full_allowed else get_masked_payee_for_request(int(request_id))
+    if not data:
+        st.warning("Payee details are unavailable.")
+        return
+    if full_allowed and not st.session_state.get(f"payee_reveal_audited_{payee_id}"):
+        try:
+            audit_payee_reveal(payee_id, int(user()["id"]), role, "Authorized workflow display")
+            st.session_state[f"payee_reveal_audited_{payee_id}"] = True
+        except Exception:
+            pass
+    verification = str(data.get("verification_status") or "Pending")
+    readiness = str(data.get("payment_readiness_status") or "Pending")
+    st.markdown("#### Payee & Bank Details")
+    if verification != "Finance Verified":
+        st.warning("Payee verification is incomplete. Finance must verify the details before payment.")
+    if meta.get("replaced_at"):
+        st.info(f"Details were replaced on {meta.get('replaced_at')}. Review the audit history before payment.")
+    fields = [
+        ("Payee type", data.get("payee_type")), ("Payee / vendor name", data.get("payee_name")),
+        ("Account name", data.get("account_name")), ("Bank name", data.get("bank_name")),
+        ("Account number", data.get("account_number")), ("Currency", data.get("currency")),
+        ("Verification status", verification), ("Payment readiness", readiness),
+        ("Date added", meta.get("created_at")), ("Last updated", meta.get("updated_at")),
+        ("Added / updated by", meta.get("updated_by_name") or meta.get("updated_by_user_id")),
+        ("Replacement status", "Recently replaced" if meta.get("replaced_at") else "Original/current details"),
+    ]
+    for start in range(0, len(fields), 2):
+        cols = st.columns(2)
+        for col, (label, value) in zip(cols, fields[start:start+2]):
+            safe_label = escape(str(label))
+            safe_value = escape(_clean(value, "—"))
+            col.markdown(
+                f"""
+                <div class="pf-detail-field" aria-label="{safe_label}: {safe_value}">
+                    <span class="pf-detail-field-label">{safe_label}</span>
+                    <strong class="pf-detail-field-value">{safe_value}</strong>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    if full_allowed and data.get("account_number"):
+        try:
+            import streamlit.components.v1 as components
+            account = escape(str(data.get("account_number")))
+            components.html(
+                f"<button onclick=\"navigator.clipboard.writeText('{account}')\" style='padding:7px 12px;border-radius:8px;border:1px solid #2563eb;background:#eff6ff;cursor:pointer'>Copy account number</button>",
+                height=45,
+            )
+        except Exception:
+            pass
+    history = df_query(
+        """SELECT version_no, action, reason, created_at, changed_by_user_id
+           FROM payment_payee_detail_versions WHERE payee_detail_id=? ORDER BY version_no DESC""",
+        (payee_id,),
+    )
+    with st.expander("Payee audit / replacement history", expanded=False):
+        dataframe(history) if not history.empty else st.caption("No payee history events yet.")
+    if allow_replacement:
+        st.caption("The existing authorised replacement workflow remains available below.")
+
+
+def _editable_payee_area(request_id: int) -> None:
+    current = user(); role = str(current.get("role") or "")
+    pr_df = df_query("SELECT requested_by, facility_manager_user_id, status FROM purchase_requests WHERE id=?", (int(request_id),))
+    if pr_df.empty:
+        return
+    pr = pr_df.iloc[0]
+    allowed_view = role in {"Procurement Manager", "Finance", "Admin", "Auditor"}
+    own_draft = (
+        role == "Procurement Manager" and int(pr.get("requested_by") or 0) == int(current.get("id") or 0)
+    ) or (
+        role == "Facility Manager" and int(pr.get("facility_manager_user_id") or pr.get("requested_by") or 0) == int(current.get("id") or 0)
+    ) or role == "Admin"
+    if allowed_view or own_draft:
+        with st.expander("Payee & Bank Details", expanded=role in {"Finance", "Procurement Manager"}):
+            _render_payee_bank_details(int(request_id), allow_replacement=own_draft)
+            editable_status = str(pr.get("status")) in {"Draft", "FM Draft", "Returned for Correction", "Returned to Facility Manager"}
+            if own_draft and editable_status and st.checkbox("Replace payment payee details", key=f"payee_edit_toggle_{request_id}"):
+                payload, evidence = _payment_payee_draft_inputs(f"payee_edit_{request_id}", expandable=False)
+                reason = st.text_area("Mandatory reason for replacement", key=f"payee_edit_reason_{request_id}")
+                if st.button("Save secure payee replacement", key=f"payee_edit_save_{request_id}"):
+                    if not reason.strip():
+                        st.error("A replacement reason is required.")
+                    elif _save_request_payee_or_show_error(request_id, payload, evidence, "payee_evidence", reason=reason.strip()):
+                        log_audit("PAYEE_DETAILS_REPLACED", "Purchase Request", request_id, {"reason": reason.strip()}, current["id"], role)
+                        _rerun_success("Secure payment payee details replaced and versioned.")
+
+
+def _view_requests_page() -> None:
+    st.caption("Requests submitted by the Utility Head / Facility Head appear here for Procurement review. This view is separate from request creation.")
+    c1, c2, c3 = st.columns(3)
+    status = c1.selectbox("Status", ["All"] + PR_STATUSES, key="view_requests_status")
+    department = c2.selectbox("Department", ["All"] + department_options(), key="view_requests_department")
+    priority = c3.selectbox("Priority", ["All"] + PRIORITIES, key="view_requests_priority")
+    c4, c5, c6 = st.columns(3)
+    requester = c4.text_input("Requester", key="view_requests_requester")
+    reference = c5.text_input("Request reference", key="view_requests_reference")
+    since = c6.date_input("Submitted on or after", value=None, key="view_requests_since")
+    sql = """
+        SELECT pr.id, pr.request_no, u.full_name requester, pr.department_project, pr.request_date,
+               pr.required_date, pr.category, pr.priority, pr.estimated_amount, pr.status, pr.updated_at
+        FROM purchase_requests pr LEFT JOIN users u ON u.id=pr.requested_by
+        WHERE (pr.source_type='Utility Head / Facility Head' OR pr.facility_manager_user_id IS NOT NULL)
+    """
+    params: list[Any] = []
+    if status != "All": sql += " AND pr.status=?"; params.append(status)
+    if department != "All": sql += " AND pr.department_project=?"; params.append(department)
+    if priority != "All": sql += " AND pr.priority=?"; params.append(priority)
+    if requester.strip(): sql += " AND lower(COALESCE(u.full_name,'')) LIKE lower(?)"; params.append(f"%{requester.strip()}%")
+    if reference.strip(): sql += " AND lower(pr.request_no) LIKE lower(?)"; params.append(f"%{reference.strip()}%")
+    if since: sql += " AND pr.request_date>=?"; params.append(since.isoformat())
+    sql += " ORDER BY pr.updated_at DESC LIMIT 250"
+    rows = df_query(sql, params)
+    if rows.empty:
+        empty_state("No matching incoming requests", "Utility / Facility submissions will remain available here and in the Request Register.")
+        return
+    show = rows.drop(columns=["id"]).copy(); show["estimated_amount"] = show["estimated_amount"].apply(money); dataframe(show)
+    selected = st.selectbox("View request", [f"{r.request_no} — {r.status} — #{int(r.id)}" for r in rows.itertuples()], key="view_requests_open")
+    request_id = int(selected.rsplit("#", 1)[1])
+    request_detail(request_id, actions=True, key_scope="view_requests")
+
+
+def requests_page(mode="procurement"):
+    st.subheader("Purchase Requests")
+    options = [
+        ("Create Request", "＋"), ("View Requests", "◉"), ("Guided Next Actions", "→"),
+        ("Request Register", "▤"), ("Imported Draft Review", "⇩"),
+    ]
+    section = _section_block_navigation(options, f"requests_sections_{mode}_blocks", "Create Request")
+    if section == "Create Request": create_request_form()
+    elif section == "View Requests": _view_requests_page()
+    elif section == "Guided Next Actions": request_next_action_board()
+    elif section == "Request Register": request_register(actions=True)
+    else: imported_draft_review()
+
+
+_request_detail_before_e2e = request_detail
+
+
+def request_detail(pr_id: int, actions=True, key_scope: str | None = None):
+    _request_detail_before_e2e(pr_id, actions=actions, key_scope=key_scope)
+    _vendor_quote_management_panel(int(pr_id))
+    role = _current_role()
+    if role not in {"Approver", "Admin"}:
+        return
+    rows = df_query(
+        """SELECT pr.request_no, pr.status, pr.payment_status, pr.paid_at, pr.approved_by_user_id,
+                  ah.id approval_history_id, ah.created_at approval_date, ah.approved_by_user_id original_approver_user_id
+           FROM purchase_requests pr
+           LEFT JOIN approval_history ah ON ah.id=(
+             SELECT id FROM approval_history WHERE entity_type='Purchase Request' AND entity_id=pr.id AND status_after='Approved' ORDER BY id DESC LIMIT 1
+           ) WHERE pr.id=?""",
+        (int(pr_id),),
+    )
+    if rows.empty:
+        return
+    row = rows.iloc[0]
+    paid = bool(row.get("paid_at")) or str(row.get("payment_status") or "") == "Paid"
+    original = int(row.get("original_approver_user_id") or row.get("approved_by_user_id") or 0)
+    eligible_actor = role == "Admin" or (role == "Approver" and original == int(user()["id"]))
+    if row.get("approval_history_id") and not paid and eligible_actor and str(row.get("status")) in {"Approved", "Awaiting Payment", "Approved for Payment"}:
+        with st.expander("Rescind approval", expanded=False):
+            st.warning("Rescinding returns the request to approval review and invalidates its ready-for-payment state. The original approval remains in history.")
+            reason = st.text_area("Mandatory rescind reason", key=f"rescind_reason_{pr_id}")
+            confirm = st.checkbox("I confirm that this approval should be rescinded", key=f"rescind_confirm_{pr_id}")
+            if st.button("Rescind Approval", type="primary", disabled=not confirm, key=f"rescind_button_{pr_id}"):
+                from services.approval_rescission_service import ApprovalRescissionError, rescind_request_approval
+                try:
+                    rescind_request_approval(int(pr_id), int(user()["id"]), role, reason)
+                    _rerun_success("Approval rescinded and all workflow participants notified.")
+                except (ApprovalRescissionError, PermissionError) as exc:
+                    st.error(str(exc))
+    elif paid and row.get("approval_history_id"):
+        st.caption("Approval rescission is disabled because Finance has recorded payment.")
+
+
+def approved_for_payment_page():
+    st.subheader("Approved for Payment")
+    st.caption("Approved vendor and verified payee details flow into Finance automatically. No manual account re-entry is required.")
+    if _current_role() not in {"Finance", "Admin"}:
+        st.error("Only Finance and Admin may access approved payment instructions.")
+        return
+    rows = df_query(
+        """SELECT pr.id, pr.request_no, pr.department_project, pr.category, pr.status, pr.payment_status,
+                  pr.estimated_amount, pr.selected_vendor_id, v.name vendor_name,
+                  COALESCE(vq.quotation_total, pr.estimated_amount) approved_amount,
+                  ppd.verification_status, ppd.payment_readiness_status,
+                  p.id payment_id, p.status payment_record_status, p.payment_reference, p.transfer_type
+           FROM purchase_requests pr
+           LEFT JOIN vendors v ON v.id=pr.selected_vendor_id
+           LEFT JOIN vendor_quotes vq ON vq.id=pr.selected_vendor_quote_id
+           LEFT JOIN payment_payee_details ppd ON ppd.id=COALESCE(pr.selected_payee_detail_id,
+             (SELECT id FROM payment_payee_details x WHERE x.purchase_request_id=pr.id AND COALESCE(x.is_current,1)=1 ORDER BY id DESC LIMIT 1))
+           LEFT JOIN payments p ON p.id=(SELECT id FROM payments x WHERE x.request_id=pr.id ORDER BY id DESC LIMIT 1)
+           WHERE pr.status IN ('Approved','Awaiting Payment','Approved for Payment','Paid')
+              OR pr.payment_status IN ('Approved for Payment','Paid')
+           ORDER BY COALESCE(pr.approved_at,pr.updated_at) DESC LIMIT 250"""
+    )
+    if rows.empty:
+        empty_state("No approved payment items", "Approved requests appear here after final approval.")
+        return
+    show = rows[["request_no", "department_project", "vendor_name", "approved_amount", "verification_status", "payment_readiness_status", "payment_record_status"]].copy()
+    show["approved_amount"] = show["approved_amount"].apply(money); dataframe(show)
+    selected = st.selectbox("Open approved request", [f"{r.request_no} — {r.vendor_name or 'No selected vendor'} — #{int(r.id)}" for r in rows.itertuples()], key="finance_approved_request")
+    request_id = int(selected.rsplit("#", 1)[1]); row = rows[rows["id"] == request_id].iloc[0]
+    _render_payee_bank_details(request_id)
+    if not row.get("selected_vendor_id"):
+        st.warning("No approved vendor is linked. Procurement must select a vendor quotation before payment.")
+    if str(row.get("verification_status") or "") != "Finance Verified":
+        if st.button("Verify linked payee details", key=f"verify_payee_{request_id}"):
+            from services.payee_service import PaymentPayeeNotReadyError, verify_payee_details
+            try:
+                verify_payee_details(request_id, int(user()["id"]), str(user()["role"]))
+                _rerun_success("Payee details verified for Finance processing.")
+            except PaymentPayeeNotReadyError as exc:
+                st.error(str(exc))
+    paid = str(row.get("payment_record_status") or "") == "Paid" or str(row.get("payment_status") or "") == "Paid"
+    if not paid:
+        st.markdown("#### Record payment")
+        c1, c2 = st.columns(2)
+        transfer_type = c1.selectbox("Transfer type", ["Internet Bank Transfer", "Physical Bank Transfer"], key=f"finance_transfer_type_{request_id}")
+        payment_date = c2.date_input("Payment date", date.today(), key=f"finance_payment_date_{request_id}")
+        payment_reference = st.text_input("Payment / reconciliation reference", key=f"finance_payment_reference_{request_id}")
+        finance_note = st.text_area("Finance note", key=f"finance_payment_note_{request_id}")
+        confirm = st.checkbox("I confirm the approved vendor, payee details, amount, and transfer type", key=f"finance_payment_confirm_{request_id}")
+        if st.button("Record Payment", type="primary", disabled=not confirm, key=f"finance_record_payment_{request_id}"):
+            from services.payment_workflow_service import PaymentWorkflowError, record_request_payment
+            try:
+                record_request_payment(
+                    request_id, int(user()["id"]), str(user()["role"]), transfer_type=transfer_type,
+                    payment_reference=payment_reference, payment_date=payment_date.isoformat(), finance_note=finance_note,
+                    payment_id=int(row["payment_id"]) if pd.notna(row.get("payment_id")) and row.get("payment_id") else None,
+                )
+                _rerun_success("Payment recorded and the complete workflow chain notified.")
+            except (PaymentWorkflowError, PermissionError) as exc:
+                st.error(str(exc))
+    st.markdown("#### Payment instruction")
+    try:
+        from services.payment_instruction_service import generate_payment_instruction_pdf, payment_instruction_html, resolve_payment_instruction
+        instruction = resolve_payment_instruction(actor_user_id=int(user()["id"]), actor_role=str(user()["role"]), request_id=request_id)
+        for warning in instruction.get("warnings", []): st.warning(warning)
+        st.markdown(payment_instruction_html(instruction, str(user().get("full_name") or user().get("username"))), unsafe_allow_html=True)
+        pdf = generate_payment_instruction_pdf(instruction, str(user().get("full_name") or user().get("username")))
+        c3, c4 = st.columns(2)
+        c3.download_button("Export Approved Payment Instruction (PDF)", pdf, file_name=f"{instruction['request_reference']}_payment_instruction.pdf", mime="application/pdf", use_container_width=True)
+        try:
+            import streamlit.components.v1 as components
+            with c4:
+                components.html("<button onclick='window.parent.print()' style='width:100%;padding:10px;border-radius:8px;border:1px solid #2563eb;background:#2563eb;color:white;font-weight:600'>Print Payment Instruction</button>", height=50)
+        except Exception:
+            pass
+    except Exception as exc:
+        st.error(str(exc))
+
+
+def payments_page():
+    st.subheader("Payments")
+    rows = df_query(
+        """SELECT p.id, p.payment_no, pr.request_no, v.name vendor, p.amount, p.payment_method,
+                  p.transfer_type, p.payment_reference, p.payment_date, p.verification_status, p.status,
+                  p.created_at, p.updated_at
+           FROM payments p LEFT JOIN purchase_requests pr ON pr.id=p.request_id
+           LEFT JOIN vendors v ON v.id=p.vendor_id ORDER BY p.created_at DESC LIMIT 500"""
+    )
+    if rows.empty:
+        st.info("No payment records yet.")
+    else:
+        show = rows.drop(columns=["id"]).copy(); show["amount"] = show["amount"].apply(money); dataframe(show); csv_download(show, "payment_register")
+    if can_create_payment_request(_current_role()):
+        with st.expander("Create standalone payment request", expanded=False):
+            vendors = vendor_options(False)
+            with st.form("manual_payment_e2e"):
+                vendor_label = st.selectbox("Vendor", list(vendors.keys()) if vendors else ["No vendor"])
+                amount = st.number_input("Amount", min_value=0.0, step=1000.0)
+                method = st.selectbox("Payment method", ["Bank Transfer", "Cash", "POS/Card", "Cheque", "Mobile Money"])
+                transfer_type = st.selectbox("Transfer type", ["Internet Bank Transfer", "Physical Bank Transfer"], disabled=method != "Bank Transfer")
+                notes = st.text_area("Notes")
+                submitted = st.form_submit_button("Create Payment Request")
+            if submitted:
+                pno = make_ref("PAY")
+                target_role = required_approval_role_for_amount(amount)
+                pay_id = run_insert(
+                    """INSERT INTO payments (payment_no, vendor_id, amount, payment_method, transfer_type, status, notes,
+                       created_by, created_at, updated_at, next_role) VALUES (?, ?, ?, ?, ?, 'Pending Approval', ?, ?, ?, ?, ?)""",
+                    (pno, vendors.get(vendor_label) if vendors else None, amount, method, transfer_type if method == "Bank Transfer" else None,
+                     notes, user()["id"], now_iso(), now_iso(), target_role),
+                )
+                create_notification(None, "Procurement Manager" if target_role == "procurement_manager" else "Approver", "Payment pending approval", f"{pno} requires approval.", "Payment", pay_id, "High", ["in_app", "browser_push", "email"], action_label="Payment Approval")
+                _rerun_success("Payment request created.")
+
+
+def receipts_page():
+    st.subheader("Payment Documents & Receipt Register")
+    if _current_role() not in {"Finance", "Admin"}:
+        st.error("Only Finance and Admin may upload payment documents.")
+        return
+    section = _section_block_navigation([
+        ("Upload Document", "↑"), ("Receipt Register", "▤"), ("OCR Review", "⌕")
+    ], "finance_receipt_blocks", "Upload Document")
+    if section == "Upload Document":
+        st.caption("A receipt record is created only when a valid document is uploaded. Manual receipt-only entries are disabled.")
+        requests = df_query(
+            """SELECT pr.id, pr.request_no, pr.status, p.id payment_id, p.payment_no, p.payment_reference
+               FROM purchase_requests pr JOIN payments p ON p.request_id=pr.id AND p.status='Paid'
+               ORDER BY p.payment_date DESC, p.created_at DESC LIMIT 250"""
+        )
+        if requests.empty:
+            st.info("No paid request is available for document upload.")
+            return
+        selected = st.selectbox("Paid procurement request", [f"{r.request_no} — {r.payment_no} — #{int(r.id)}" for r in requests.itertuples()], key="receipt_paid_request")
+        request_id = int(selected.rsplit("#", 1)[1]); selected_row = requests[requests["id"] == request_id].iloc[0]
+        category = st.selectbox("Document category", ["Proof of Payment", "Vendor Receipt"], key="receipt_document_category")
+        uploaded = st.file_uploader("Upload required document", type=["pdf", "png", "jpg", "jpeg"], key="receipt_required_upload")
+        if st.button("Upload and Process OCR", type="primary", disabled=uploaded is None, key="receipt_upload_process"):
+            from services.receipt_document_service import ReceiptDocumentError, upload_receipt_document
+            try:
+                with st.spinner("Validating, securely saving, and extracting receipt metadata..."):
+                    receipt_id = upload_receipt_document(
+                        uploaded, category, int(user()["id"]), str(user()["role"]),
+                        request_id=request_id, payment_id=int(selected_row["payment_id"]), process_ocr=True,
+                    )
+                _rerun_success(f"{category} uploaded. OCR result saved under receipt #{receipt_id}.")
+            except (ReceiptDocumentError, DocumentSecurityError, PermissionError) as exc:
+                st.error(str(exc))
+        return
+    register = df_query(
+        """SELECT rr.id, pr.request_no request_reference, p.payment_reference, rr.document_category,
+                  rr.extracted_vendor_payee vendor_payee, rr.extracted_amount, rr.extracted_transaction_reference,
+                  rr.ocr_detected_date document_date, rr.created_at upload_date, u.full_name uploaded_by,
+                  rr.ocr_status, rr.status verification_status, rr.discrepancy_status, rr.original_file_name, rr.file_path
+           FROM receipt_records rr LEFT JOIN purchase_requests pr ON pr.id=rr.request_id
+           LEFT JOIN payments p ON p.id=COALESCE(rr.payment_id,rr.linked_payment_id)
+           LEFT JOIN users u ON u.id=rr.uploaded_by
+           WHERE rr.document_category IN ('Proof of Payment','Vendor Receipt')
+           ORDER BY rr.created_at DESC LIMIT 500"""
+    )
+    if register.empty:
+        st.info("No Proof of Payment or Vendor Receipt documents have been uploaded.")
+        return
+    show = register.drop(columns=["id", "file_path"]).copy(); dataframe(show); csv_download(show, "receipt_request_register")
+    selected_receipt = st.selectbox("Open document", [f"{r.request_reference or 'Unlinked'} — {r.document_category} — #{int(r.id)}" for r in register.itertuples()], key=f"receipt_register_open_{section}")
+    receipt_id = int(selected_receipt.rsplit("#", 1)[1]); record = register[register["id"] == receipt_id].iloc[0]
+    if record.get("file_path") and Path(str(record["file_path"])).is_file():
+        st.download_button("View / Download Current Document", Path(str(record["file_path"])).read_bytes(), file_name=str(record.get("original_file_name") or Path(str(record["file_path"])).name), key=f"receipt_download_{receipt_id}")
+    with st.expander("Replace / re-upload this document", expanded=False):
+        st.caption("The current file is never silently overwritten. Each replacement and its OCR result remains in version history.")
+        replacement = st.file_uploader("Replacement document", type=["pdf", "png", "jpg", "jpeg"], key=f"receipt_replace_file_{receipt_id}")
+        replacement_reason = st.text_area("Replacement reason", key=f"receipt_replace_reason_{receipt_id}")
+        if st.button("Replace and Reprocess OCR", disabled=replacement is None, key=f"receipt_replace_button_{receipt_id}"):
+            from services.receipt_document_service import ReceiptDocumentError, replace_receipt_document
+            try:
+                with st.spinner("Validating replacement and preserving the prior version..."):
+                    version_no = replace_receipt_document(
+                        receipt_id, replacement, int(user()["id"]), str(user()["role"]), replacement_reason, process_ocr=True
+                    )
+                _rerun_success(f"Document replaced as version {version_no}; OCR was reprocessed.")
+            except (ReceiptDocumentError, DocumentSecurityError, PermissionError) as exc:
+                st.error(str(exc))
+    versions = df_query(
+        """SELECT version_no, action, original_file_name, mime_type, file_size_bytes, file_checksum,
+                  ocr_status, reason, created_at, file_path
+           FROM receipt_document_versions WHERE receipt_id=? ORDER BY version_no DESC""",
+        (receipt_id,),
+    )
+    if not versions.empty:
+        with st.expander("Document and OCR version history", expanded=False):
+            dataframe(versions.drop(columns=["file_path"]))
+            version_choice = st.selectbox(
+                "Download a prior version",
+                [f"Version {int(r.version_no)} — {r.action}" for r in versions.itertuples()],
+                key=f"receipt_version_download_choice_{receipt_id}",
+            )
+            version_no = int(version_choice.split()[1])
+            selected_version = versions[versions["version_no"] == version_no].iloc[0]
+            version_path = Path(str(selected_version.get("file_path") or ""))
+            if version_path.is_file():
+                st.download_button(
+                    "Download Selected Version", version_path.read_bytes(),
+                    file_name=str(selected_version.get("original_file_name") or version_path.name),
+                    key=f"receipt_version_download_{receipt_id}_{version_no}",
+                )
+    detail = df_query("SELECT * FROM receipt_records WHERE id=?", (receipt_id,))
+    if not detail.empty:
+        d = detail.iloc[0]
+        st.markdown("#### Extracted metadata")
+        meta_fields = ["extracted_vendor_payee", "extracted_amount", "extracted_currency", "extracted_transaction_reference", "extracted_document_number", "ocr_detected_date", "extracted_tax_amount", "extracted_total_amount", "extracted_description", "ocr_confidence", "ocr_status", "discrepancy_status", "discrepancy_details"]
+        dataframe(pd.DataFrame([{field: d.get(field) for field in meta_fields}]))
+        if str(d.get("ocr_status")) == "Failed":
+            if st.button("Retry OCR", key=f"retry_receipt_ocr_{receipt_id}"):
+                from services.receipt_document_service import process_receipt_ocr
+                with st.spinner("Retrying OCR using the stored original document..."):
+                    process_receipt_ocr(receipt_id, actor_user_id=int(user()["id"]), actor_role=str(user()["role"]), force=True)
+                _rerun_success("OCR retry completed.")
+        with st.expander("Review and correct OCR metadata", expanded=section == "OCR Review"):
+            vendor = st.text_input("Vendor / payee", value=str(d.get("extracted_vendor_payee") or ""), key=f"ocr_vendor_{receipt_id}")
+            amount = st.number_input("Extracted amount", min_value=0.0, value=float(d.get("extracted_amount") or 0), key=f"ocr_amount_{receipt_id}")
+            txn = st.text_input("Transaction reference", value=str(d.get("extracted_transaction_reference") or ""), key=f"ocr_txn_{receipt_id}")
+            reason = st.text_area("Correction reason", key=f"ocr_reason_{receipt_id}")
+            if st.button("Save verified corrections", key=f"ocr_save_{receipt_id}"):
+                from services.receipt_document_service import ReceiptDocumentError, correct_receipt_metadata
+                try:
+                    correct_receipt_metadata(receipt_id, {"extracted_vendor_payee": vendor, "extracted_amount": amount, "extracted_total_amount": amount, "extracted_transaction_reference": txn}, int(user()["id"]), str(user()["role"]), reason)
+                    _rerun_success("OCR corrections saved; original extraction retained in the audit trail.")
+                except ReceiptDocumentError as exc:
+                    st.error(str(exc))
+
+
+def post_payment_closure_page():
+    # Post-payment closure upload controls and optional vendor receipt.
+    st.subheader("Post-Payment Closure")
+    st.caption(
+        "Upload the required Proof of Payment, optionally upload the Vendor Receipt, "
+        "then complete and archive the paid procurement in one controlled action."
+    )
+
+    rows = df_query(
+        """
+        SELECT
+            pr.id,
+            pr.request_no,
+            pr.department_project,
+            pr.category,
+            pr.estimated_amount,
+            pr.status,
+            pr.payment_status,
+            pr.paid_at,
+            pr.completed_at,
+            pr.archived_at,
+            p.id AS payment_id,
+            COUNT(
+                DISTINCT CASE
+                    WHEN rr.document_category='Proof of Payment'
+                     AND rr.file_path IS NOT NULL
+                    THEN rr.id
+                END
+            ) AS proof_count,
+            COUNT(
+                DISTINCT CASE
+                    WHEN rr.document_category='Vendor Receipt'
+                     AND rr.file_path IS NOT NULL
+                    THEN rr.id
+                END
+            ) AS vendor_receipt_count
+        FROM purchase_requests pr
+        LEFT JOIN payments p
+          ON p.id = (
+              SELECT p2.id
+              FROM payments p2
+              WHERE p2.request_id=pr.id
+                AND p2.status='Paid'
+              ORDER BY p2.id DESC
+              LIMIT 1
+          )
+        LEFT JOIN receipt_records rr
+          ON rr.request_id=pr.id
+         AND rr.status<>'Superseded'
+         AND (
+                rr.payment_id=p.id
+             OR rr.linked_payment_id=p.id
+             OR (
+                    rr.payment_id IS NULL
+                AND rr.linked_payment_id IS NULL
+             )
+         )
+        WHERE (pr.status='Paid' OR pr.payment_status='Paid')
+          AND pr.completed_at IS NULL
+        GROUP BY pr.id, p.id
+        ORDER BY COALESCE(pr.paid_at, pr.updated_at) DESC
+        LIMIT 250
+        """
+    )
+
+    if rows.empty:
+        st.success("No paid records are waiting for completion.")
+        return
+
+    show = rows.drop(columns=["id", "payment_id"]).copy()
+    show["estimated_amount"] = show["estimated_amount"].apply(money)
+    dataframe(show)
+
+    selected = st.selectbox(
+        "Select paid request",
+        [
+            f"{record.request_no} - {record.status} - #{int(record.id)}"
+            for record in rows.itertuples()
+        ],
+        key="completion_request",
+    )
+
+    request_id = int(selected.rsplit("#", 1)[1])
+    row = rows[rows["id"] == request_id].iloc[0]
+
+    payment_id = int(row.get("payment_id") or 0)
+    proof_count = int(row.get("proof_count") or 0)
+    vendor_receipt_count = int(row.get("vendor_receipt_count") or 0)
+
+    st.markdown(f"#### {row['request_no']}")
+
+    status_left, status_right = st.columns(2)
+
+    with status_left:
+        if proof_count > 0:
+            st.success(
+                f"Proof of Payment uploaded ({proof_count})."
+            )
+        else:
+            st.warning(
+                "Proof of Payment is required before this request can be completed."
+            )
+
+    with status_right:
+        if vendor_receipt_count > 0:
+            st.success(
+                f"Vendor Receipt uploaded ({vendor_receipt_count})."
+            )
+        else:
+            st.info(
+                "Vendor Receipt is optional and may be uploaded when supplied by the vendor."
+            )
+
+    if payment_id < 1:
+        st.error(
+            "No paid payment record is linked to this procurement. "
+            "Finance must record the payment before documents can be uploaded."
+        )
+        return
+
+    st.markdown("#### Payment documents")
+    st.caption(
+        "Accepted formats: PDF, PNG, JPG, and JPEG. "
+        "Uploads are securely stored, audited, versioned, and processed by OCR."
+    )
+
+    proof_column, receipt_column = st.columns(2)
+
+    with proof_column:
+        proof_upload = st.file_uploader(
+            "Proof of Payment *",
+            type=["pdf", "png", "jpg", "jpeg"],
+            key=f"closure_proof_upload_{request_id}",
+            help="Required evidence that Finance completed the payment.",
+        )
+
+        upload_proof_clicked = st.button(
+            "Upload Proof of Payment",
+            type="primary",
+            disabled=proof_upload is None,
+            key=f"closure_upload_proof_{request_id}",
+            use_container_width=True,
+        )
+
+    with receipt_column:
+        vendor_receipt_upload = st.file_uploader(
+            "Vendor Receipt (optional)",
+            type=["pdf", "png", "jpg", "jpeg"],
+            key=f"closure_vendor_receipt_upload_{request_id}",
+            help="Optional receipt or acknowledgement supplied by the vendor.",
+        )
+
+        upload_vendor_receipt_clicked = st.button(
+            "Upload Vendor Receipt",
+            disabled=vendor_receipt_upload is None,
+            key=f"closure_upload_vendor_receipt_{request_id}",
+            use_container_width=True,
+        )
+
+    if upload_proof_clicked:
+        from services.receipt_document_service import (
+            ReceiptDocumentError,
+            upload_receipt_document,
+        )
+
+        try:
+            upload_receipt_document(
+                proof_upload,
+                "Proof of Payment",
+                int(user()["id"]),
+                str(user()["role"]),
+                request_id=request_id,
+                payment_id=payment_id,
+                process_ocr=True,
+            )
+
+            add_workflow_event(
+                "Purchase Request",
+                request_id,
+                "Proof of Payment Uploaded",
+                "Paid",
+                "Proof of Payment uploaded from Post-Payment Closure.",
+                user()["id"],
+            )
+
+            _rerun_success(
+                "Proof of Payment uploaded successfully."
+            )
+
+        except (ReceiptDocumentError, PermissionError) as exc:
+            st.error(str(exc))
+
+        except Exception as exc:
+            log_audit(
+                "CLOSURE_DOCUMENT_UPLOAD_FAILED",
+                "Purchase Request",
+                request_id,
+                {"document_category": "Proof of Payment", "error_type": type(exc).__name__},
+                user()["id"],
+                user()["role"],
+            )
+            st.error(
+                "The Proof of Payment could not be uploaded. "
+                "Please retry or contact the system administrator."
+            )
+
+    if upload_vendor_receipt_clicked:
+        from services.receipt_document_service import (
+            ReceiptDocumentError,
+            upload_receipt_document,
+        )
+
+        try:
+            upload_receipt_document(
+                vendor_receipt_upload,
+                "Vendor Receipt",
+                int(user()["id"]),
+                str(user()["role"]),
+                request_id=request_id,
+                payment_id=payment_id,
+                process_ocr=True,
+            )
+
+            add_workflow_event(
+                "Purchase Request",
+                request_id,
+                "Vendor Receipt Uploaded",
+                "Paid",
+                "Optional Vendor Receipt uploaded from Post-Payment Closure.",
+                user()["id"],
+            )
+
+            _rerun_success(
+                "Optional Vendor Receipt uploaded successfully."
+            )
+
+        except (ReceiptDocumentError, PermissionError) as exc:
+            st.error(str(exc))
+
+        except Exception as exc:
+            log_audit(
+                "CLOSURE_DOCUMENT_UPLOAD_FAILED",
+                "Purchase Request",
+                request_id,
+                {"document_category": "Vendor Receipt", "error_type": type(exc).__name__},
+                user()["id"],
+                user()["role"],
+            )
+            st.error(
+                "The Vendor Receipt could not be uploaded. "
+                "Please retry or contact the system administrator."
+            )
+
+    st.divider()
+
+    confirm = st.checkbox(
+        "I confirm that payment and the required Proof of Payment have been reviewed. "
+        "The Vendor Receipt is optional.",
+        key=f"complete_confirm_{request_id}",
+    )
+
+    completion_ready = proof_count > 0 and confirm
+
+    if proof_count < 1:
+        st.caption(
+            "Upload a Proof of Payment before Mark Completed becomes available."
+        )
+
+    if st.button(
+        "Mark Completed",
+        type="primary",
+        disabled=not completion_ready,
+        key=f"mark_completed_atomic_{request_id}",
+    ):
+        from services.completion_service import (
+            CompletionError,
+            mark_request_completed,
+        )
+
+        try:
+            mark_request_completed(
+                request_id,
+                int(user()["id"]),
+                str(user()["role"]),
+            )
+
+            _rerun_success(
+                "Request marked Completed, the active workflow was closed, "
+                "and the record was archived."
+            )
+
+        except (CompletionError, PermissionError) as exc:
+            st.error(str(exc))
+
+
