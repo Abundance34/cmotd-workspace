@@ -43,3 +43,6 @@ cloudrun-rollback-revision.txt
 data/backups/
 sample_imports/
 candidate-vendor-error-log.json
+
+# Generated architecture audit reports
+admin_architecture_audit.*

@@ -589,11 +589,98 @@ def require_user() -> bool:
             should_touch = True
     if token and should_touch:
         try:
+            # Admin-forced session termination validation.
+            # Keep the existing 30-second heartbeat cadence so ordinary
+            # navigation does not gain a database round trip on every rerun.
+            token_hash = _session_token_hash(str(token))
+
+            session_rows = run_query(
+                """
+                SELECT
+                    s.status,
+                    u.is_active,
+                    COALESCE(u.account_locked, 0)
+                        AS account_locked
+                FROM user_sessions s
+                JOIN users u
+                  ON u.id=s.user_id
+                WHERE s.session_token=?
+                ORDER BY s.id DESC
+                LIMIT 1
+                """,
+                (token_hash,),
+                fetch=True,
+            )
+
+            session_active = False
+
+            if session_rows:
+                session_row = dict(session_rows[0])
+
+                session_active = (
+                    str(
+                        session_row.get("status")
+                        or ""
+                    )
+                    == "Active"
+                    and bool(
+                        session_row.get("is_active")
+                    )
+                    and not bool(
+                        session_row.get(
+                            "account_locked"
+                        )
+                    )
+                )
+
+            if not session_active:
+                # Do not call close_persistent_session() here:
+                # it would overwrite the Admin termination status
+                # with the ordinary "Logged Out" status.
+                st.session_state.pop(
+                    "pf_session_token",
+                    None,
+                )
+                _clear_browser_session_token()
+                _clear_navigation_query_params()
+                st.session_state.clear()
+
+                st.warning(
+                    "Your session is no longer active. "
+                    "Please log in again."
+                )
+
+                return False
+
             ts = now_iso()
-            run_query("UPDATE user_sessions SET last_seen_at=?, updated_at=? WHERE session_token=?", (ts, ts, _session_token_hash(str(token))))
-            st.session_state["pf_last_session_db_touch"] = now_dt.isoformat(timespec="seconds")
+
+            run_query(
+                """
+                UPDATE user_sessions
+                SET
+                    last_seen_at=?,
+                    updated_at=?
+                WHERE session_token=?
+                  AND status='Active'
+                """,
+                (
+                    ts,
+                    ts,
+                    token_hash,
+                ),
+            )
+
+            st.session_state[
+                "pf_last_session_db_touch"
+            ] = now_dt.isoformat(
+                timespec="seconds"
+            )
+
         except Exception:
+            # Preserve the current availability behaviour if the heartbeat
+            # itself encounters a transient database problem.
             pass
+
     return True
 
 

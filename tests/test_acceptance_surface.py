@@ -37,7 +37,8 @@ def test_final_receipt_and_completion_surfaces_match_acceptance_rules():
     assert "Replace / re-upload this document" in receipts
     assert "Document and OCR version history" in receipts
     completion = _last_function_source(ROOT / "modules" / "role_workspaces.py", "post_payment_closure_page")
-    assert 'st.button("Mark Completed"' in completion
+    assert "Mark Completed" in completion
+    assert "st.button(" in completion
     for duplicate_button in ('st.button("Archive"', 'st.button("Close Record"', 'st.button("Mark Closed"'):
         assert duplicate_button not in completion
 

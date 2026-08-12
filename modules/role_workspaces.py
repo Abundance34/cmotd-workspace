@@ -7164,41 +7164,1011 @@ def audit_workspace():
         audit_metrics(); audit_dashboard()
 
 
+# Release A Admin Control Centre pages.
+
+from services.admin_control_service import (
+    admin_request_intervention,
+    admin_user_security_action,
+    collect_system_exceptions,
+    correct_request_routing,
+    investigate_system_exception,
+    reassign_procurement_manager,
+    resolve_system_exception,
+)
+
+
+@st.cache_data(
+    ttl=30,
+    show_spinner=False,
+)
+def _cached_admin_system_exceptions():
+    return collect_system_exceptions(
+        stale_hours=72
+    )
+
+
+def _clear_admin_exception_cache():
+    try:
+        _cached_admin_system_exceptions.clear()
+    except Exception:
+        pass
+
+
+def admin_control_snapshot():
+    """Concise exception snapshot on the existing Admin Dashboard."""
+    issues = _cached_admin_system_exceptions()
+
+    critical = sum(
+        1
+        for item in issues
+        if item.get("severity") == "Critical"
+    )
+
+    high = sum(
+        1
+        for item in issues
+        if item.get("severity") == "High"
+    )
+
+    routing = sum(
+        1
+        for item in issues
+        if item.get("category")
+        in {"Routing", "Assignment"}
+    )
+
+    delivery = sum(
+        1
+        for item in issues
+        if item.get("category")
+        == "Notification"
+    )
+
+    st.markdown(
+        "### System Control Snapshot"
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "Critical",
+        critical,
+    )
+    c2.metric(
+        "High Priority",
+        high,
+    )
+    c3.metric(
+        "Routing / Assignment",
+        routing,
+    )
+    c4.metric(
+        "Notification Delivery",
+        delivery,
+    )
+
+    if critical:
+        st.error(
+            f"{critical} critical system issue(s) "
+            "require Admin investigation."
+        )
+    elif high:
+        st.warning(
+            f"{high} high-priority exception(s) "
+            "require attention."
+        )
+    elif issues:
+        st.info(
+            f"{len(issues)} workflow or operational "
+            "exception(s) are being monitored."
+        )
+    else:
+        st.success(
+            "No current system-control exceptions "
+            "were detected."
+        )
+
+    if st.button(
+        "Open Action & Exception Centre",
+        key="admin_dashboard_open_exception_centre",
+        type="primary",
+    ):
+        st.session_state[
+            "admin_section"
+        ] = "Action & Exception Centre"
+        st.rerun()
+
+
+def admin_action_exception_centre():
+    st.subheader(
+        "Action & Exception Centre"
+    )
+
+    st.caption(
+        "Central Admin view for stalled workflows, "
+        "routing anomalies, unassigned procurement work, "
+        "notification delivery failures, payment-evidence "
+        "gaps, and database health."
+    )
+
+    issues = _cached_admin_system_exceptions()
+
+    if not issues:
+        st.success(
+            "No active exceptions were detected."
+        )
+        return
+
+    critical = sum(
+        1
+        for item in issues
+        if item["severity"] == "Critical"
+    )
+
+    high = sum(
+        1
+        for item in issues
+        if item["severity"] == "High"
+    )
+
+    warning = sum(
+        1
+        for item in issues
+        if item["severity"] == "Warning"
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "Total Exceptions",
+        len(issues),
+    )
+    c2.metric(
+        "Critical",
+        critical,
+    )
+    c3.metric(
+        "High",
+        high,
+    )
+    c4.metric(
+        "Warnings",
+        warning,
+    )
+
+    severity_filter = st.multiselect(
+        "Severity",
+        [
+            "Critical",
+            "High",
+            "Warning",
+            "Info",
+        ],
+        default=[
+            "Critical",
+            "High",
+            "Warning",
+            "Info",
+        ],
+        key="admin_exception_severity_filter",
+    )
+
+    category_options = sorted(
+        {
+            str(item["category"])
+            for item in issues
+        }
+    )
+
+    category_filter = st.multiselect(
+        "Category",
+        category_options,
+        default=category_options,
+        key="admin_exception_category_filter",
+    )
+
+    visible = [
+        item
+        for item in issues
+        if item["severity"]
+        in severity_filter
+        and item["category"]
+        in category_filter
+    ]
+
+    for index, issue in enumerate(visible):
+        severity = issue["severity"]
+        reference = (
+            issue.get("reference")
+            or issue.get("entity_type")
+            or "System"
+        )
+
+        with st.expander(
+            (
+                f"{severity} ? "
+                f"{issue['category']} ? "
+                f"{reference}"
+            ),
+            expanded=severity
+            in {"Critical", "High"},
+        ):
+            st.write(
+                issue["summary"]
+            )
+
+            details = issue.get(
+                "details"
+            ) or {}
+
+            if details:
+                shown_details = pd.DataFrame(
+                    [
+                        {
+                            "Field": key,
+                            "Value": value,
+                        }
+                        for key, value
+                        in details.items()
+                    ]
+                )
+
+                dataframe(
+                    shown_details
+                )
+
+            reason = st.text_area(
+                "Investigation / resolution reason",
+                key=(
+                    f"admin_exception_reason_"
+                    f"{index}"
+                ),
+                placeholder=(
+                    "Required before Admin records "
+                    "an investigation or resolution."
+                ),
+            )
+
+            b1, b2 = st.columns(2)
+
+            if b1.button(
+                "Investigate",
+                key=(
+                    f"admin_exception_investigate_"
+                    f"{index}"
+                ),
+                use_container_width=True,
+            ):
+                try:
+                    investigate_system_exception(
+                        issue,
+                        user(),
+                        reason,
+                    )
+
+                    _clear_admin_exception_cache()
+
+                    st.success(
+                        "Investigation recorded "
+                        "with immutable audit evidence."
+                    )
+
+                except Exception as exc:
+                    st.error(str(exc))
+
+            if issue["category"] == "Routing":
+                resolution_label = (
+                    "Resolve: Correct Routing"
+                )
+            elif issue["category"] in {
+                "Workflow",
+                "Assignment",
+            }:
+                resolution_label = (
+                    "Resolve in Workflow Centre"
+                )
+            elif issue["category"] == "Notification":
+                resolution_label = (
+                    "Open Notifications Monitor"
+                )
+            elif issue["category"] == "Payment Evidence":
+                resolution_label = (
+                    "Open Procurement Records"
+                )
+            else:
+                resolution_label = (
+                    "Mark Resolution Reviewed"
+                )
+
+            if b2.button(
+                resolution_label,
+                key=(
+                    f"admin_exception_resolve_"
+                    f"{index}"
+                ),
+                type="primary",
+                use_container_width=True,
+            ):
+                try:
+                    if issue["category"] == "Routing":
+                        correct_request_routing(
+                            int(issue["entity_id"]),
+                            user(),
+                            reason,
+                        )
+
+                        resolve_system_exception(
+                            issue,
+                            user(),
+                            (
+                                reason
+                                + " Routing corrected "
+                                  "using central workflow policy."
+                            ),
+                        )
+
+                        _clear_admin_exception_cache()
+
+                        st.success(
+                            "Routing corrected and "
+                            "resolution audited."
+                        )
+
+                    elif issue["category"] in {
+                        "Workflow",
+                        "Assignment",
+                    }:
+                        if not str(reason or "").strip():
+                            raise ValueError(
+                                "Enter an investigation reason "
+                                "before opening an intervention."
+                            )
+
+                        investigate_system_exception(
+                            issue,
+                            user(),
+                            reason,
+                        )
+
+                        st.session_state[
+                            "admin_intervention_request_id"
+                        ] = issue.get(
+                            "entity_id"
+                        )
+
+                        st.session_state[
+                            "admin_section"
+                        ] = (
+                            "Workflow Intervention Centre"
+                        )
+
+                        st.rerun()
+
+                    elif issue["category"] == "Notification":
+                        if not str(reason or "").strip():
+                            raise ValueError(
+                                "Enter an investigation reason first."
+                            )
+
+                        investigate_system_exception(
+                            issue,
+                            user(),
+                            reason,
+                        )
+
+                        st.session_state[
+                            "admin_section"
+                        ] = "Notifications Monitor"
+
+                        st.rerun()
+
+                    elif issue["category"] == "Payment Evidence":
+                        if not str(reason or "").strip():
+                            raise ValueError(
+                                "Enter an investigation reason first."
+                            )
+
+                        investigate_system_exception(
+                            issue,
+                            user(),
+                            reason,
+                        )
+
+                        st.session_state[
+                            "admin_section"
+                        ] = "All Procurement Records"
+
+                        st.rerun()
+
+                    else:
+                        resolve_system_exception(
+                            issue,
+                            user(),
+                            reason,
+                        )
+
+                        _clear_admin_exception_cache()
+
+                        st.success(
+                            "Resolution review recorded."
+                        )
+
+                except Exception as exc:
+                    st.error(str(exc))
+
+
+def admin_workflow_intervention_centre():
+    st.subheader(
+        "Workflow Intervention Centre"
+    )
+
+    st.warning(
+        "These controls are exceptional Admin powers. "
+        "They do not replace normal Procurement, Approver, "
+        "Finance, Logistics, or closure ownership. "
+        "Every action requires a reason and is audited."
+    )
+
+    requests = df_query(
+        """
+        SELECT
+            id,
+            request_no,
+            requested_by,
+            department_project,
+            estimated_amount,
+            status,
+            next_role,
+            assigned_procurement_manager_id,
+            payment_status,
+            created_at,
+            updated_at
+        FROM purchase_requests
+        ORDER BY id DESC
+        LIMIT 750
+        """
+    )
+
+    if requests.empty:
+        st.info(
+            "No purchase requests are available."
+        )
+        return
+
+    labels = []
+
+    request_lookup = {}
+
+    for row in requests.itertuples():
+        label = (
+            f"{row.request_no} ? "
+            f"{row.status}"
+        )
+
+        labels.append(label)
+        request_lookup[label] = int(row.id)
+
+    preferred_id = st.session_state.pop(
+        "admin_intervention_request_id",
+        None,
+    )
+
+    default_index = 0
+
+    if preferred_id:
+        for idx, label in enumerate(labels):
+            if (
+                request_lookup[label]
+                == int(preferred_id)
+            ):
+                default_index = idx
+                break
+
+    selected_label = st.selectbox(
+        "Purchase request",
+        labels,
+        index=default_index,
+        key="admin_intervention_request_selector",
+    )
+
+    request_id = request_lookup[
+        selected_label
+    ]
+
+    selected = requests[
+        requests["id"] == request_id
+    ].iloc[0]
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "Request",
+        str(selected["request_no"]),
+    )
+
+    c2.metric(
+        "Status",
+        str(selected["status"]),
+    )
+
+    c3.metric(
+        "Current owner",
+        str(
+            selected.get("next_role")
+            or "None"
+        ),
+    )
+
+    c4.metric(
+        "Value",
+        money(
+            selected.get(
+                "estimated_amount"
+            )
+            or 0
+        ),
+    )
+
+    operations = [
+        "Correct Routing",
+        "Reassign Procurement Manager",
+        "Return for Correction",
+        "Return to Procurement Review",
+        "Release Stuck Approval",
+        "Reopen Completed / Closed / Archived",
+        "Cancel Duplicate Request",
+        "Emergency Approve Request",
+        "Emergency Reject Request",
+    ]
+
+    operation = st.selectbox(
+        "Admin intervention",
+        operations,
+        key="admin_workflow_intervention_operation",
+    )
+
+    target_pm_id = None
+
+    if operation == "Reassign Procurement Manager":
+        managers = df_query(
+            """
+            SELECT
+                id,
+                full_name,
+                username
+            FROM users
+            WHERE role='Procurement Manager'
+              AND is_active=1
+            ORDER BY full_name, username
+            """
+        )
+
+        if managers.empty:
+            st.error(
+                "No active Procurement Manager "
+                "is available for assignment."
+            )
+            return
+
+        manager_labels = {
+            (
+                f"{row.full_name or row.username} "
+                f"({row.username})"
+            ): int(row.id)
+            for row
+            in managers.itertuples()
+        }
+
+        manager_label = st.selectbox(
+            "Assign to",
+            list(manager_labels),
+            key="admin_workflow_target_pm",
+        )
+
+        target_pm_id = manager_labels[
+            manager_label
+        ]
+
+    reason = st.text_area(
+        "Mandatory intervention reason",
+        key="admin_workflow_intervention_reason",
+        placeholder=(
+            "Explain the exceptional circumstance, "
+            "why normal workflow cannot resolve it, "
+            "and what Admin is correcting."
+        ),
+    )
+
+    st.caption(
+        "Emergency Approve / Reject is permitted only "
+        "while a request is actually awaiting approval. "
+        "Admin cannot emergency-approve their own request."
+    )
+
+    if st.button(
+        "Apply Audited Intervention",
+        key="admin_apply_workflow_intervention",
+        type="primary",
+        use_container_width=True,
+    ):
+        try:
+            if operation == "Correct Routing":
+                intervention_id = (
+                    correct_request_routing(
+                        request_id,
+                        user(),
+                        reason,
+                    )
+                )
+
+            elif operation == "Reassign Procurement Manager":
+                intervention_id = (
+                    reassign_procurement_manager(
+                        request_id,
+                        int(target_pm_id),
+                        user(),
+                        reason,
+                    )
+                )
+
+            else:
+                intervention_id = (
+                    admin_request_intervention(
+                        request_id,
+                        operation,
+                        user(),
+                        reason,
+                    )
+                )
+
+            _clear_admin_exception_cache()
+
+            st.success(
+                "Admin intervention completed. "
+                f"Evidence ID: {intervention_id}"
+            )
+
+        except Exception as exc:
+            st.error(str(exc))
+
+    st.markdown(
+        "#### Recent Admin interventions "
+        "for this request"
+    )
+
+    history = df_query(
+        """
+        SELECT
+            intervention_no,
+            intervention_type,
+            reason,
+            actor_user_id,
+            severity,
+            created_at
+        FROM admin_interventions
+        WHERE entity_type='Purchase Request'
+          AND entity_id=?
+        ORDER BY created_at DESC
+        LIMIT 25
+        """,
+        (request_id,),
+    )
+
+    if history.empty:
+        st.info(
+            "No Admin interventions are recorded "
+            "for this request."
+        )
+    else:
+        dataframe(history)
+
+
+def admin_security_access_management_page():
+    st.subheader(
+        "Security & Access Management"
+    )
+
+    st.caption(
+        "Review account state and active sessions, "
+        "then apply controlled security interventions."
+    )
+
+    users_df = df_query(
+        """
+        SELECT
+            u.id,
+            u.username,
+            u.full_name,
+            u.role,
+            u.is_active,
+            u.must_change_password,
+            COALESCE(u.account_locked, 0)
+                AS account_locked,
+            COALESCE(u.failed_login_count, 0)
+                AS failed_login_count,
+            u.last_login_at,
+            (
+                SELECT COUNT(*)
+                FROM user_sessions s
+                WHERE s.user_id=u.id
+                  AND s.status='Active'
+                  AND (
+                      s.logout_at IS NULL
+                      OR s.logout_at=''
+                  )
+            ) AS active_sessions
+        FROM users u
+        ORDER BY u.role, u.username
+        """
+    )
+
+    if users_df.empty:
+        st.info(
+            "No users were found."
+        )
+        return
+
+    shown = users_df.copy()
+
+    shown["role"] = shown["role"].apply(
+        display_role
+    )
+
+    dataframe(shown)
+
+    user_labels = {
+        (
+            f"{row.full_name or row.username} "
+            f"({row.username}) ? "
+            f"{display_role(row.role)}"
+        ): int(row.id)
+        for row
+        in users_df.itertuples()
+    }
+
+    selected_label = st.selectbox(
+        "User account",
+        list(user_labels),
+        key="admin_security_user_selector",
+    )
+
+    target_user_id = user_labels[
+        selected_label
+    ]
+
+    selected = users_df[
+        users_df["id"] == target_user_id
+    ].iloc[0]
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "Access",
+        (
+            "Active"
+            if bool(selected["is_active"])
+            else "Suspended"
+        ),
+    )
+
+    c2.metric(
+        "Account",
+        (
+            "Locked"
+            if bool(selected["account_locked"])
+            else "Unlocked"
+        ),
+    )
+
+    c3.metric(
+        "Failed Logins",
+        int(
+            selected["failed_login_count"]
+            or 0
+        ),
+    )
+
+    c4.metric(
+        "Active Sessions",
+        int(
+            selected["active_sessions"]
+            or 0
+        ),
+    )
+
+    sessions = df_query(
+        """
+        SELECT
+            id,
+            login_at,
+            last_seen_at,
+            status,
+            remember_me,
+            expires_at,
+            user_agent,
+            ip_address
+        FROM user_sessions
+        WHERE user_id=?
+        ORDER BY id DESC
+        LIMIT 20
+        """,
+        (target_user_id,),
+    )
+
+    with st.expander(
+        "Recent sessions",
+        expanded=False,
+    ):
+        if sessions.empty:
+            st.info(
+                "No session records found."
+            )
+        else:
+            dataframe(sessions)
+
+    action = st.selectbox(
+        "Security action",
+        [
+            "Lock Account",
+            "Unlock Account",
+            "Suspend Access",
+            "Restore Access",
+            "Force Password Change",
+            "Terminate Active Sessions",
+        ],
+        key="admin_security_action",
+    )
+
+    reason = st.text_area(
+        "Mandatory security reason",
+        key="admin_security_reason",
+        placeholder=(
+            "Explain why this security action "
+            "is required."
+        ),
+    )
+
+    b1, b2 = st.columns(2)
+
+    if b1.button(
+        "Apply Security Action",
+        key="admin_apply_security_action",
+        type="primary",
+        use_container_width=True,
+    ):
+        try:
+            intervention_id = (
+                admin_user_security_action(
+                    target_user_id,
+                    action,
+                    user(),
+                    reason,
+                )
+            )
+
+            st.success(
+                "Security action completed. "
+                f"Evidence ID: {intervention_id}"
+            )
+
+        except Exception as exc:
+            st.error(str(exc))
+
+    if b2.button(
+        "Open User Management",
+        key="admin_security_open_user_management",
+        use_container_width=True,
+    ):
+        st.session_state[
+            "admin_section"
+        ] = "User Management"
+        st.rerun()
+
+    st.info(
+        "Temporary-password replacement remains in "
+        "User Management. This Security page controls "
+        "access state, forced password change, and sessions."
+    )
+
+
+
 def admin_console():
-    role_header("Admin Console", "System administration, approval override, reports, exports, income, audit logs and full procurement visibility.")
-    section = st.session_state.get("admin_section", "Admin Dashboard")
-    if section in ["Admin Dashboard", "System Overview"]:
-        admin_metrics(); admin_phase2_alerts() if "admin_phase2_alerts" in globals() else None; admin_overview()
-    elif section == "Budget Tracker":
-        budgets_page()
-    elif section == "Income":
-        income_page(manage=True)
+    role_header(
+        "Admin Console",
+        (
+            "System administration, audited workflow intervention, "
+            "security control, reports, exports, income, audit logs "
+            "and full procurement visibility."
+        ),
+    )
+
+    section = st.session_state.get(
+        "admin_section",
+        "Admin Dashboard",
+    )
+
+    if section in [
+        "Admin Dashboard",
+        "System Overview",
+    ]:
+        admin_control_snapshot()
+        admin_metrics()
+
+        if "admin_phase2_alerts" in globals():
+            admin_phase2_alerts()
+
+        admin_overview()
+
+    elif section == "Action & Exception Centre":
+        admin_action_exception_centre()
+
+    elif section == "Workflow Intervention Centre":
+        admin_workflow_intervention_centre()
+
     elif section == "User Management":
         user_management()
+
     elif section == "Roles & Permissions":
         roles_permissions_page()
+
+    elif section == "Security & Access Management":
+        admin_security_access_management_page()
+
+    elif section == "Budget Tracker":
+        budgets_page()
+
+    elif section == "Income":
+        income_page(manage=True)
+
     elif section == "Approval Configuration":
-        approval_config_page() if "approval_config_page" in globals() else configuration_page()
+        (
+            approval_config_page()
+            if "approval_config_page" in globals()
+            else configuration_page()
+        )
+
     elif section == "Import Center":
         import_center()
+
     elif section == "All Procurement Records":
         all_records_page()
+
     elif section == "Notifications Monitor":
         notifications_monitor_page()
+
     elif section == "Availability & Delegation Requests":
-        admin_availability_review_page() if "admin_availability_review_page" in globals() else availability_panel()
+        (
+            admin_availability_review_page()
+            if "admin_availability_review_page"
+            in globals()
+            else availability_panel()
+        )
+
     elif section == "Gateway Pass Management":
         gateway_pass_management_page()
+
     elif section == "Activity & History Logs":
-        activity_history_page(scope="all")
+        activity_history_page(
+            scope="all"
+        )
+
     elif section == "Audit Logs":
         audit_log_page(full=True)
+
+    elif section == "Database Viewer":
+        database_viewer_page()
+
     elif section == "Backup / Export":
         backup_export_page()
+
     elif section == "Settings":
         settings_page()
+
     else:
-        admin_metrics(); admin_overview()
+        admin_control_snapshot()
+        admin_metrics()
+        admin_overview()
+
 
 
 def render_app():
