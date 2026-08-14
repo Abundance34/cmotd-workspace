@@ -8387,6 +8387,9 @@ def approval_config_page():
 
 
 def configuration_page():
+    # Global Admin-controlled approval authorization limit.
+    approval_limit_configuration_panel()
+
     approval_config_page()
 
 # ============================================================================
@@ -9180,14 +9183,15 @@ def render_app():
 # Low-value approval authority and Facility gateway usability patch
 # ============================================================================
 # Procurement Manager now has policy-based authority for transactions up to
-# ₦100,000.  This is intentionally narrower than `can_approve`: the latter
+# the configured approval limit.  This is intentionally narrower than `can_approve`: the latter
 # remains reserved for Admin/Approver and is still used for all higher-value
 # and gateway-pass decisions.
 from core.db import transition_payment_status, transition_po_status
 from core.permissions import can_approve_low_value
 from core.workflow import (
     LOW_VALUE_APPROVAL_MODE,
-    PROCUREMENT_MANAGER_APPROVAL_THRESHOLD,
+    procurement_manager_approval_threshold,
+    procurement_manager_approval_threshold_sql,
     approval_amount,
     is_low_value_approval,
     required_approval_role_for_amount,
@@ -9218,7 +9222,7 @@ def _notify_approver_of_pm_threshold_approval(
     """Give Approver/MD visibility without sending a low-value item for a second approval."""
     message = (
         f"Procurement Manager approved {reference} for {_threshold_amount_label(amount)} "
-        f"under the ₦100,000 low-value authority."
+        f"under the configured Procurement Manager approval authority."
     )
     if note:
         message = f"{message} Note: {note}"
@@ -9241,7 +9245,7 @@ def _approval_guard(
     new_status: str,
     allow_approver_for_low_value: bool = False,
 ) -> tuple[bool, str]:
-    """Enforce the ₦100,000 chain before an approval/rejection is saved.
+    """Enforce the configured approval-limit chain before an approval/rejection is saved.
 
     A Procurement Manager may not approve a request they personally created.
     In that narrow segregation-of-duties case, an Approver / MD may decide a
@@ -9252,12 +9256,12 @@ def _approval_guard(
     low_value = is_low_value_approval(amount)
     if role == "Procurement Manager":
         if not low_value:
-            return False, "Only the Approver / MD can approve or reject transactions above ₦100,000."
+            return False, "Only the Approver / MD can approve or reject transactions above the configured approval limit."
         if new_status not in {"Approved", "Rejected", "Returned"}:
             return False, "Procurement Manager can use low-value authority only for approval, rejection, or return decisions."
         return True, ""
     if role == "Approver" and low_value and not allow_approver_for_low_value:
-        return False, "This transaction is within the ₦100,000 Procurement Manager approval authority. The Approver / MD receives an audit trail instead."
+        return False, "This transaction is within the configured Procurement Manager approval authority. The Approver / MD receives an audit trail instead."
     if not can_approve(role):
         return False, "You are not authorized to approve or reject this transaction."
     return True, ""
@@ -9293,7 +9297,7 @@ def _submit_request_to_final_approval(pr_id: int, pr, event: str, note: str):
     target_note = (
         "This request was created by Procurement Manager and requires independent Approver / MD approval."
         if owner_is_pm
-        else "This request exceeds ₦100,000 and requires Approver / MD approval."
+        else "This request exceeds the configured approval limit and requires Approver / MD approval."
     )
     create_notification(
         None,
@@ -9453,8 +9457,8 @@ def request_actions(pr_id: int, pr, key_scope: str | None = None):
     st.markdown("#### Guided next action")
     if role in {"Procurement Manager", "Approver", "Admin"}:
         st.caption(
-            f"Approval authority: Procurement Manager approves ₦100,000 and below; "
-            f"Approver / MD approves above ₦100,000. Current value: {_threshold_amount_label(amount)}."
+            f"Approval authority: Procurement Manager approves transactions at or below the configured approval limit; "
+            f"Approver / MD approves transactions above the configured approval limit. Current value: {_threshold_amount_label(amount)}."
         )
     actions: list[tuple[str, str, str, str]] = []
     draft_statuses = ["Draft", "FM Draft", "Returned for Correction", "Returned to Facility Manager"]
@@ -9473,7 +9477,7 @@ def request_actions(pr_id: int, pr, key_scope: str | None = None):
             if is_pm_own_request:
                 actions.append(("Submit to Approver/Admin", "Submitted for Approval", "Submitted for Independent Approval", "PM-originated request submitted for independent approval"))
             elif low_value:
-                actions.append(("Approve Low-Value Request (≤ ₦100,000)", "Approved", "Approved Low-Value Request", "Approved under Procurement Manager low-value authority"))
+                actions.append(("Approve Low-Value Request (within configured limit)", "Approved", "Approved Low-Value Request", "Approved under Procurement Manager low-value authority"))
                 actions.append(("Reject Low-Value Request", "Rejected", "Rejected Low-Value Request", "Rejected under Procurement Manager low-value authority"))
             else:
                 actions.append(("Submit to Approver/Admin", "Submitted for Approval", "Submitted for Approval", "Submitted by Procurement Manager for final approval"))
@@ -9483,7 +9487,7 @@ def request_actions(pr_id: int, pr, key_scope: str | None = None):
             actions.append(("Mark Reviewed", "Reviewed by Procurement", "Reviewed by Procurement", "Reviewed by Procurement Manager"))
         actions.append(("Mark Requires Sourcing / Start Vendor Quotes", "__sourcing__", "Sourcing Required", "Supplier comparison required before approval"))
         if role == "Procurement Manager" and low_value:
-            actions.append(("Approve Low-Value Request (≤ ₦100,000)", "Approved", "Approved Low-Value Request", "Approved under Procurement Manager low-value authority"))
+            actions.append(("Approve Low-Value Request (within configured limit)", "Approved", "Approved Low-Value Request", "Approved under Procurement Manager low-value authority"))
             actions.append(("Reject Low-Value Request", "Rejected", "Rejected Low-Value Request", "Rejected under Procurement Manager low-value authority"))
         elif role == "Admin" or not low_value:
             actions.append(("Submit to Approver/Admin", "Submitted for Approval", "Submitted for Approval", "Submitted for final approval"))
@@ -9495,7 +9499,7 @@ def request_actions(pr_id: int, pr, key_scope: str | None = None):
     if status == "Vendor Recommendation" and role in ["Procurement Manager", "Admin"]:
         actions.append(("Open / Continue Sourcing", "__open_sourcing__", "Sourcing Continued", "Continue vendor quote collection"))
         if role == "Procurement Manager" and low_value and not _pm_originated_request(requester_id):
-            actions.append(("Approve Low-Value Request (≤ ₦100,000)", "Approved", "Approved Low-Value Request", "Vendor recommendation approved under Procurement Manager low-value authority"))
+            actions.append(("Approve Low-Value Request (within configured limit)", "Approved", "Approved Low-Value Request", "Vendor recommendation approved under Procurement Manager low-value authority"))
             actions.append(("Reject Low-Value Request", "Rejected", "Rejected Low-Value Request", "Rejected under Procurement Manager low-value authority"))
         elif role == "Admin" or not low_value or _pm_originated_request(requester_id):
             actions.append(("Submit Vendor Recommendation to Approver/Admin", "Submitted for Approval", "Submitted for Approval", "Vendor recommendation submitted for final approval"))
@@ -9505,7 +9509,7 @@ def request_actions(pr_id: int, pr, key_scope: str | None = None):
     if status in pending_statuses:
         if role == "Procurement Manager" and low_value and not _pm_originated_request(requester_id):
             actions.extend([
-                ("Approve Low-Value Request (≤ ₦100,000)", "Approved", "Approved Low-Value Request", "Approved under Procurement Manager low-value authority"),
+                ("Approve Low-Value Request (within configured limit)", "Approved", "Approved Low-Value Request", "Approved under Procurement Manager low-value authority"),
                 ("Reject Low-Value Request", "Rejected", "Rejected Low-Value Request", "Rejected under Procurement Manager low-value authority"),
                 ("Return for Correction", "Returned for Correction", "Returned for Correction", "Returned for correction"),
             ])
@@ -9771,14 +9775,14 @@ def request_next_action_board():
     review_statuses = ("Draft", "Sent for Procurement Review", "Submitted to Procurement Manager", "Submitted", "Procurement Review", "Reviewed by Procurement", "Vendor Recommendation")
     cards: list[dict[str, Any]] = [
         {
-            "title": "Low-value requests: Procurement Manager approval (≤ ₦100,000)",
+            "title": "Low-value requests: Procurement Manager approval (within configured limit)",
             "statuses": review_statuses,
             "button": "Approve Low-Value Request",
             "new_status": "__threshold_approve__",
             "event": "Approved Low-Value Request",
             "note": "Approved under Procurement Manager low-value authority",
             "extra_sql": " AND COALESCE(estimated_amount,0) <= ? AND COALESCE(requested_by,0) NOT IN (SELECT id FROM users WHERE role='Procurement Manager')",
-            "extra_params": (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD,),
+            "extra_params": (procurement_manager_approval_threshold_sql(),),
         },
         {
             "title": "My PM drafts: submit directly to Approver/Admin",
@@ -9828,7 +9832,7 @@ def request_next_action_board():
             "event": "Submitted for Approval",
             "note": "Vendor recommendation submitted for Approver / MD approval",
             "extra_sql": " AND COALESCE(estimated_amount,0) > ?",
-            "extra_params": (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD,),
+            "extra_params": (procurement_manager_approval_threshold_sql(),),
         },
         {
             "title": "Approved requests needing PO",
@@ -9901,7 +9905,7 @@ def commercial_po_detail(po_id: int):
         ],
         cols=4,
     )
-    st.caption("Approval authority: Procurement Manager approves ₦100,000 and below; Approver / MD approves above ₦100,000.")
+    st.caption("Approval authority: Procurement Manager approves transactions at or below the configured approval limit; Approver / MD approves transactions above the configured approval limit.")
     items = df_query("SELECT item_name, quantity, unit_price, total, category FROM purchase_order_items WHERE po_id=?", (po_id,))
     if not items.empty:
         shown = items.copy()
@@ -9923,7 +9927,7 @@ def commercial_po_detail(po_id: int):
         if low_value:
             st.info("This PO is within the Procurement Manager approval authority.")
             c1, c2 = st.columns(2)
-            if c1.button("Approve Low-Value PO (≤ ₦100,000)", type="primary", key=f"pm_po_low_approve_{po_id}"):
+            if c1.button("Approve Low-Value PO (within configured limit)", type="primary", key=f"pm_po_low_approve_{po_id}"):
                 approval_action("Purchase Order", po_id, status, "Approved", "Approved Low-Value PO", note or "Approved under Procurement Manager low-value authority")
             if c2.button("Reject Low-Value PO", key=f"pm_po_low_reject_{po_id}"):
                 if not note.strip():
@@ -9936,16 +9940,16 @@ def commercial_po_detail(po_id: int):
                 add_workflow_event("Purchase Order", po_id, "Submitted for PO Approval", "Pending Approval", note or "Submitted by Procurement Manager", user()["id"])
                 create_activity_log(user()["id"], user()["role"], "PO_SUBMITTED_FOR_APPROVAL", "Purchase Order", po_id, f"{po['po_no']} sent to Approver / MD", note, "workflow", po.get("request_id"))
                 log_audit("PO_SUBMITTED_FOR_APPROVAL", "Purchase Order", po_id, note or "Submitted by Procurement Manager", user()["id"], user()["role"], before_values={"status": status}, after_values={"status": "Pending Approval", "next_role": "approver"})
-                create_notification(None, "Approver", "PO pending approval", f"{po['po_no']} requires approval because it is above ₦100,000.", "Purchase Order", po_id, "High", ["in_app", "browser_push"], action_label="PO Approval")
+                create_notification(None, "Approver", "PO pending approval", f"{po['po_no']} requires approval because it is above the configured approval limit.", "Purchase Order", po_id, "High", ["in_app", "browser_push"], action_label="PO Approval")
                 _rerun_success("Purchase order sent to Approver / MD.")
     elif status == "Pending Approval":
         if low_value:
             st.info("This legacy low-value PO is awaiting Procurement Manager approval.")
             note = st.text_area("Approval note", key=f"pm_po_pending_low_note_{po_id}")
-            if st.button("Approve Low-Value PO (≤ ₦100,000)", type="primary", key=f"pm_po_pending_low_approve_{po_id}"):
+            if st.button("Approve Low-Value PO (within configured limit)", type="primary", key=f"pm_po_pending_low_approve_{po_id}"):
                 approval_action("Purchase Order", po_id, status, "Approved", "Approved Low-Value PO", note or "Approved under Procurement Manager low-value authority")
         else:
-            st.info("Awaiting Approver/Admin decision. Procurement cannot approve a PO above ₦100,000.")
+            st.info("Awaiting Approver/Admin decision. Procurement cannot approve a PO above the configured approval limit.")
     elif status == "Approved":
         st.success("PO approved. Release it to Logistics when the commercial order is ready for fulfilment.")
         release_note = st.text_area("Handover note for Logistics", key=f"pm_po_release_note_{po_id}")
@@ -9972,7 +9976,7 @@ def commercial_po_detail(po_id: int):
 def low_value_approvals_page():
     """Procurement Manager queue for low-value requests, POs and payment requests."""
     st.subheader("Low-Value Approvals")
-    st.caption("Procurement Manager approval authority applies to purchase requests, purchase orders, and standalone payment requests of ₦100,000 and below. Approver / MD receives a permanent audit trail for every PM approval.")
+    st.caption("Procurement Manager approval authority applies to purchase requests, purchase orders, and standalone payment requests of the configured approval limit and below. Approver / MD receives a permanent audit trail for every PM approval.")
     req_tab, po_tab, pay_tab = st.tabs(["Purchase Requests", "Purchase Orders", "Payment Requests"])
 
     with req_tab:
@@ -9985,7 +9989,7 @@ def low_value_approvals_page():
               AND status IN ('Draft','Sent for Procurement Review','Submitted to Procurement Manager','Submitted','Procurement Review','Reviewed by Procurement','Vendor Recommendation','Submitted for Approval','Pending Approver/MD Approval','Pending Approval')
             ORDER BY updated_at DESC, created_at DESC
             """,
-            (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD,),
+            (procurement_manager_approval_threshold_sql(),),
         )
         if reqs.empty:
             empty_state("No low-value purchase requests awaiting action", "Requests within the Procurement Manager approval limit will appear here.")
@@ -10002,7 +10006,7 @@ def low_value_approvals_page():
             WHERE COALESCE(total_amount,0) <= ? AND status IN ('Draft','Pending Approval')
             ORDER BY updated_at DESC, created_at DESC
             """,
-            (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD,),
+            (procurement_manager_approval_threshold_sql(),),
         )
         if pos.empty:
             empty_state("No low-value purchase orders awaiting action", "Draft low-value POs created by Procurement will appear here.")
@@ -10021,10 +10025,10 @@ def low_value_approvals_page():
               AND COALESCE(next_role,'procurement_manager')='procurement_manager'
             ORDER BY created_at DESC
             """,
-            (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD,),
+            (procurement_manager_approval_threshold_sql(),),
         )
         if payments.empty:
-            empty_state("No low-value payment requests awaiting action", "Standalone payment requests at or below ₦100,000 will appear here.")
+            empty_state("No low-value payment requests awaiting action", "Standalone payment requests at or below the configured approval limit will appear here.")
         else:
             shown = payments.copy(); shown["amount"] = shown["amount"].apply(money); dataframe(shown.drop(columns=["id"]))
             selected = st.selectbox("Open low-value payment request", [f"{r.payment_no} — {money(r.amount)} — #{int(r.id)}" for r in payments.itertuples()], key="pm_low_payment_select")
@@ -10032,7 +10036,7 @@ def low_value_approvals_page():
             payment = payments[payments["id"] == pay_id].iloc[0]
             note = st.text_area("Approval note", key=f"pm_low_payment_note_{pay_id}")
             c1, c2 = st.columns(2)
-            if c1.button("Approve Low-Value Payment (≤ ₦100,000)", type="primary", key=f"pm_low_payment_approve_{pay_id}"):
+            if c1.button("Approve Low-Value Payment (within configured limit)", type="primary", key=f"pm_low_payment_approve_{pay_id}"):
                 approval_action("Payment", pay_id, str(payment["status"]), "Approved", "Approved Low-Value Payment", note or "Approved under Procurement Manager low-value authority")
             if c2.button("Reject Low-Value Payment", key=f"pm_low_payment_reject_{pay_id}"):
                 if not note.strip():
@@ -10089,9 +10093,9 @@ def payments_page():
     # items above the PM threshold. Low-value items are handled from the PM
     # workspace and then appear here as an audit notification/history record.
     if not df.empty and can_approve(role):
-        eligible = df[(df["status"] == "Pending Approval") & (df["amount"].fillna(0).astype(float) > PROCUREMENT_MANAGER_APPROVAL_THRESHOLD)]
+        eligible = df[(df["status"] == "Pending Approval") & (df["amount"].fillna(0).apply(lambda value: not is_low_value_approval(value)))]
         if eligible.empty:
-            st.info("No payment requests above ₦100,000 are awaiting Approver / MD approval.")
+            st.info("No payment requests above the configured approval limit are awaiting Approver / MD approval.")
         else:
             selected = st.selectbox("Approve payment request", eligible["payment_no"].tolist(), key="payment_select_cmd")
             row = eligible[eligible["payment_no"] == selected].iloc[0]
@@ -10144,7 +10148,7 @@ def my_approval_history_page():
 def procurement_workspace():
     role_header(
         "Procurement Manager Workspace",
-        "Review Facility/Utility submissions, source vendors, approve low-value transactions up to ₦100,000, submit higher values to Approver / MD, create POs, and release approved POs to Logistics.",
+        "Review Facility/Utility submissions, source vendors, approve low-value transactions up to the configured approval limit, submit higher values to Approver / MD, create POs, and release approved POs to Logistics.",
     )
     section = st.session_state.get("procurement_section", "Operations Dashboard")
     if section == "Operations Dashboard":
@@ -10210,13 +10214,13 @@ def _approver_request_queue_df() -> pd.DataFrame:
           )
         ORDER BY pr.updated_at DESC, pr.created_at DESC
         """,
-        (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD, PROCUREMENT_MANAGER_APPROVAL_THRESHOLD),
+        (procurement_manager_approval_threshold_sql(), procurement_manager_approval_threshold_sql()),
     )
 
 
 def pending_approval_page():
     st.subheader("Pending Approvals")
-    st.caption("Approver / MD decides requests above ₦100,000 and independently decides Procurement Manager-created requests. Low-value Facility/Utility requests are approved by Procurement Manager and appear in your audit history after a decision.")
+    st.caption("Approver / MD decides requests above the configured approval limit and independently decides Procurement Manager-created requests. Low-value Facility/Utility requests are approved by Procurement Manager and appear in your audit history after a decision.")
     df = _approver_request_queue_df()
     if df.empty:
         empty_state("No requests awaiting your approval", "High-value requests and Procurement Manager-originated requests will appear here.")
@@ -10235,7 +10239,7 @@ def pending_approval_page():
 
 def po_approval_page():
     st.subheader("PO Approval")
-    st.caption("Approver / MD decides purchase orders above ₦100,000. Procurement Manager decides POs at or below ₦100,000.")
+    st.caption("Approver / MD decides purchase orders above the configured approval limit. Procurement Manager decides POs at or below the configured approval limit.")
     df = df_query(
         """
         SELECT po.id, po.po_no, po.total_amount, po.status, po.po_date,
@@ -10245,7 +10249,7 @@ def po_approval_page():
         WHERE po.status='Pending Approval' AND COALESCE(po.total_amount,0) > ?
         ORDER BY po.updated_at DESC, po.created_at DESC
         """,
-        (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD,),
+        (procurement_manager_approval_threshold_sql(),),
     )
     if df.empty:
         empty_state("No purchase orders awaiting your approval", "High-value purchase orders will appear here.")
@@ -10280,7 +10284,7 @@ def po_approval_page():
 
 def quote_comparison_decision_page():
     st.subheader("Quote Comparison")
-    st.caption("Approver / MD decides vendor recommendations above ₦100,000. Low-value recommendations are completed by Procurement Manager and remain visible in the audit trail.")
+    st.caption("Approver / MD decides vendor recommendations above the configured approval limit. Low-value recommendations are completed by Procurement Manager and remain visible in the audit trail.")
     df = df_query(
         """
         SELECT st.id, st.sourcing_no, st.request_id, pr.request_no, pr.estimated_amount,
@@ -10296,7 +10300,7 @@ def quote_comparison_decision_page():
           )
         ORDER BY st.updated_at DESC, st.created_at DESC
         """,
-        (PROCUREMENT_MANAGER_APPROVAL_THRESHOLD, PROCUREMENT_MANAGER_APPROVAL_THRESHOLD),
+        (procurement_manager_approval_threshold_sql(), procurement_manager_approval_threshold_sql()),
     )
     if df.empty:
         empty_state("No vendor recommendations awaiting your decision", "High-value vendor recommendations will appear here.")
@@ -11599,4 +11603,123 @@ def post_payment_closure_page():
         except (CompletionError, PermissionError) as exc:
             st.error(str(exc))
 
+# ============================================================================
+# Configurable Procurement Manager approval limit
+# ============================================================================
+
+def approval_limit_configuration_panel():
+    """Admin-owned global approval authorization limit."""
+
+    from services.approval_policy_service import (
+        approval_policy_history,
+        format_approval_limit,
+        get_procurement_manager_approval_limit,
+        set_procurement_manager_approval_limit,
+    )
+
+    st.markdown("### Approval Authorization Limit")
+
+    current_limit = (
+        get_procurement_manager_approval_limit()
+    )
+
+    st.metric(
+        "Current Procurement Manager approval limit",
+        format_approval_limit(current_limit),
+    )
+
+    st.caption(
+        "Transactions at or below this amount may be approved "
+        "by Procurement Manager when policy permits. Transactions "
+        "above it route to Approver / MD."
+    )
+
+    st.info(
+        "Segregation of duties remains mandatory: a request created "
+        "by a Procurement Manager always requires independent "
+        "Approver / MD approval, regardless of the configured amount."
+    )
+
+    st.caption(
+        "There is no application-defined maximum approval limit. "
+        "Enter any valid positive monetary amount."
+    )
+
+    with st.form(
+        "admin_procurement_manager_approval_limit_form"
+    ):
+        new_limit = st.text_input(
+            "New approval limit (?)",
+            value=format(
+                current_limit,
+                "f",
+            ),
+            help=(
+                "Enter any positive amount. "
+                "Commas and the ? symbol are accepted. "
+                "No maximum ceiling is imposed."
+            ),
+        )
+
+        reason = st.text_area(
+            "Reason for change",
+            placeholder=(
+                "Explain why the approval authorization "
+                "limit is being changed."
+            ),
+        )
+
+        submitted = st.form_submit_button(
+            "Update Approval Limit",
+            type="primary",
+        )
+
+    if submitted:
+        try:
+            updated = (
+                set_procurement_manager_approval_limit(
+                    new_limit,
+                    actor=user(),
+                    reason=reason,
+                )
+            )
+        except (
+            ValueError,
+            PermissionError,
+            RuntimeError,
+        ) as exc:
+            st.error(str(exc))
+        else:
+            st.success(
+                "Approval limit updated to "
+                f"{format_approval_limit(updated)}."
+            )
+            st.rerun()
+
+    st.markdown("#### Approval Limit Change History")
+
+    history = approval_policy_history(
+        limit=50
+    )
+
+    if history.empty:
+        st.caption(
+            "No Admin approval-limit changes have been recorded yet."
+        )
+    else:
+        display = history.copy()
+
+        display["old_amount"] = (
+            display["old_amount"]
+            .apply(format_approval_limit)
+        )
+
+        display["new_amount"] = (
+            display["new_amount"]
+            .apply(format_approval_limit)
+        )
+
+        dataframe(display)
+
+    st.divider()
 
