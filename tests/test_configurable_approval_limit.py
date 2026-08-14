@@ -562,3 +562,93 @@ def test_required_policy_audit_evidence_is_same_transaction():
     assert history_position < commit_position
     assert legacy_audit_position < commit_position
     assert immutable_audit_position < commit_position
+
+def test_active_approval_config_page_renders_global_limit_panel():
+    """The live Admin approval page must render the global PM limit."""
+    import ast
+    from pathlib import Path
+
+    source = Path(
+        "modules/role_workspaces.py"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    tree = ast.parse(source)
+
+    approval_pages = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "approval_config_page"
+    ]
+
+    assert approval_pages, (
+        "approval_config_page is missing"
+    )
+
+    active_page = approval_pages[-1]
+
+    page_calls = {
+        node.func.id
+        for node in ast.walk(active_page)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+    }
+
+    assert (
+        "approval_limit_configuration_panel"
+        in page_calls
+    ), (
+        "The live approval_config_page must render "
+        "approval_limit_configuration_panel()."
+    )
+
+    wrappers = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "configuration_page"
+    ]
+
+    assert wrappers, (
+        "configuration_page is missing"
+    )
+
+    active_wrapper = wrappers[-1]
+
+    wrapper_calls = {
+        node.func.id
+        for node in ast.walk(active_wrapper)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+    }
+
+    assert "approval_config_page" in wrapper_calls
+
+    assert (
+        "approval_limit_configuration_panel"
+        not in wrapper_calls
+    ), (
+        "configuration_page must not render the "
+        "approval-limit panel separately, otherwise "
+        "the panel can appear twice."
+    )
+
+    page_text = "\n".join(
+        source.splitlines()[
+            active_page.lineno - 1:
+            active_page.end_lineno
+        ]
+    )
+
+    assert (
+        "Category-Specific Approval Rules"
+        in page_text
+    )
+
+    assert (
+        "Procurement Manager approval authority "
+        "is governed by the global"
+        in page_text
+    )

@@ -8333,7 +8333,17 @@ def _clear_dashboard_cache():
 # ---------------- Final safe approval configuration override ----------------
 def approval_config_page():
     st.subheader("Approval Configuration")
-    st.caption("Only Admin and Approver / MD may approve. Finance and Procurement Manager cannot be configured as approvers.")
+
+    # Global Admin-controlled Procurement Manager approval authority.
+    approval_limit_configuration_panel()
+
+    st.markdown("### Category-Specific Approval Rules")
+    st.caption(
+        "These rules configure category-specific Approver/Admin routing. "
+        "Procurement Manager approval authority is governed by the global "
+        "authorization limit above. Finance remains non-approving."
+    )
+
     with st.form("cmd_safe_approval_rule_form"):
         c1, c2, c3 = st.columns(3)
         category = c1.selectbox("Category", EXPENSE_CATEGORIES, key="cmd_safe_appr_cat")
@@ -8387,9 +8397,6 @@ def approval_config_page():
 
 
 def configuration_page():
-    # Global Admin-controlled approval authorization limit.
-    approval_limit_configuration_panel()
-
     approval_config_page()
 
 # ============================================================================
