@@ -425,7 +425,7 @@ def restore_user_from_session() -> bool:
         """
         SELECT s.*, u.* FROM user_sessions s
         JOIN users u ON u.id=s.user_id
-        WHERE s.session_token=? AND s.status='Active' AND u.is_active=1 AND (s.logout_at IS NULL OR s.logout_at='')
+        WHERE s.session_token=? AND s.status='Active' AND u.is_active=1 AND s.logout_at IS NULL
         ORDER BY s.id DESC LIMIT 1
         """,
         (token_hash,), fetch=True,

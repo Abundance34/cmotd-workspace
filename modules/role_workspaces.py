@@ -7892,10 +7892,7 @@ def admin_security_access_management_page():
                 FROM user_sessions s
                 WHERE s.user_id=u.id
                   AND s.status='Active'
-                  AND (
-                      s.logout_at IS NULL
-                      OR s.logout_at=''
-                  )
+                  AND s.logout_at IS NULL
             ) AS active_sessions
         FROM users u
         ORDER BY u.role, u.username

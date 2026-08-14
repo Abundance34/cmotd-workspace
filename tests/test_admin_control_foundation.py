@@ -203,3 +203,17 @@ def test_postgres_admin_schema_is_migration_only():
         "by numbered migrations."
         in active_source
     )
+
+
+def test_active_session_queries_are_postgres_timestamp_safe():
+    auth = _read("core/auth.py")
+    workspaces = _read("modules/role_workspaces.py")
+
+    # PostgreSQL stores user_sessions.logout_at as TIMESTAMPTZ.
+    # Comparing it with an empty string raises InvalidDatetimeFormat.
+    assert "s.logout_at=''" not in auth
+    assert "s.logout_at=''" not in workspaces
+
+    assert "s.logout_at IS NULL" in auth
+    assert "s.logout_at IS NULL" in workspaces
+
