@@ -11656,14 +11656,14 @@ def approval_limit_configuration_panel():
         "admin_procurement_manager_approval_limit_form"
     ):
         new_limit = st.text_input(
-            "New approval limit (?)",
+            f"New approval limit ({chr(0x20A6)})",
             value=format(
                 current_limit,
                 "f",
             ),
             help=(
                 "Enter any positive amount. "
-                "Commas and the ? symbol are accepted. "
+                f"Commas and the {chr(0x20A6)} symbol are accepted. "
                 "No maximum ceiling is imposed."
             ),
         )

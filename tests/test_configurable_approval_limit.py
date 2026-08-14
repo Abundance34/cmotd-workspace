@@ -652,3 +652,68 @@ def test_active_approval_config_page_renders_global_limit_panel():
         "is governed by the global"
         in page_text
     )
+
+def test_approval_limit_naira_symbol_is_encoding_safe():
+    """Approval-limit currency formatting must render the Naira sign."""
+    from decimal import Decimal
+
+    from services.approval_policy_service import (
+        format_approval_limit,
+    )
+
+    expected_symbol = chr(0x20A6)
+
+    assert (
+        format_approval_limit(
+            Decimal("2000000.00")
+        )
+        == f"{expected_symbol}2,000,000.00"
+    )
+
+    assert (
+        format_approval_limit(
+            Decimal("2000000.01")
+        )
+        == f"{expected_symbol}2,000,000.01"
+    )
+
+
+def test_approval_limit_admin_ui_has_no_question_mark_currency_placeholder():
+    """Admin limit UI must use the real Naira sign, not '?'."""
+    import ast
+    from pathlib import Path
+
+    source = Path(
+        "modules/role_workspaces.py"
+    ).read_text(
+        encoding="utf-8"
+    )
+
+    tree = ast.parse(source)
+
+    panels = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name
+        == "approval_limit_configuration_panel"
+    ]
+
+    assert panels
+
+    panel = panels[-1]
+
+    panel_text = "\n".join(
+        source.splitlines()[
+            panel.lineno - 1:
+            panel.end_lineno
+        ]
+    )
+
+    assert "New approval limit (?)" not in panel_text
+    assert (
+        "Commas and the ? symbol are accepted."
+        not in panel_text
+    )
+
+    assert "chr(0x20A6)" in panel_text

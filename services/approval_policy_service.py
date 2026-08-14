@@ -121,11 +121,12 @@ def parse_approval_limit(value: Any) -> Decimal:
 
 def format_approval_limit(value: Any) -> str:
     amount = parse_approval_limit(value)
+    naira_symbol = chr(0x20A6)
 
     try:
-        return f"?{amount:,.2f}"
+        return f"{naira_symbol}{amount:,.2f}"
     except Exception:
-        return f"?{amount}"
+        return f"{naira_symbol}{amount}"
 
 
 def ensure_approval_policy_schema() -> None:
