@@ -216,4 +216,3 @@ def test_active_session_queries_are_postgres_timestamp_safe():
 
     assert "s.logout_at IS NULL" in auth
     assert "s.logout_at IS NULL" in workspaces
-
