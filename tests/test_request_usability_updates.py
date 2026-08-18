@@ -838,3 +838,18 @@ def test_document_security_rejects_limits_and_unsafe_zip():
         blocked = True
 
     assert blocked
+
+def test_approved_download_filename_sanitizer_has_re_runtime():
+    """Approved-request downloads require re.sub for safe filenames."""
+    import modules.role_workspaces as role_workspaces
+
+    assert "re" in vars(role_workspaces)
+    assert callable(role_workspaces.re.sub)
+
+    cleaned = role_workspaces.re.sub(
+        r"[^A-Za-z0-9._-]+",
+        "_",
+        "UF-20260810/102010 776",
+    )
+
+    assert cleaned == "UF-20260810_102010_776"
