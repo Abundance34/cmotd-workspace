@@ -22,3 +22,4 @@ streamlit-autorefresh>=1.0.1
 # Google Cloud SQL for PostgreSQL production backend
 psycopg[binary]>=3.2,<4
 psycopg-pool>=3.2,<4
+xlrd>=2.0

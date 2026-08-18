@@ -7,14 +7,24 @@ import shutil
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 from docx import Document
 
-from core.db import ATTACHMENT_DIR, IMPORT_DIR, add_workflow_event, df_query, json_dump, log_audit, make_ref, now_iso, run_insert, run_query
+from core.ocr import extract_text
 
-AMOUNT_RE = re.compile(r"(?:₦|NGN|N)?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{1,2})?|[0-9]+(?:\.\d{1,2})?)", re.I)
+from core.db import ATTACHMENT_DIR, IMPORT_DIR, add_workflow_event, df_query, json_dump, log_audit, make_ref, now_iso, run_insert, run_query
+from services.document_service import DocumentSecurityError, scan_saved_upload, validate_upload_bytes, validate_zip_archive_bytes
+
+AMOUNT_RE = re.compile(
+    r"(?:\u20A6|NGN|N)?\s*"
+    r"((?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)"
+    r"(?:\.\d{1,2})?)",
+    re.I,
+)
 DATE_PATTERNS = [
     r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b",
     r"\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b",
@@ -22,10 +32,11 @@ DATE_PATTERNS = [
 ]
 
 CATEGORY_KEYWORDS = {
-    "Diesel/Fuel": ["diesel", "fuel", "petrol", "ago"],
+    "Diesel": ["diesel", "ago"],
     "Water": ["water"],
     "Office Supplies": ["a4", "paper", "rim", "ream", "office", "stationery", "desk", "chair"],
     "Generator Maintenance": ["generator", "gen", "100kva", "battery", "oil filter", "fuel filter"],
+    "Fuel": ["fuel", "petrol", "gasoline"],
     "Vehicle Maintenance": ["vehicle", "hiace", "bus", "coaster", "tyre", "mechanic"],
     "Plumbing": ["plumbing", "pipe", "elbow", "tee", "tap"],
     "Welding/Fabrication": ["welding", "fabrication", "h-beam", "tank stand", "burglary proof", "iron"],
@@ -174,19 +185,82 @@ def extract_title(text: str, file_name: str) -> str:
     return Path(file_name).stem
 
 
-def extract_total(text: str, line_items: list[dict[str, Any]]) -> float:
-    candidates = []
-    for pattern in [
-        r"Total\s+Requisitioned\s+Amount\D{0,80}(?:₦|NGN|N)?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{1,2})?|[0-9]+(?:\.\d{1,2})?)",
-        r"Total\s+Expenditure\D{0,80}(?:₦|NGN|N)?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{1,2})?|[0-9]+(?:\.\d{1,2})?)",
-        r"Total\s+Allocated\D{0,80}(?:₦|NGN|N)?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{1,2})?|[0-9]+(?:\.\d{1,2})?)",
-    ]:
-        for m in re.finditer(pattern, text, flags=re.I):
-            candidates.append(parse_amount(m.group(1)))
-    item_total = sum(float(item.get("total_price") or 0) for item in line_items)
+def extract_total(
+    text: str,
+    line_items: list[dict[str, Any]],
+) -> float:
+    """Return the most credible total found in imported content.
+
+    Supports ProcureFlow's historical labels plus common
+    procurement wording such as Total, Grand Total and Amount
+    Payable. Line-item totals remain valid candidates.
+    """
+    candidates: list[float] = []
+
+    amount_token = (
+        r"((?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)"
+        r"(?:\.\d{1,2})?)"
+    )
+
+    labels = [
+        r"Total\s+Requisitioned\s+Amount",
+        r"Total\s+Expenditure",
+        r"Total\s+Allocated",
+        r"Grand\s+Total",
+        r"Amount\s+Payable",
+        r"Total\s+Amount",
+        (
+            r"(?<!\w)Total"
+            r"(?!\s+(?:Requisitioned|Expenditure|Allocated|Amount))"
+        ),
+    ]
+
+    content = str(
+        text
+        or ""
+    )
+
+    for label in labels:
+        pattern = (
+            label
+            + r"[^\d\r\n]{0,40}"
+            + amount_token
+        )
+
+        for match in re.finditer(
+            pattern,
+            content,
+            flags=re.I,
+        ):
+            amount = parse_amount(
+                match.group(1)
+            )
+
+            if amount > 0:
+                candidates.append(
+                    amount
+                )
+
+    item_total = sum(
+        float(
+            item.get(
+                "total_price"
+            )
+            or 0
+        )
+        for item in line_items
+    )
+
     if item_total > 0:
-        candidates.append(item_total)
-    return max(candidates) if candidates else 0.0
+        candidates.append(
+            item_total
+        )
+
+    return (
+        max(candidates)
+        if candidates
+        else 0.0
+    )
 
 
 def parse_line_items(tables: list[list[list[str]]], category: str) -> list[dict[str, Any]]:
@@ -372,48 +446,695 @@ def parse_docx_from_zip_member(zf: zipfile.ZipFile, member: str, source_zip_name
     }
 
 
-def import_procurement_zip(zip_path: str | Path, user_id: int | None = None) -> dict[str, Any]:
+
+SUPPORTED_IMPORT_EXTENSIONS = {
+    ".docx",
+    ".pdf",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".bmp",
+    ".gif",
+    ".tif",
+    ".tiff",
+    ".xlsx",
+    ".xls",
+}
+
+
+class _MemoryUpload:
+    def __init__(
+        self,
+        name: str,
+        data: bytes,
+    ):
+        self.name = name
+        self._data = data
+
+    def getvalue(self) -> bytes:
+        return self._data
+
+
+def _excel_text_and_tables(
+    data: bytes,
+) -> tuple[str, list[list[list[str]]]]:
+    sheets = pd.read_excel(
+        BytesIO(data),
+        sheet_name=None,
+        header=None,
+    )
+
+    tables: list[list[list[str]]] = []
+    text_lines: list[str] = []
+
+    for sheet_name, frame in sheets.items():
+        # Prevent exceptionally large spreadsheets from creating
+        # unbounded import payloads during an interactive upload.
+        frame = frame.iloc[:2000, :40].copy()
+
+        frame = frame.where(
+            pd.notna(frame),
+            "",
+        )
+
+        rows: list[list[str]] = []
+
+        for raw_row in frame.values.tolist():
+            row = [
+                str(value).strip()
+                if value is not None
+                else ""
+                for value in raw_row
+            ]
+
+            if not any(row):
+                continue
+
+            rows.append(row)
+
+        if not rows:
+            continue
+
+        tables.append(rows)
+
+        text_lines.append(
+            f"[Sheet: {sheet_name}]"
+        )
+
+        for row in rows:
+            text_lines.append(
+                " | ".join(row)
+            )
+
+    return (
+        "\n".join(text_lines)[:200000],
+        tables,
+    )
+
+
+def parse_import_file_bytes(
+    data: bytes,
+    original_path: str,
+    source_name: str,
+    import_batch_dir: Path,
+) -> dict[str, Any]:
+    filename = Path(
+        original_path
+    ).name
+
+    suffix = Path(
+        filename
+    ).suffix.lower()
+
+    if suffix not in SUPPORTED_IMPORT_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported import file type: {suffix or 'unknown'}"
+        )
+
+    # Enforce the same upload-size, content-signature and
+    # Office-container security rules used elsewhere.
+    validate_upload_bytes(
+        filename,
+        data,
+    )
+
+    relative_parts = [
+        safe_name(part)
+        for part in Path(original_path).parts
+        if part
+        and part != "PROCUREMENT PROJECT"
+    ]
+
+    if not relative_parts:
+        relative_parts = [
+            safe_name(filename)
+        ]
+
+    target_dir = (
+        import_batch_dir
+        / Path(*relative_parts[:-1])
+        if len(relative_parts) > 1
+        else import_batch_dir
+    )
+
+    target_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    file_path = (
+        target_dir
+        / relative_parts[-1]
+    )
+
+    file_path.write_bytes(data)
+
+    # Malware scanning, when enabled, occurs before any
+    # parser or OCR engine touches the persisted bytes.
+    scan_saved_upload(
+        file_path
+    )
+
+    text = ""
+    tables: list[list[list[str]]] = []
+    extraction_error = None
+    extraction_meta: dict[str, Any] = {}
+
+    if suffix == ".docx":
+        text, tables = (
+            extract_docx_text_and_tables(
+                file_path
+            )
+        )
+
+    elif suffix in {
+        ".xlsx",
+        ".xls",
+    }:
+        text, tables = (
+            _excel_text_and_tables(
+                data
+            )
+        )
+
+    else:
+        memory_upload = _MemoryUpload(
+            filename,
+            data,
+        )
+
+        text, extraction_meta, extraction_error = (
+            extract_text(
+                memory_upload
+            )
+        )
+
+        text = str(
+            text
+            or ""
+        )[:200000]
+
+    category = detect_category(
+        original_path,
+        text,
+    )
+
+    line_items = parse_line_items(
+        tables,
+        category,
+    )
+
+    total = extract_total(
+        text,
+        line_items,
+    )
+
+    likely_date = extract_date(
+        text,
+        filename,
+    )
+
+    title = extract_title(
+        text,
+        filename,
+    )
+
+    doc_type = detect_doc_type(
+        original_path,
+        text,
+    )
+
+    confidence = confidence_score(
+        text,
+        line_items,
+        total,
+        likely_date,
+    )
+
+    if extraction_error:
+        confidence = min(
+            confidence,
+            0.35,
+        )
+
+    return {
+        "source_zip_name": source_name,
+        "original_path": original_path,
+        "file_name": filename,
+        "file_path": str(file_path),
+        "file_hash": sha256_bytes(data),
+        "document_type": doc_type,
+        "department_project": detect_department(
+            original_path
+        ),
+        "title": title,
+        "likely_date": likely_date,
+        "likely_vendor": likely_vendor_from_text(
+            text
+        ),
+        "category": category,
+        "total_amount": total,
+        "confidence": confidence,
+        "extracted_text": text,
+        "tables": tables,
+        "line_items": line_items,
+        "extraction_meta": extraction_meta,
+        "extraction_error": extraction_error,
+    }
+
+def import_uploaded_document(
+    uploaded_file,
+    user_id: int | None = None,
+) -> dict[str, Any]:
+    if uploaded_file is None:
+        return {
+            "error": "No document uploaded"
+        }
+
+    data = uploaded_file.getvalue()
+
+    suffix = Path(
+        uploaded_file.name
+    ).suffix.lower()
+
+    if suffix == ".zip":
+        return import_uploaded_zip(
+            uploaded_file,
+            user_id,
+        )
+
+    if suffix not in SUPPORTED_IMPORT_EXTENSIONS:
+        return {
+            "error": (
+                "Unsupported document type: "
+                f"{suffix or 'unknown'}"
+            )
+        }
+
+    batch_name = datetime.now().strftime(
+        "%Y%m%d_%H%M%S_%f"
+    )
+
+    batch_dir = (
+        IMPORT_DIR
+        / f"direct_import_{batch_name}"
+    )
+
+    batch_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # Unique logical path per upload prevents same-named but
+    # different files from being treated as duplicates solely
+    # because their filenames match. File hash still detects
+    # true duplicate content.
+    original_path = (
+        f"direct/{batch_name}/"
+        f"{safe_name(uploaded_file.name)}"
+    )
+
+    summary = {
+        "source_zip": uploaded_file.name,
+        "imported": 0,
+        "skipped": 0,
+        "failed": 0,
+        "partial": 0,
+        "documents": [],
+    }
+
+    try:
+        parsed = parse_import_file_bytes(
+            data,
+            original_path,
+            uploaded_file.name,
+            batch_dir,
+        )
+
+        doc_id, status = insert_imported_document(
+            parsed,
+            user_id,
+        )
+
+        if status == "imported":
+            summary["imported"] += 1
+        else:
+            summary["skipped"] += 1
+
+        if (
+            parsed["confidence"] < 0.55
+            or parsed["total_amount"] <= 0
+        ):
+            summary["partial"] += 1
+
+        summary["documents"].append(
+            {
+                "id": doc_id,
+                "path": original_path,
+                "file": uploaded_file.name,
+                "status": status,
+                "title": parsed["title"],
+                "amount": parsed["total_amount"],
+                "confidence": parsed["confidence"],
+                "extraction_warning": (
+                    parsed.get(
+                        "extraction_error"
+                    )
+                ),
+            }
+        )
+
+        run_query(
+            """
+            INSERT INTO document_extraction_logs (
+                source_zip_name,
+                original_path,
+                action,
+                status,
+                message,
+                created_at
+            )
+            VALUES (?, ?, 'IMPORT', ?, ?, ?)
+            """,
+            (
+                uploaded_file.name,
+                original_path,
+                status,
+                (
+                    f"{parsed['title']} | "
+                    f"{parsed['total_amount']} | "
+                    f"confidence {parsed['confidence']}"
+                ),
+                now_iso(),
+            ),
+        )
+
+    except Exception as exc:
+        summary["failed"] += 1
+
+        summary["documents"].append(
+            {
+                "file": uploaded_file.name,
+                "status": "failed",
+                "message": str(exc),
+            }
+        )
+
+        run_query(
+            """
+            INSERT INTO document_extraction_logs (
+                source_zip_name,
+                original_path,
+                action,
+                status,
+                message,
+                created_at
+            )
+            VALUES (?, ?, 'IMPORT', 'Failed', ?, ?)
+            """,
+            (
+                uploaded_file.name,
+                original_path,
+                str(exc),
+                now_iso(),
+            ),
+        )
+
+    log_audit(
+        "DOCUMENT_IMPORT",
+        "ImportBatch",
+        uploaded_file.name,
+        summary,
+        user_id,
+    )
+
+    return summary
+
+
+
+def import_procurement_zip(
+    zip_path: str | Path,
+    user_id: int | None = None,
+) -> dict[str, Any]:
     zip_path = Path(zip_path)
-    batch_dir = IMPORT_DIR / f"import_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    batch_dir.mkdir(parents=True, exist_ok=True)
-    summary = {"source_zip": zip_path.name, "imported": 0, "skipped": 0, "failed": 0, "partial": 0, "documents": []}
+
+    # Validate the full archive before reading any member.
+    # Uploaded ZIPs also pass the normal top-level upload
+    # limit before they are written to IMPORT_DIR.
+    validate_zip_archive_bytes(
+        zip_path.read_bytes()
+    )
+
+    batch_dir = (
+        IMPORT_DIR
+        / (
+            "import_"
+            + datetime.now().strftime(
+                "%Y%m%d_%H%M%S"
+            )
+        )
+    )
+
+    batch_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    summary = {
+        "source_zip": zip_path.name,
+        "imported": 0,
+        "skipped": 0,
+        "failed": 0,
+        "partial": 0,
+        "documents": [],
+    }
+
     with zipfile.ZipFile(zip_path) as zf:
         for member in zf.namelist():
-            filename = Path(member).name
+            filename = Path(
+                member
+            ).name
+
             if member.endswith("/"):
                 continue
-            if filename.startswith("~$") or filename.startswith("~WRL"):
+
+            if (
+                filename.startswith("~$")
+                or filename.startswith("~WRL")
+            ):
                 summary["skipped"] += 1
-                run_query("INSERT INTO document_extraction_logs (source_zip_name, original_path, action, status, message, created_at) VALUES (?, ?, 'SKIP', 'Skipped', ?, ?)", (zip_path.name, member, "Temporary Word lock/temp file ignored", now_iso()))
+
+                run_query(
+                    """
+                    INSERT INTO document_extraction_logs (
+                        source_zip_name,
+                        original_path,
+                        action,
+                        status,
+                        message,
+                        created_at
+                    )
+                    VALUES (?, ?, 'SKIP', 'Skipped', ?, ?)
+                    """,
+                    (
+                        zip_path.name,
+                        member,
+                        "Temporary Word lock/temp file ignored",
+                        now_iso(),
+                    ),
+                )
+
                 continue
-            if not filename.lower().endswith(".docx"):
+
+            suffix = Path(
+                filename
+            ).suffix.lower()
+
+            if suffix not in SUPPORTED_IMPORT_EXTENSIONS:
                 summary["skipped"] += 1
-                run_query("INSERT INTO document_extraction_logs (source_zip_name, original_path, action, status, message, created_at) VALUES (?, ?, 'SKIP', 'Skipped', ?, ?)", (zip_path.name, member, "Unsupported file type", now_iso()))
+
+                run_query(
+                    """
+                    INSERT INTO document_extraction_logs (
+                        source_zip_name,
+                        original_path,
+                        action,
+                        status,
+                        message,
+                        created_at
+                    )
+                    VALUES (?, ?, 'SKIP', 'Skipped', ?, ?)
+                    """,
+                    (
+                        zip_path.name,
+                        member,
+                        (
+                            "Unsupported file type "
+                            f"{suffix or 'unknown'}"
+                        ),
+                        now_iso(),
+                    ),
+                )
+
                 continue
+
             try:
-                parsed = parse_docx_from_zip_member(zf, member, zip_path.name, batch_dir)
-                doc_id, status = insert_imported_document(parsed, user_id)
+                data = zf.read(member)
+
+                parsed = parse_import_file_bytes(
+                    data,
+                    member,
+                    zip_path.name,
+                    batch_dir,
+                )
+
+                doc_id, status = (
+                    insert_imported_document(
+                        parsed,
+                        user_id,
+                    )
+                )
+
                 if status == "imported":
                     summary["imported"] += 1
                 else:
                     summary["skipped"] += 1
-                if parsed["confidence"] < 0.55 or parsed["total_amount"] <= 0:
+
+                if (
+                    parsed["confidence"] < 0.55
+                    or parsed["total_amount"] <= 0
+                ):
                     summary["partial"] += 1
-                summary["documents"].append({"id": doc_id, "path": member, "status": status, "title": parsed["title"], "amount": parsed["total_amount"], "confidence": parsed["confidence"]})
-                run_query("INSERT INTO document_extraction_logs (source_zip_name, original_path, action, status, message, created_at) VALUES (?, ?, 'IMPORT', ?, ?, ?)", (zip_path.name, member, status, f"{parsed['title']} | {parsed['total_amount']} | confidence {parsed['confidence']}", now_iso()))
+
+                summary["documents"].append(
+                    {
+                        "id": doc_id,
+                        "path": member,
+                        "status": status,
+                        "title": parsed["title"],
+                        "amount": parsed["total_amount"],
+                        "confidence": parsed["confidence"],
+                        "extraction_warning": (
+                            parsed.get(
+                                "extraction_error"
+                            )
+                        ),
+                    }
+                )
+
+                run_query(
+                    """
+                    INSERT INTO document_extraction_logs (
+                        source_zip_name,
+                        original_path,
+                        action,
+                        status,
+                        message,
+                        created_at
+                    )
+                    VALUES (?, ?, 'IMPORT', ?, ?, ?)
+                    """,
+                    (
+                        zip_path.name,
+                        member,
+                        status,
+                        (
+                            f"{parsed['title']} | "
+                            f"{parsed['total_amount']} | "
+                            f"confidence {parsed['confidence']}"
+                        ),
+                        now_iso(),
+                    ),
+                )
+
             except Exception as exc:
                 summary["failed"] += 1
-                run_query("INSERT INTO document_extraction_logs (source_zip_name, original_path, action, status, message, created_at) VALUES (?, ?, 'IMPORT', 'Failed', ?, ?)", (zip_path.name, member, str(exc), now_iso()))
-    log_audit("LEGACY_IMPORT", "ImportBatch", zip_path.name, summary, user_id)
+
+                run_query(
+                    """
+                    INSERT INTO document_extraction_logs (
+                        source_zip_name,
+                        original_path,
+                        action,
+                        status,
+                        message,
+                        created_at
+                    )
+                    VALUES (?, ?, 'IMPORT', 'Failed', ?, ?)
+                    """,
+                    (
+                        zip_path.name,
+                        member,
+                        str(exc),
+                        now_iso(),
+                    ),
+                )
+
+    log_audit(
+        "LEGACY_IMPORT",
+        "ImportBatch",
+        zip_path.name,
+        summary,
+        user_id,
+    )
+
     return summary
 
 
-def import_uploaded_zip(uploaded_file, user_id: int | None = None) -> dict[str, Any]:
+def import_uploaded_zip(
+    uploaded_file,
+    user_id: int | None = None,
+) -> dict[str, Any]:
     if uploaded_file is None:
-        return {"error": "No ZIP uploaded"}
-    target = IMPORT_DIR / safe_name(uploaded_file.name)
-    target.write_bytes(uploaded_file.getvalue())
-    return import_procurement_zip(target, user_id)
+        return {
+            "error": "No ZIP uploaded"
+        }
+
+    data = uploaded_file.getvalue()
+
+    try:
+        clean_name, suffix = (
+            validate_upload_bytes(
+                uploaded_file.name,
+                data,
+            )
+        )
+
+        if suffix != ".zip":
+            return {
+                "error": "The uploaded file is not a ZIP archive."
+            }
+
+        target = (
+            IMPORT_DIR
+            / clean_name
+        )
+
+        target.write_bytes(
+            data
+        )
+
+        scan_saved_upload(
+            target
+        )
+
+        return import_procurement_zip(
+            target,
+            user_id,
+        )
+
+    except DocumentSecurityError as exc:
+        try:
+            target.unlink(
+                missing_ok=True
+            )
+        except Exception:
+            pass
+
+        return {
+            "error": str(exc)
+        }
 
 
 def bundled_legacy_zip_path() -> Path:

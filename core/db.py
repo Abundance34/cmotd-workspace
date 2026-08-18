@@ -1867,13 +1867,13 @@ def seed_defaults():
     for dept in departments:
         run_query("INSERT OR IGNORE INTO departments (name, description, status, created_at) VALUES (?, ?, 'Active', ?)", (dept, f"{dept} procurement records", now_iso()))
 
-    categories = ["Diesel/Fuel", "Water", "Office Supplies", "Repairs/Maintenance", "Vehicle Maintenance", "Generator Maintenance", "Plumbing", "Welding/Fabrication", "Grass Cutting", "Transport/Logistics", "Staff Welfare", "ICT/Software", "Utilities", "Construction Materials", "Professional Services", "Operational Purchases", "Other"]
+    categories = ["Diesel", "Fuel", "Water", "Office Supplies", "Repairs/Maintenance", "Vehicle Maintenance", "Generator Maintenance", "Plumbing", "Welding/Fabrication", "Grass Cutting", "Transport/Logistics", "Staff Welfare", "ICT/Software", "Utilities", "Construction Materials", "Professional Services", "Operational Purchases", "Other"]
     for cat in categories:
         run_query("INSERT OR IGNORE INTO categories (name, category_type, status, created_at) VALUES (?, 'Procurement', 'Active', ?)", (cat, now_iso()))
 
     if not run_query("SELECT COUNT(*) AS count FROM vendors", fetch=True)[0]["count"]:
         vendors = [
-            ("ABC Diesel Supply", "Diesel/Fuel", "08030000001", "sales@abcdiesel.local", "Industrial Area", "GTBank", "0123456789", "TIN-001", 4, "Active", now_iso()),
+            ("ABC Diesel Supply", "Diesel", "08030000001", "sales@abcdiesel.local", "Industrial Area", "GTBank", "0123456789", "TIN-001", 4, "Active", now_iso()),
             ("Prime Office Mart", "Office Supplies", "08030000002", "orders@primeoffice.local", "Main Market", "Access Bank", "9876543210", "TIN-002", 5, "Active", now_iso()),
             ("FixRight Maintenance", "Repairs/Maintenance", "08030000003", "support@fixright.local", "Workshop Road", "UBA", "2233445566", "TIN-003", 4, "Active", now_iso()),
         ]
@@ -1881,7 +1881,8 @@ def seed_defaults():
 
     if not run_query("SELECT COUNT(*) AS count FROM approval_rules", fetch=True)[0]["count"]:
         rules = [
-            ("Diesel/Fuel", 250000, "Approver", 0, 1, 1, now_iso()),
+            ("Diesel", 250000, "Approver", 0, 1, 1, now_iso()),
+            ("Fuel", 250000, "Approver", 0, 1, 1, now_iso()),
             ("Construction Materials", 500000, "Approver", 1, 1, 1, now_iso()),
             ("Operational Purchases", 150000, "Approver", 0, 1, 1, now_iso()),
             ("Repairs/Maintenance", 250000, "Approver", 1, 1, 1, now_iso()),

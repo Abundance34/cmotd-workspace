@@ -13,7 +13,7 @@ from core.db import ATTACHMENT_DIR, add_workflow_event, df_query, json_dump, log
 from core.ocr import duplicate_candidates, extract_text, match_invoice_to_po, parse_ocr_text
 from core.ui import badge, dataframe, empty_state, inject_css, money, workflow_progress
 
-EXPENSE_CATEGORIES = ["Diesel/Fuel", "Office Supplies", "Repairs/Maintenance", "Transport/Logistics", "Staff Welfare", "ICT/Software", "Utilities", "Construction Materials", "Professional Services", "Other"]
+EXPENSE_CATEGORIES = ["Diesel", "Fuel", "Office Supplies", "Repairs/Maintenance", "Transport/Logistics", "Staff Welfare", "ICT/Software", "Utilities", "Construction Materials", "Professional Services", "Other"]
 PR_STATUSES = ["Draft", "Submitted", "Procurement Review", "Requires Sourcing", "Pending Approval", "Approved", "Rejected", "PO Created", "Awaiting Delivery", "Received", "Paid", "Closed"]
 PO_STATUSES = ["Draft", "Pending Approval", "Approved", "Sent to Vendor", "Partially Received", "Fully Received", "Invoiced", "Paid", "Closed", "Cancelled"]
 RECEIVING_STATUSES = ["Pending Receipt", "Partially Received", "Fully Received", "Disputed", "Returned"]

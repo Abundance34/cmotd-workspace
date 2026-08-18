@@ -64,6 +64,10 @@ def test_payment_instruction_html_is_concise_and_structured():
 
 
 def test_payment_instruction_pdf_remains_valid():
+    from core.db import init_db
+
+    init_db()
+
     pdf = generate_payment_instruction_pdf(_sample_instruction(), "Finance Manager")
     assert pdf.startswith(b"%PDF")
     assert len(pdf) > 1500

@@ -318,7 +318,9 @@ def parse_ocr_text(text: str, vendors_df=None) -> dict[str, Any]:
 
     category = "Other"
     category_keywords = {
-        "Diesel/Fuel": ["diesel", "fuel", "petrol", "gasoline", "generator"],
+        "Diesel": ["diesel", "ago"],
+        "Generator Maintenance": ["generator", "genset", "gen set"],
+        "Fuel": ["fuel", "petrol", "gasoline"],
         "Office Supplies": ["paper", "pen", "office", "stationery", "printer", "toner"],
         "Repairs/Maintenance": ["repair", "maintenance", "spare", "service", "mechanic", "fix"],
         "Transport/Logistics": ["transport", "delivery", "logistics", "fare", "dispatch", "courier"],

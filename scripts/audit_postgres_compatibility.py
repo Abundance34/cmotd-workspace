@@ -202,6 +202,113 @@ def _is_mounted_runtime_path(path: Path) -> bool:
         return os.path.ismount(str(resolved))
 
 
+
+def _is_explicit_sqlite_backend_guard(
+    source: str,
+    line: int,
+) -> bool:
+    """Return True only when a SQL literal is structurally inside
+    the body of ``if not is_postgres():``.
+
+    This allows intentional SQLite-specific runtime statements while
+    continuing to reject unguarded SQLite SQL in PostgreSQL-capable code.
+    """
+
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+
+    parents = {}
+
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    candidates = []
+
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+        ):
+            continue
+
+        start = getattr(
+            node,
+            "lineno",
+            None,
+        )
+
+        end = getattr(
+            node,
+            "end_lineno",
+            start,
+        )
+
+        if (
+            start is not None
+            and start <= line <= end
+        ):
+            candidates.append(node)
+
+    def is_not_postgres_test(node):
+        if not isinstance(
+            node,
+            ast.UnaryOp,
+        ):
+            return False
+
+        if not isinstance(
+            node.op,
+            ast.Not,
+        ):
+            return False
+
+        call = node.operand
+
+        if not isinstance(
+            call,
+            ast.Call,
+        ):
+            return False
+
+        if call.args or call.keywords:
+            return False
+
+        func = call.func
+
+        return (
+            isinstance(func, ast.Name)
+            and func.id == "is_postgres"
+        )
+
+    for candidate in candidates:
+        child = candidate
+        current = candidate
+
+        while current in parents:
+            parent = parents[current]
+
+            if isinstance(
+                parent,
+                ast.If,
+            ):
+                if (
+                    child in parent.body
+                    and is_not_postgres_test(
+                        parent.test
+                    )
+                ):
+                    return True
+
+            child = parent
+            current = parent
+
+    return False
+
 def run_audit(sqlite_path: Path, postgres_schema_path: Path) -> dict:
     findings: list[Finding] = []
     sql_literal_count = 0
@@ -235,7 +342,17 @@ def run_audit(sqlite_path: Path, postgres_schema_path: Path) -> dict:
             # them as runtime PostgreSQL failures.
             if re.search(r"\bPRAGMA\b|sqlite_master|RAISE\s*\(", sql, re.I):
                 sqlite_only_guarded_count += 1
-                allowed = _rel(path) == "core/db.py" or _rel(path) == "modules/role_workspaces.py"
+                rel_path = _rel(path)
+                allowed = (
+                    rel_path in {
+                        "core/db.py",
+                        "modules/role_workspaces.py",
+                    }
+                    or _is_explicit_sqlite_backend_guard(
+                        path.read_text(encoding="utf-8"),
+                        line,
+                    )
+                )
                 if not allowed:
                     findings.append(
                         Finding(

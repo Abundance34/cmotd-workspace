@@ -17,7 +17,7 @@ from core.permissions import can_approve, can_pay, can_review_procurement
 # Approver / MD. The value is deliberately central so request, PO and payment
 # screens cannot drift into different threshold rules.
 PROCUREMENT_MANAGER_APPROVAL_THRESHOLD = 2_000_000.0
-LOW_VALUE_APPROVAL_MODE = "Low-Value Approval — Procurement Manager (≤ ₦100,000)"
+LOW_VALUE_APPROVAL_MODE = "Low-Value Approval ? Procurement Manager"
 
 
 def approval_amount(value: object | None) -> float:
@@ -57,10 +57,10 @@ def procurement_manager_approval_threshold_sql():
 
 
 def is_low_value_approval(value: object | None) -> bool:
-    """True when a transaction is within the PM approval limit.
+    """True when a transaction is within the configured PM approval limit.
 
-    The policy treats exactly ₦100,000 as low value so there is no un-routed
-    gap at the boundary.
+    The configured threshold itself is inclusive, so there is no
+    un-routed gap at the boundary.
     """
     from decimal import Decimal
 

@@ -22,3 +22,6 @@ data/.procureflow_local_encryption.key
 *.zip
 *.log
 *.before_*
+
+# ProcureFlow local/runtime data
+data/

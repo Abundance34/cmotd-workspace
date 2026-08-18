@@ -17,11 +17,11 @@ from core.db import (
     create_notification, df_query, json_dump, log_audit, make_ref, month_key, notify,
     notify_related_users, now_iso, run_insert, run_query, transition_request_status, transition_gateway_pass_status, email_delivery_ready
 )
-from core.legacy_import import bundled_legacy_zip_path, import_procurement_zip, import_uploaded_zip
+from core.legacy_import import bundled_legacy_zip_path, import_procurement_zip, import_uploaded_zip, import_uploaded_document
 from core.ocr import duplicate_candidates, extract_text, match_invoice_to_po, parse_ocr_text
 from core.ui import badge, dataframe, empty_state, inject_css, money, workflow_progress
 
-EXPENSE_CATEGORIES = ["Diesel/Fuel", "Water", "Office Supplies", "Repairs/Maintenance", "Vehicle Maintenance", "Generator Maintenance", "Plumbing", "Welding/Fabrication", "Grass Cutting", "Transport/Logistics", "Staff Welfare", "ICT/Software", "Utilities", "Construction Materials", "Professional Services", "Operational Purchases", "Other"]
+EXPENSE_CATEGORIES = ["Diesel", "Fuel", "Water", "Office Supplies", "Repairs/Maintenance", "Vehicle Maintenance", "Generator Maintenance", "Plumbing", "Welding/Fabrication", "Grass Cutting", "Transport/Logistics", "Staff Welfare", "ICT/Software", "Utilities", "Construction Materials", "Professional Services", "Operational Purchases", "Other"]
 PR_STATUSES = ["FM Draft", "Submitted to Procurement Manager", "PM Reviewing", "Returned to Facility Manager", "Accepted by Procurement Manager", "Converted to Purchase Request", "Draft", "Submitted", "Procurement Review", "Requires Sourcing", "Vendor Quote Collection", "Vendor Recommendation", "Pending Approval", "Pending Approver/MD Approval", "Approved", "Rejected", "Returned", "PO Created", "PO Approved", "Sent to Vendor", "Awaiting Delivery", "Partially Received", "Fully Received", "Invoice Uploaded", "Invoice Matched to PO", "Finance Review", "Approved for Payment", "Payment Approved", "Paid", "Closed"]
 PO_STATUSES = ["Draft", "Pending Approval", "Approved", "Sent to Vendor", "Awaiting Delivery", "Partially Received", "Fully Received", "Invoiced", "Paid", "Closed", "Cancelled"]
 PAYMENT_STATUSES = ["Pending Approval", "Approved", "Paid", "Rejected", "Returned"]
@@ -664,7 +664,7 @@ def admin_metrics():
         ("Total Users", int(q("SELECT COUNT(*) FROM users")), "all accounts"),
         ("Active Users", int(q("SELECT COUNT(*) FROM users WHERE is_active=1")), "can log in"),
         ("Pending Approvals", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Pending Approver/MD Approval','Pending Approval')")), "requests"),
-        ("Open Requests", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status NOT IN ('Closed','Rejected','Paid')")), "active pipeline"),
+        ("Open Requests", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status NOT IN ('Closed','Rejected','Paid','Deleted Draft')")), "active pipeline"),
         ("Total Spend", money(q("SELECT COALESCE(SUM(amount),0) FROM expenses WHERE status='Approved'")), "approved expenses"),
         ("Imported Documents", int(q("SELECT COUNT(*) FROM imported_legacy_documents")), "legacy archive"),
         ("Audit Events", int(q("SELECT COUNT(*) FROM audit_logs")), "logged actions"),
@@ -758,36 +758,198 @@ def roles_permissions_page():
         st.success("Permission granted.")
 
 
+
 def import_center():
     st.subheader("Data Import Center")
-    st.caption("Import the PROCUREMENT PROJECT ZIP. The importer extracts .docx files, ignores Word lock files (~$), parses tables and creates draft purchase requests for review.")
+
+    st.caption(
+        "Import procurement ZIP archives or individual DOCX, PDF, "
+        "Excel and image documents. Imported records remain reviewable "
+        "before normal workflow submission."
+    )
+
     bundled = bundled_legacy_zip_path()
-    c1, c2 = st.columns(2)
-    with c1:
-        if bundled.exists():
-            st.success(f"Bundled legacy ZIP found: {bundled.name}")
-            if st.button("Import Bundled PROCUREMENT PROJECT ZIP", type="primary"):
-                with st.spinner("Importing real procurement documents..."):
-                    summary = import_procurement_zip(bundled, user()["id"])
-                st.session_state["last_import_summary"] = summary
-                st.success(f"Import complete. Imported {summary['imported']}, skipped {summary['skipped']}, failed {summary['failed']}, partial {summary['partial']}.")
+
+    if bundled.exists():
+        st.success(
+            f"Bundled legacy ZIP found: {bundled.name}"
+        )
+
+        if st.button(
+            "Import Bundled PROCUREMENT PROJECT ZIP",
+            type="primary",
+        ):
+            with st.spinner(
+                "Importing procurement documents..."
+            ):
+                summary = import_procurement_zip(
+                    bundled,
+                    user()["id"],
+                )
+
+            st.session_state[
+                "last_import_summary"
+            ] = summary
+
+            st.success(
+                "Import complete. "
+                f"Imported {summary.get('imported', 0)}, "
+                f"skipped {summary.get('skipped', 0)}, "
+                f"failed {summary.get('failed', 0)}, "
+                f"partial {summary.get('partial', 0)}."
+            )
+
+    else:
+        st.caption(
+            "No bundled PROCUREMENT PROJECT ZIP is present. "
+            "You can still upload documents below."
+        )
+
+    st.markdown("##### Upload documents")
+
+    uploads = st.file_uploader(
+        "Upload procurement documents",
+        type=[
+            "zip",
+            "docx",
+            "pdf",
+            "jpg",
+            "jpeg",
+            "png",
+            "webp",
+            "bmp",
+            "gif",
+            "tif",
+            "tiff",
+            "xlsx",
+            "xls",
+        ],
+        accept_multiple_files=True,
+        key="procurement_multi_document_import",
+        help=(
+            "Supported: ZIP, DOCX, PDF, JPG/JPEG, PNG, WEBP, "
+            "BMP, GIF, TIFF, XLSX and XLS."
+        ),
+    )
+
+    if st.button(
+        "Import Selected Documents",
+        type="primary",
+        disabled=not uploads,
+        key="import_selected_procurement_documents",
+    ):
+        combined = {
+            "source": "Uploaded documents",
+            "imported": 0,
+            "skipped": 0,
+            "failed": 0,
+            "partial": 0,
+            "documents": [],
+        }
+
+        with st.spinner(
+            "Importing selected documents..."
+        ):
+            for upload in uploads or []:
+                suffix = Path(
+                    upload.name
+                ).suffix.lower()
+
+                if suffix == ".zip":
+                    result = import_uploaded_zip(
+                        upload,
+                        user()["id"],
+                    )
+                else:
+                    result = import_uploaded_document(
+                        upload,
+                        user()["id"],
+                    )
+
+                if result.get("error"):
+                    combined["failed"] += 1
+
+                    combined["documents"].append(
+                        {
+                            "file": upload.name,
+                            "status": "failed",
+                            "message": result["error"],
+                        }
+                    )
+
+                    continue
+
+                for key in (
+                    "imported",
+                    "skipped",
+                    "failed",
+                    "partial",
+                ):
+                    combined[key] += int(
+                        result.get(key, 0) or 0
+                    )
+
+                combined["documents"].extend(
+                    result.get("documents", [])
+                )
+
+        st.session_state[
+            "last_import_summary"
+        ] = combined
+
+        if combined["failed"]:
+            st.warning(
+                "Import completed with some files requiring attention. "
+                f"Imported {combined['imported']}, "
+                f"skipped {combined['skipped']}, "
+                f"failed {combined['failed']}, "
+                f"partial {combined['partial']}."
+            )
         else:
-            st.warning("Bundled legacy ZIP is not present. Upload a ZIP below.")
-    with c2:
-        upload = st.file_uploader("Upload PROCUREMENT PROJECT ZIP", type=["zip"])
-        if st.button("Import Uploaded ZIP"):
-            with st.spinner("Importing uploaded ZIP..."):
-                summary = import_uploaded_zip(upload, user()["id"])
-            st.session_state["last_import_summary"] = summary
-            if "error" in summary: st.error(summary["error"])
-            else: st.success(f"Import complete. Imported {summary['imported']}, skipped {summary['skipped']}, failed {summary['failed']}.")
+            st.success(
+                "Import complete. "
+                f"Imported {combined['imported']}, "
+                f"skipped {combined['skipped']}, "
+                f"failed {combined['failed']}, "
+                f"partial {combined['partial']}."
+            )
+
     if "last_import_summary" in st.session_state:
-        st.json(st.session_state["last_import_summary"])
+        st.json(
+            st.session_state[
+                "last_import_summary"
+            ]
+        )
+
     st.markdown("##### Import Logs")
-    logs = df_query("SELECT created_at, source_zip_name, original_path, action, status, message FROM document_extraction_logs ORDER BY created_at DESC LIMIT 300")
-    dataframe(logs) if not logs.empty else empty_state("No import logs", "Run an import to populate this table.")
+
+    logs = df_query(
+        """
+        SELECT
+            created_at,
+            source_zip_name,
+            original_path,
+            action,
+            status,
+            message
+        FROM document_extraction_logs
+        ORDER BY created_at DESC
+        LIMIT 300
+        """
+    )
+
+    if not logs.empty:
+        dataframe(logs)
+    else:
+        empty_state(
+            "No import logs",
+            "Run an import to populate this table.",
+        )
+
     st.markdown("##### Review Imported Documents")
+
     document_archive(editable=True)
+
 
 
 def configuration_page():
@@ -882,7 +1044,7 @@ def procurement_workspace():
 def procurement_dashboard_metrics():
     q = lambda sql: df_query(sql).iloc[0, 0]
     metrics = [
-        ("Open Requests", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status NOT IN ('Closed','Rejected','Paid')")), "pipeline"),
+        ("Open Requests", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status NOT IN ('Closed','Rejected','Paid','Deleted Draft')")), "pipeline"),
         ("Needs Review", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status='Submitted'")), "new submissions"),
         ("Requires Sourcing", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Requires Sourcing','Vendor Quote Collection')")), "supplier comparison"),
         ("POs to Create", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status='Approved' AND linked_po_id IS NULL")), "approved requests"),
@@ -1010,7 +1172,7 @@ def executive_metrics():
     q = lambda sql: df_query(sql).iloc[0, 0]
     metrics = [
         ("Requests Awaiting Approval", int(q("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Pending Approver/MD Approval','Pending Approval')")), "decisions"),
-        ("High-Value Requests", int(q("SELECT COUNT(*) FROM purchase_requests WHERE estimated_amount>=500000 AND status NOT IN ('Closed','Rejected')")), "risk focus"),
+        ("High-Value Requests", int(q("SELECT COUNT(*) FROM purchase_requests WHERE estimated_amount>=500000 AND status NOT IN ('Closed','Rejected','Deleted Draft')")), "risk focus"),
         ("POs Awaiting Approval", int(q("SELECT COUNT(*) FROM purchase_orders WHERE status='Pending Approval'")), "purchase orders"),
         ("Payments Awaiting Approval", int(q("SELECT COUNT(*) FROM payments WHERE status='Pending Approval'")), "payments"),
         ("Spend This Month", money(q(f"SELECT COALESCE(SUM(amount),0) FROM expenses WHERE status='Approved' AND substr(expense_date,1,7)='{month_key()}'")), month_key()),
@@ -2032,7 +2194,7 @@ def document_archive(editable=False):
     if not items.empty:
         it=items.copy(); it["unit_price"]=it["unit_price"].apply(money); it["total_price"]=it["total_price"].apply(money); dataframe(it)
     if doc["file_path"] and Path(doc["file_path"]).exists():
-        with open(doc["file_path"], "rb") as f: st.download_button("Download Source Word Document", f, file_name=doc["file_name"])
+        with open(doc["file_path"], "rb") as f: st.download_button("Download Source Document", f, file_name=doc["file_name"])
     if editable:
         c1,c2,c3=st.columns(3)
         if c1.button("Mark Reviewed", key=f"doc_rev_{doc_id}"):
@@ -3208,7 +3370,7 @@ def procurement_dashboard():
     c3.metric("Availability", "Away/Delegated" if not away.empty else "Available")
     if gp_waiting:
         st.warning(f"{gp_waiting} gateway pass(es) are awaiting review.")
-    df = df_query("SELECT request_no, department_project, category, estimated_amount, status, updated_at FROM purchase_requests WHERE status NOT IN ('Closed','Rejected','Paid') ORDER BY updated_at DESC LIMIT 20")
+    df = df_query("SELECT request_no, department_project, category, estimated_amount, status, updated_at FROM purchase_requests WHERE status NOT IN ('Closed','Rejected','Paid','Deleted Draft') ORDER BY updated_at DESC LIMIT 20")
     if not df.empty:
         df["estimated_amount"] = df["estimated_amount"].apply(money); dataframe(df)
     else:
@@ -4413,7 +4575,7 @@ def procurement_dashboard():
     c3.metric("Needs Sourcing", format_kpi_value(sourcing))
     if gp_waiting:
         st.warning(f"{gp_waiting} gateway pass(es) are awaiting review.")
-    df = df_query("SELECT request_no, department_project, category, estimated_amount, status, updated_at FROM purchase_requests WHERE status NOT IN ('Closed','Rejected','Paid') ORDER BY updated_at DESC LIMIT 20")
+    df = df_query("SELECT request_no, department_project, category, estimated_amount, status, updated_at FROM purchase_requests WHERE status NOT IN ('Closed','Rejected','Paid','Deleted Draft') ORDER BY updated_at DESC LIMIT 20")
     if not df.empty:
         show = df.copy(); show["estimated_amount"] = show["estimated_amount"].apply(money); dataframe(show)
     else:
@@ -4423,7 +4585,7 @@ def procurement_dashboard():
         pipe = df_query("SELECT status, COUNT(*) count FROM purchase_requests GROUP BY status ORDER BY count DESC")
         interactive_chart(pipe, "Procurement Pipeline", "status", "count", "pm_pipeline", default="Bar")
     with c2:
-        spend = df_query("SELECT category, SUM(estimated_amount) total FROM purchase_requests WHERE status NOT IN ('Rejected','Cancelled') GROUP BY category ORDER BY total DESC")
+        spend = df_query("SELECT category, SUM(estimated_amount) total FROM purchase_requests WHERE status NOT IN ('Rejected','Cancelled','Deleted Draft') GROUP BY category ORDER BY total DESC")
         interactive_chart(_money_chart_df(spend), "Estimated Request Value by Category", "category", "total", "pm_category_value", default="Donut")
 
 
@@ -4679,6 +4841,9 @@ def request_register(actions=True, approver_mode=False):
         FROM purchase_requests pr LEFT JOIN users u ON pr.requested_by=u.id WHERE 1=1
     """
     params = []
+    if status == "All":
+        sql += " AND pr.status <> 'Deleted Draft'"
+
     if status != "All": sql += " AND pr.status=?"; params.append(status)
     if dept != "All": sql += " AND pr.department_project=?"; params.append(dept)
     if term:
@@ -4696,6 +4861,7 @@ def request_register(actions=True, approver_mode=False):
     pr_id = int(df[df["request_no"] == selected].iloc[0]["id"])
     request_detail(pr_id, actions=actions, key_scope=f"request_register_phase4_{approver_mode}")
     csv_download(_redact_ui_df(df, "purchase_requests"), "purchase_requests")
+
 
 
 def request_actions(pr_id: int, pr, key_scope: str | None = None):
@@ -5355,33 +5521,98 @@ def _clear_line_state(state_key: str, prefix: str):
             del st.session_state[k]
 
 
+
 def _request_line_items(state_key: str, prefix: str, default_category: str) -> tuple[list[tuple[str, float, float, float, str]], float]:
     rows = _line_row_ids(state_key)
-    add_col, remove_col, _ = st.columns([1.15, 1.15, 5])
-    if add_col.button("＋ Add line item", key=f"{prefix}_add_line_button"):
-        _add_line_row(state_key)
-        st.rerun()
-    if remove_col.button("− Remove line item", key=f"{prefix}_remove_line_button", disabled=len(rows) <= 1):
-        _remove_last_line_row(state_key, prefix)
-        st.rerun()
-    rows = _line_row_ids(state_key)
     items, estimated = [], 0.0
+
     st.markdown("##### Line items")
+
     for idx, row_id in enumerate(rows, 1):
         st.caption(f"Item {idx}")
-        c1, c2, c3, c4 = st.columns([1.4, .55, .8, .9])
-        item = c1.text_input("Item", key=f"{prefix}_item_{row_id}")
-        qty = c2.number_input("Qty", min_value=0.0, value=1.0, step=1.0, key=f"{prefix}_qty_{row_id}")
-        unit = c3.number_input("Unit price", min_value=0.0, step=1000.0, key=f"{prefix}_unit_{row_id}")
+
+        c1, c2, c3, c4 = st.columns(
+            [1.4, .55, .8, .9]
+        )
+
+        item = c1.text_input(
+            "Item",
+            key=f"{prefix}_item_{row_id}",
+        )
+
+        qty = c2.number_input(
+            "Qty",
+            min_value=0.0,
+            value=1.0,
+            step=1.0,
+            key=f"{prefix}_qty_{row_id}",
+        )
+
+        unit = c3.number_input(
+            "Unit price",
+            min_value=0.0,
+            step=1000.0,
+            key=f"{prefix}_unit_{row_id}",
+        )
+
         try:
-            default_index = EXPENSE_CATEGORIES.index(default_category) if default_category in EXPENSE_CATEGORIES else 0
+            default_index = (
+                EXPENSE_CATEGORIES.index(default_category)
+                if default_category in EXPENSE_CATEGORIES
+                else 0
+            )
         except Exception:
             default_index = 0
-        icat = selectbox_with_other("Item category", EXPENSE_CATEGORIES, f"{prefix}_cat_{row_id}", "category", index=default_index)
+
+        icat = selectbox_with_other(
+            "Item category",
+            EXPENSE_CATEGORIES,
+            f"{prefix}_cat_{row_id}",
+            "category",
+            index=default_index,
+        )
+
         total = float(qty or 0) * float(unit or 0)
         estimated += total
-        items.append((item, float(qty or 0), float(unit or 0), total, icat))
+
+        items.append(
+            (
+                item,
+                float(qty or 0),
+                float(unit or 0),
+                total,
+                icat,
+            )
+        )
+
+    # Controls intentionally live below the item rows so bulk
+    # requests do not require users to scroll back to the top.
+    rows = _line_row_ids(state_key)
+
+    add_col, remove_col, _ = st.columns(
+        [1.15, 1.15, 5]
+    )
+
+    if add_col.button(
+        "? Add line item",
+        key=f"{prefix}_add_line_button",
+    ):
+        _add_line_row(state_key)
+        st.rerun()
+
+    if remove_col.button(
+        "? Remove line item",
+        key=f"{prefix}_remove_line_button",
+        disabled=len(rows) <= 1,
+    ):
+        _remove_last_line_row(
+            state_key,
+            prefix,
+        )
+        st.rerun()
+
     return items, estimated
+
 
 
 def _suggested_vendor_detail_inputs(prefix: str, default_category: str) -> list[dict[str, Any]]:
@@ -5636,7 +5867,8 @@ def facility_workspace():
     elif section == "Returned Requests":
         facility_draft_register(status_filter=["Returned for Correction", "Returned to Facility Manager"])
     elif section == "Approved / Accepted Requests":
-        facility_draft_register(status_filter=["Reviewed by Procurement", "Submitted for Approval", "Approved", "Awaiting Payment", "Paid", "Completed", "Closed"])
+        facility_draft_register(status_filter=["Reviewed by Procurement", "Submitted for Approval", "Approved", "Awaiting Payment", "Approved for Payment", "Paid", "Completed", "Closed"])
+        _approved_request_downloads_page("facility")
     elif section == "My Activity History":
         activity_history_page(scope="mine")
     elif section == "Income":
@@ -5645,6 +5877,7 @@ def facility_workspace():
         settings_page()
     else:
         facility_dashboard()
+
 
 
 def facility_draft_register(status_filter: list[str] | None = None):
@@ -5951,7 +6184,7 @@ def procurement_dashboard():
         ("Vendor Recommendations", recommendation_count, "ready to submit to Approver/Admin"),
         ("Total Approved", approved_total, "cumulative"),
     ], cols=4)
-    df = df_query("SELECT request_no, department_project, category, estimated_amount, status, updated_at FROM purchase_requests WHERE status NOT IN ('Rejected','Archived') ORDER BY updated_at DESC LIMIT 25")
+    df = df_query("SELECT request_no, department_project, category, estimated_amount, status, updated_at FROM purchase_requests WHERE status NOT IN ('Rejected','Archived','Deleted Draft') ORDER BY updated_at DESC LIMIT 25")
     if not df.empty:
         df["estimated_amount"] = df["estimated_amount"].apply(money); dataframe(df)
     c1, c2 = st.columns(2)
@@ -5959,7 +6192,7 @@ def procurement_dashboard():
         pipe = df_query("SELECT status, COUNT(*) count FROM purchase_requests GROUP BY status ORDER BY count DESC")
         interactive_chart(pipe, "Procurement Pipeline", "status", "count", "pm_pipeline_cmd", default="Bar")
     with c2:
-        spend = df_query("SELECT category, SUM(estimated_amount) total FROM purchase_requests WHERE status NOT IN ('Rejected','Archived') GROUP BY category ORDER BY total DESC")
+        spend = df_query("SELECT category, SUM(estimated_amount) total FROM purchase_requests WHERE status NOT IN ('Rejected','Archived','Deleted Draft') GROUP BY category ORDER BY total DESC")
         interactive_chart(_money_chart_df(spend), "Estimated Value by Category", "category", "total", "pm_category_value_cmd", default="Donut")
 
 
@@ -6674,7 +6907,7 @@ def finance_ready_df() -> pd.DataFrame:
         FROM purchase_requests pr
         LEFT JOIN approval_history ah ON ah.entity_type='Purchase Request' AND ah.entity_id=pr.id AND ah.status_after='Approved'
         WHERE (pr.next_role='finance' OR pr.status IN ('Approved','Awaiting Payment','Approved for Payment') OR pr.payment_status='Approved for Payment')
-          AND pr.status NOT IN ('Paid','Completed','Closed','Rejected')
+          AND pr.status NOT IN ('Paid','Completed','Closed','Rejected','Deleted Draft')
         ORDER BY COALESCE(pr.approved_at, pr.updated_at, pr.created_at) DESC
         """
     )
@@ -7031,7 +7264,7 @@ def _report_sheets(month: int | None = None, year: int | None = None) -> dict[st
     summary = pd.DataFrame({
         "metric": ["Total Submitted", "Total Approved", "Total Rejected", "Total Paid", "Total Completed"],
         "value": [
-            int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status NOT IN ('Draft','FM Draft')").iloc[0,0]),
+            int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status NOT IN ('Draft','FM Draft','Deleted Draft')").iloc[0,0]),
             int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Approved','Awaiting Payment','Approved for Payment','Paid','Completed','Closed')").iloc[0,0]),
             int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status='Rejected'").iloc[0,0]),
             int(df_query("SELECT COUNT(*) FROM payments WHERE status='Paid'").iloc[0,0]),
@@ -7059,7 +7292,7 @@ def compliance_reports():
     year = c2.number_input("Report year", min_value=2020, max_value=2100, value=today.year, step=1, key="audit_report_year_cmd")
     c1, c2 = st.columns(2)
     with c1:
-        by_dept = df_query("SELECT COALESCE(department_project,'Unknown') department, SUM(estimated_amount) total FROM purchase_requests WHERE status NOT IN ('Rejected','Archived') GROUP BY department ORDER BY total DESC")
+        by_dept = df_query("SELECT COALESCE(department_project,'Unknown') department, SUM(estimated_amount) total FROM purchase_requests WHERE status NOT IN ('Rejected','Archived','Deleted Draft') GROUP BY department ORDER BY total DESC")
         interactive_chart(_money_chart_df(by_dept), "Expenses by Department", "department", "total", "audit_dept_spend_cmd", default="Horizontal Bar")
         status_df = df_query("SELECT status, COUNT(*) count FROM purchase_requests GROUP BY status ORDER BY count DESC")
         interactive_chart(status_df, "Status Distribution", "status", "count", "audit_status_cmd", default="Donut")
@@ -7115,7 +7348,7 @@ def audit_dashboard():
         st.markdown("#### Recent activity notifications")
         dataframe(recent_notifs)
     metric_row([
-        ("Total Submitted", int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status NOT IN ('Draft','FM Draft')").iloc[0,0]), "cumulative"),
+        ("Total Submitted", int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status NOT IN ('Draft','FM Draft','Deleted Draft')").iloc[0,0]), "cumulative"),
         ("Total Approved", int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Approved','Awaiting Payment','Paid','Completed','Closed')").iloc[0,0]), "cumulative"),
         ("Total Paid", int(df_query("SELECT COUNT(*) FROM payments WHERE status='Paid'").iloc[0,0]), "cumulative"),
         ("Total Completed", int(df_query("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('Completed','Closed')").iloc[0,0]), "cumulative"),
@@ -11031,18 +11264,760 @@ def _view_requests_page() -> None:
     request_detail(request_id, actions=True, key_scope="view_requests")
 
 
+
+# ProcureFlow request usability update patch
+
+_APPROVED_REQUEST_DOWNLOAD_STATUSES = (
+    "Approved",
+    "Awaiting Payment",
+    "Approved for Payment",
+    "Paid",
+    "Completed",
+    "Closed",
+    "Archived",
+)
+
+
+def _request_export_frames(
+    request_id: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    request_df = df_query(
+        """
+        SELECT
+            pr.id,
+            pr.request_no,
+            u.full_name AS requested_by_name,
+            pr.department_project,
+            pr.request_date,
+            pr.required_date,
+            pr.category,
+            pr.priority,
+            pr.justification,
+            pr.estimated_amount,
+            pr.vendor_preference,
+            pr.status,
+            pr.payment_status,
+            pr.approved_at,
+            pr.completed_at,
+            pr.created_at,
+            pr.updated_at
+        FROM purchase_requests pr
+        LEFT JOIN users u
+            ON u.id=pr.requested_by
+        WHERE pr.id=?
+        """,
+        (int(request_id),),
+    )
+
+    items_df = df_query(
+        """
+        SELECT
+            item_name,
+            description,
+            quantity,
+            unit_price,
+            total,
+            category,
+            suggested_vendor
+        FROM purchase_request_items
+        WHERE request_id=?
+        ORDER BY id
+        """,
+        (int(request_id),),
+    )
+
+    approvals_df = df_query(
+        """
+        SELECT
+            action,
+            status_before,
+            status_after,
+            reason,
+            approved_by_role,
+            created_at
+        FROM approval_history
+        WHERE entity_type='Purchase Request'
+          AND entity_id=?
+        ORDER BY id
+        """,
+        (int(request_id),),
+    )
+
+    return request_df, items_df, approvals_df
+
+
+def _approved_request_pdf_bytes(
+    request_id: int,
+) -> bytes:
+    from io import BytesIO
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import (
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    request_df, items_df, approvals_df = (
+        _request_export_frames(
+            request_id,
+        )
+    )
+
+    if request_df.empty:
+        return b""
+
+    row = request_df.iloc[0]
+
+    out = BytesIO()
+
+    doc = SimpleDocTemplate(
+        out,
+        pagesize=A4,
+        rightMargin=30,
+        leftMargin=30,
+        topMargin=30,
+        bottomMargin=30,
+        title=str(
+            row.get("request_no")
+            or "Approved Request"
+        ),
+    )
+
+    styles = getSampleStyleSheet()
+
+    story = [
+        Paragraph(
+            "Approved Procurement Request",
+            styles["Title"],
+        ),
+        Spacer(1, 10),
+    ]
+
+    summary_rows = [
+        ["Request Number", str(row.get("request_no") or "")],
+        ["Requester", str(row.get("requested_by_name") or "")],
+        ["Department / Project", str(row.get("department_project") or "")],
+        ["Category", str(row.get("category") or "")],
+        ["Priority", str(row.get("priority") or "")],
+        ["Status", str(row.get("status") or "")],
+        ["Request Date", str(row.get("request_date") or "")],
+        ["Required Date", str(row.get("required_date") or "")],
+        [
+            "Estimated Amount",
+            "NGN {:,.2f}".format(
+                float(
+                    row.get("estimated_amount")
+                    or 0
+                )
+            ),
+        ],
+        ["Vendor Preference", str(row.get("vendor_preference") or "")],
+    ]
+
+    summary = Table(
+        summary_rows,
+        colWidths=[140, 360],
+    )
+
+    summary.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+                ("BACKGROUND", (0, 0), (0, -1), colors.whitesmoke),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+
+    story.extend(
+        [
+            summary,
+            Spacer(1, 12),
+            Paragraph(
+                "Business Justification",
+                styles["Heading3"],
+            ),
+            Paragraph(
+                str(
+                    row.get("justification")
+                    or "No justification recorded."
+                ),
+                styles["BodyText"],
+            ),
+            Spacer(1, 12),
+            Paragraph(
+                "Line Items",
+                styles["Heading3"],
+            ),
+        ]
+    )
+
+    item_rows = [
+        [
+            "Item",
+            "Qty",
+            "Unit Price",
+            "Total",
+            "Category",
+        ]
+    ]
+
+    if items_df.empty:
+        item_rows.append(
+            [
+                "No line items",
+                "",
+                "",
+                "",
+                "",
+            ]
+        )
+    else:
+        for item in items_df.itertuples():
+            item_rows.append(
+                [
+                    str(item.item_name or ""),
+                    str(item.quantity or ""),
+                    "NGN {:,.2f}".format(
+                        float(
+                            item.unit_price
+                            or 0
+                        )
+                    ),
+                    "NGN {:,.2f}".format(
+                        float(
+                            item.total
+                            or 0
+                        )
+                    ),
+                    str(item.category or ""),
+                ]
+            )
+
+    item_table = Table(
+        item_rows,
+        repeatRows=1,
+        colWidths=[150, 45, 85, 85, 130],
+    )
+
+    item_table.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+    )
+
+    story.append(item_table)
+
+    if not approvals_df.empty:
+        story.extend(
+            [
+                Spacer(1, 12),
+                Paragraph(
+                    "Approval History",
+                    styles["Heading3"],
+                ),
+            ]
+        )
+
+        approval_rows = [
+            [
+                "Action",
+                "Before",
+                "After",
+                "Role",
+                "Date",
+            ]
+        ]
+
+        for approval in approvals_df.itertuples():
+            approval_rows.append(
+                [
+                    str(approval.action or ""),
+                    str(approval.status_before or ""),
+                    str(approval.status_after or ""),
+                    str(approval.approved_by_role or ""),
+                    str(approval.created_at or ""),
+                ]
+            )
+
+        approval_table = Table(
+            approval_rows,
+            repeatRows=1,
+            colWidths=[110, 90, 90, 100, 110],
+        )
+
+        approval_table.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ]
+            )
+        )
+
+        story.append(approval_table)
+
+    doc.build(story)
+
+    return out.getvalue()
+
+
+def _approved_request_downloads_page(
+    scope: str = "procurement",
+) -> None:
+    from core.report_service import (
+        build_excel_workbook,
+        excel_mime,
+    )
+
+    statuses = list(
+        _APPROVED_REQUEST_DOWNLOAD_STATUSES
+    )
+
+    placeholders = ",".join(
+        ["?"] * len(statuses)
+    )
+
+    params: list[Any] = []
+
+    sql = """
+        SELECT
+            pr.id,
+            pr.request_no,
+            u.full_name AS requester,
+            pr.department_project,
+            pr.category,
+            pr.estimated_amount,
+            pr.status,
+            pr.approved_at,
+            pr.updated_at
+        FROM purchase_requests pr
+        LEFT JOIN users u
+            ON u.id=pr.requested_by
+        WHERE
+    """
+
+    if scope == "facility":
+        current_id = int(
+            user().get("id")
+            or 0
+        )
+
+        sql += """
+            (
+                pr.facility_manager_user_id=?
+                OR pr.requested_by=?
+            )
+            AND
+        """
+
+        params.extend(
+            [
+                current_id,
+                current_id,
+            ]
+        )
+
+    sql += (
+        f" pr.status IN ({placeholders}) "
+        "ORDER BY COALESCE("
+        "pr.approved_at,"
+        "pr.updated_at,"
+        "pr.created_at"
+        ") DESC"
+    )
+
+    params.extend(statuses)
+
+    rows = df_query(
+        sql,
+        params,
+    )
+
+    st.markdown(
+        "#### Download Approved Requests"
+    )
+
+    if rows.empty:
+        st.info(
+            "No approved requests are available for download."
+        )
+        return
+
+    shown = rows.drop(
+        columns=["id"]
+    ).copy()
+
+    shown["estimated_amount"] = shown[
+        "estimated_amount"
+    ].apply(money)
+
+    dataframe(shown)
+
+    selected = st.selectbox(
+        "Select a specific approved request",
+        [
+            f"{r.request_no} ? {r.status} ? #{int(r.id)}"
+            for r in rows.itertuples()
+        ],
+        key=f"approved_download_select_{scope}",
+    )
+
+    request_id = int(
+        selected.rsplit("#", 1)[1]
+    )
+
+    selected_row = rows[
+        rows["id"] == request_id
+    ].iloc[0]
+
+    request_no = str(
+        selected_row.get("request_no")
+        or request_id
+    )
+
+    safe_request_no = re.sub(
+        r"[^A-Za-z0-9._-]+",
+        "_",
+        request_no,
+    )
+
+    request_df, items_df, approvals_df = (
+        _request_export_frames(
+            request_id,
+        )
+    )
+
+    individual_excel = build_excel_workbook(
+        {
+            "Request": request_df,
+            "Line Items": items_df,
+            "Approval History": approvals_df,
+        },
+        safe_request_no,
+    )
+
+    pdf_payload = _approved_request_pdf_bytes(
+        request_id
+    )
+
+    c1, c2 = st.columns(2)
+
+    c1.download_button(
+        "Download Selected Request PDF",
+        pdf_payload,
+        file_name=f"{safe_request_no}.pdf",
+        mime="application/pdf",
+        key=f"approved_pdf_{scope}_{request_id}",
+    )
+
+    c2.download_button(
+        "Download Selected Request Excel",
+        individual_excel,
+        file_name=f"{safe_request_no}.xlsx",
+        mime=excel_mime(),
+        key=f"approved_excel_{scope}_{request_id}",
+    )
+
+    all_request_ids = [
+        int(value)
+        for value in rows["id"].tolist()
+    ]
+
+    all_items = pd.DataFrame()
+
+    if all_request_ids:
+        item_placeholders = ",".join(
+            ["?"] * len(all_request_ids)
+        )
+
+        all_items = df_query(
+            f"""
+            SELECT
+                pr.request_no,
+                pri.item_name,
+                pri.description,
+                pri.quantity,
+                pri.unit_price,
+                pri.total,
+                pri.category,
+                pri.suggested_vendor
+            FROM purchase_request_items pri
+            JOIN purchase_requests pr
+                ON pr.id=pri.request_id
+            WHERE pri.request_id IN (
+                {item_placeholders}
+            )
+            ORDER BY
+                pr.request_no,
+                pri.id
+            """,
+            all_request_ids,
+        )
+
+    bulk_rows = rows.drop(
+        columns=["id"]
+    ).copy()
+
+    bulk_payload = build_excel_workbook(
+        {
+            "Approved Requests": bulk_rows,
+            "Line Items": all_items,
+        },
+        f"approved_requests_{scope}",
+    )
+
+    st.download_button(
+        "Download All Approved Requests Excel",
+        bulk_payload,
+        file_name=f"approved_requests_{scope}.xlsx",
+        mime=excel_mime(),
+        key=f"approved_bulk_excel_{scope}",
+    )
+
+
+def _delete_duplicate_drafts_page() -> None:
+    role = _current_role()
+
+    if role != "Procurement Manager":
+        st.error(
+            "Only the Procurement Manager can remove Procurement draft requests."
+        )
+        return
+
+    current_user_id = int(
+        user().get("id")
+        or 0
+    )
+
+    rows = df_query(
+        """
+        SELECT
+            id,
+            request_no,
+            department_project,
+            category,
+            estimated_amount,
+            status,
+            source_type,
+            created_at,
+            updated_at
+        FROM purchase_requests
+        WHERE status='Draft'
+          AND requested_by=?
+        ORDER BY updated_at DESC, created_at DESC
+        """,
+        (current_user_id,),
+    )
+
+    st.caption(
+        "Use this only for duplicate or accidentally created drafts. "
+        "Submitted or processed requests cannot be deleted. "
+        "The operational draft is removed from normal queues while "
+        "an immutable audit trail is retained."
+    )
+
+    if rows.empty:
+        st.success(
+            "There are no Procurement Manager drafts available for deletion."
+        )
+        return
+
+    shown = rows.drop(
+        columns=["id"]
+    ).copy()
+
+    shown["estimated_amount"] = shown[
+        "estimated_amount"
+    ].apply(money)
+
+    dataframe(shown)
+
+    selected = st.selectbox(
+        "Select draft to delete",
+        [
+            f"{r.request_no} ? {r.department_project} ? #{int(r.id)}"
+            for r in rows.itertuples()
+        ],
+        key="delete_duplicate_draft_select",
+    )
+
+    request_id = int(
+        selected.rsplit("#", 1)[1]
+    )
+
+    selected_row = rows[
+        rows["id"] == request_id
+    ].iloc[0]
+
+    request_no = str(
+        selected_row.get("request_no")
+        or request_id
+    )
+
+    reason = st.text_area(
+        "Reason for deleting this draft",
+        placeholder=(
+            "Example: Duplicate request created accidentally."
+        ),
+        key=f"delete_draft_reason_{request_id}",
+    )
+
+    confirm = st.checkbox(
+        f"I confirm that {request_no} is a duplicate/unwanted draft.",
+        key=f"delete_draft_confirm_{request_id}",
+    )
+
+    if st.button(
+        "Delete Draft Request",
+        type="primary",
+        disabled=not confirm,
+        key=f"delete_draft_button_{request_id}",
+    ):
+        if not reason.strip():
+            st.error(
+                "A deletion reason is required."
+            )
+            return
+
+        current = df_query(
+            """
+            SELECT
+                id,
+                request_no,
+                status,
+                requested_by,
+                estimated_amount,
+                department_project,
+                category
+            FROM purchase_requests
+            WHERE id=?
+            """,
+            (request_id,),
+        )
+
+        if current.empty:
+            st.error(
+                "The selected draft no longer exists."
+            )
+            return
+
+        live = current.iloc[0]
+
+        if str(
+            live.get("status")
+            or ""
+        ) != "Draft":
+            st.error(
+                "This request is no longer a Draft and cannot be deleted."
+            )
+            return
+
+        if int(
+            live.get("requested_by")
+            or 0
+        ) != current_user_id:
+            st.error(
+                "You can only delete Procurement drafts created by your account."
+            )
+            return
+
+        from services.draft_request_service import (
+            DraftDeleteError,
+            delete_procurement_draft,
+        )
+
+        try:
+            result = delete_procurement_draft(
+                request_id,
+                actor_user_id=current_user_id,
+                actor_role=role,
+                reason=reason.strip(),
+            )
+
+        except (
+            DraftDeleteError,
+            PermissionError,
+            ValueError,
+        ) as exc:
+            st.error(
+                str(exc)
+            )
+            return
+
+        except Exception:
+            st.error(
+                "The draft could not be deleted safely. "
+                "No partial deletion was committed."
+            )
+            return
+
+
+        _rerun_success(
+            f"Draft {result['request_no']} deleted. Audit evidence was retained."
+        )
+
 def requests_page(mode="procurement"):
     st.subheader("Purchase Requests")
+
     options = [
-        ("Create Request", "＋"), ("View Requests", "◉"), ("Guided Next Actions", "→"),
-        ("Request Register", "▤"), ("Imported Draft Review", "⇩"),
+        ("Create Request", "?"),
+        ("View Requests", "?"),
+        ("Delete Drafts", "?"),
+        ("Approved Downloads", "?"),
+        ("Guided Next Actions", "?"),
+        ("Request Register", "?"),
+        ("Imported Draft Review", "?"),
     ]
-    section = _section_block_navigation(options, f"requests_sections_{mode}_blocks", "Create Request")
-    if section == "Create Request": create_request_form()
-    elif section == "View Requests": _view_requests_page()
-    elif section == "Guided Next Actions": request_next_action_board()
-    elif section == "Request Register": request_register(actions=True)
-    else: imported_draft_review()
+
+    section = _section_block_navigation(
+        options,
+        f"requests_sections_{mode}_blocks",
+        "Create Request",
+    )
+
+    if section == "Create Request":
+        create_request_form()
+
+    elif section == "View Requests":
+        _view_requests_page()
+
+    elif section == "Delete Drafts":
+        _delete_duplicate_drafts_page()
+
+    elif section == "Approved Downloads":
+        _approved_request_downloads_page(
+            "procurement"
+        )
+
+    elif section == "Guided Next Actions":
+        request_next_action_board()
+
+    elif section == "Request Register":
+        request_register(actions=True)
+
+    else:
+        imported_draft_review()
+
 
 
 _request_detail_before_e2e = request_detail

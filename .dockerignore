@@ -18,3 +18,7 @@ data/uploads/
 .gcloudignore
 
 *.before_*
+# ProcureFlow local/runtime data
+# Never package local databases, backups, imports,
+# attachments, SQLite runtime files, or encryption material.
+data/
