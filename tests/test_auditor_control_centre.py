@@ -435,3 +435,80 @@ def test_auditor_v2_schema_exports_have_excel_csv_pdf():
     ):
 
         assert token in source
+
+def test_auditor_v3_excel_handles_timezone_aware_values():
+
+    import pandas as pd
+
+    from modules import (
+        auditor_control_centre as auditor,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "created_at": [
+                pd.Timestamp(
+                    "2026-08-19T12:08:39Z"
+                )
+            ],
+            "status": [
+                "Approved"
+            ],
+        }
+    )
+
+    payload = auditor._auditor_excel_bytes(
+        frame
+    )
+
+    assert isinstance(
+        payload,
+        bytes,
+    )
+
+    assert payload.startswith(
+        b"PK"
+    )
+
+
+def test_auditor_v3_export_failure_is_contained():
+
+    source = AUDITOR.read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "PROCUREFLOW_AUDITOR_EXPORT_BANK_REVEAL_V3"
+        in source
+    )
+
+    assert (
+        "_auditor_excel_safe_dataframe"
+        in source
+    )
+
+    assert (
+        "Could not prepare the {choice} export."
+        in source
+    )
+
+
+def test_auditor_v3_bank_reveal_is_controlled_and_audited():
+
+    source = AUDITOR.read_text(
+        encoding="utf-8"
+    )
+
+    for token in (
+        "audit_payee_reveal as _auditor_audit_payee_reveal",
+        "decrypt_text as _auditor_decrypt_text",
+        "Reveal Bank Details for 5 Minutes",
+        "Reason for revealing bank details",
+        "AUDITOR_BANK_REVEAL_SECONDS = 300",
+        '"Account Name"',
+        '"Bank Name"',
+        '"Account Number"',
+        "mask=False",
+    ):
+
+        assert token in source

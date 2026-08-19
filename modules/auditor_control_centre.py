@@ -3159,3 +3159,973 @@ def render_auditor_dashboard() -> None:
         "Activity Since 01 August 2026",
         feed,
     )
+
+# ============================================================
+# PROCUREFLOW_AUDITOR_EXPORT_BANK_REVEAL_V3
+#
+# Corrections:
+# - Excel-safe timezone/value normalization
+# - export failures do not crash the whole Auditor page
+# - controlled Auditor reveal of encrypted payment bank details
+# - reveal requires a reason and uses existing immutable access audit
+# - only Account Name / Bank Name / Account Number are unmasked
+# - revealed bank report supports Excel, CSV and PDF
+# ============================================================
+
+from services.payee_service import (
+    audit_payee_reveal as _auditor_audit_payee_reveal,
+)
+from services.security_service import (
+    decrypt_text as _auditor_decrypt_text,
+)
+
+
+AUDITOR_BANK_REVEAL_SECONDS = 300
+
+
+def _auditor_value_present(value) -> bool:
+
+    if value is None:
+        return False
+
+    try:
+        missing = pd.isna(value)
+
+        if (
+            not hasattr(
+                missing,
+                "__len__",
+            )
+            and bool(missing)
+        ):
+            return False
+
+    except Exception:
+        pass
+
+    return str(value).strip() not in {
+        "",
+        "None",
+        "nan",
+        "NaT",
+    }
+
+
+def _auditor_excel_safe_cell(value):
+
+    from datetime import (
+        date,
+        datetime,
+        timezone,
+    )
+
+    import re
+
+    if value is None:
+        return None
+
+    try:
+        missing = pd.isna(value)
+
+        if (
+            not hasattr(
+                missing,
+                "__len__",
+            )
+            and bool(missing)
+        ):
+            return None
+
+    except Exception:
+        pass
+
+    if isinstance(
+        value,
+        pd.Timestamp,
+    ):
+
+        if pd.isna(
+            value
+        ):
+            return None
+
+        if value.tzinfo is not None:
+
+            value = (
+                value
+                .tz_convert(
+                    "UTC"
+                )
+                .tz_localize(
+                    None
+                )
+            )
+
+        return value.to_pydatetime()
+
+    if isinstance(
+        value,
+        datetime,
+    ):
+
+        if (
+            value.tzinfo is not None
+            and value.utcoffset()
+            is not None
+        ):
+
+            value = (
+                value
+                .astimezone(
+                    timezone.utc
+                )
+                .replace(
+                    tzinfo=None
+                )
+            )
+
+        return value
+
+    if isinstance(
+        value,
+        date,
+    ):
+        return value
+
+    if isinstance(
+        value,
+        (
+            dict,
+            list,
+            tuple,
+            set,
+        ),
+    ):
+
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            default=str,
+        )
+
+    if isinstance(
+        value,
+        bytes,
+    ):
+
+        return value.hex()
+
+    if isinstance(
+        value,
+        str,
+    ):
+
+        # Excel/openpyxl rejects several control characters.
+        return re.sub(
+            r"[\x00-\x08\x0B\x0C\x0E-\x1F]",
+            "",
+            value,
+        )
+
+    return value
+
+
+def _auditor_excel_safe_dataframe(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+
+    if df is None:
+        return pd.DataFrame()
+
+    safe = df.copy()
+
+    for column in safe.columns:
+
+        safe[column] = safe[
+            column
+        ].map(
+            _auditor_excel_safe_cell
+        )
+
+    return safe
+
+
+# V3 override of the V2 Excel generator.
+def _auditor_excel_bytes(
+    df: pd.DataFrame,
+) -> bytes:
+
+    from io import BytesIO
+
+    safe = _auditor_excel_safe_dataframe(
+        df
+    )
+
+    out = BytesIO()
+
+    with pd.ExcelWriter(
+        out,
+        engine="openpyxl",
+    ) as writer:
+
+        safe.to_excel(
+            writer,
+            index=False,
+            sheet_name="Audit Data",
+        )
+
+    return out.getvalue()
+
+
+def _auditor_download_surface(
+    title: str,
+    df: pd.DataFrame,
+    *,
+    mask: bool,
+    namespace: str,
+) -> None:
+
+    if (
+        df is None
+        or df.empty
+    ):
+        return
+
+    if mask:
+        export_df = _mask_sensitive(
+            df
+        )
+    else:
+        export_df = df.copy()
+
+    key = _auditor_export_key(
+        (
+            f"{namespace}:"
+            f"{title}"
+        ),
+        export_df,
+    )
+
+    filename = _auditor_safe_filename(
+        title
+    )
+
+    choice = st.selectbox(
+        f"Export {title}",
+        [
+            "Excel (.xlsx)",
+            "CSV (.csv)",
+            "PDF (.pdf)",
+        ],
+        key=(
+            f"auditor_v3_export_format_"
+            f"{namespace}_{key}"
+        ),
+        label_visibility="collapsed",
+    )
+
+    try:
+
+        if choice.startswith(
+            "Excel"
+        ):
+
+            payload = _auditor_excel_bytes(
+                export_df
+            )
+
+            extension = "xlsx"
+
+            mime = (
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            )
+
+        elif choice.startswith(
+            "CSV"
+        ):
+
+            payload = export_df.to_csv(
+                index=False
+            ).encode(
+                "utf-8-sig"
+            )
+
+            extension = "csv"
+
+            mime = "text/csv"
+
+        else:
+
+            payload = _auditor_pdf_bytes(
+                export_df,
+                title,
+            )
+
+            extension = "pdf"
+
+            mime = "application/pdf"
+
+    except Exception:
+
+        # Never allow preparation of one optional export format
+        # to take down the entire Auditor page.
+        st.error(
+            (
+                f"Could not prepare the {choice} export. "
+                "The audit records remain available on screen; "
+                "choose another format or contact Admin."
+            )
+        )
+
+        return
+
+    st.download_button(
+        (
+            f"Download {title} "
+            f"{extension.upper()}"
+        ),
+        data=payload,
+        file_name=(
+            f"{filename}.{extension}"
+        ),
+        mime=mime,
+        key=(
+            f"auditor_v3_export_"
+            f"{namespace}_{key}_{extension}"
+        ),
+        use_container_width=True,
+    )
+
+
+# V3 override used by every ordinary Auditor _show() surface.
+# Normal audit schemas remain masked.
+def _auditor_schema_download(
+    title: str,
+    df: pd.DataFrame,
+) -> None:
+
+    _auditor_download_surface(
+        title,
+        df,
+        mask=True,
+        namespace="masked",
+    )
+
+
+def _auditor_id_text(
+    value,
+) -> str:
+
+    if not _auditor_value_present(
+        value
+    ):
+        return ""
+
+    text = str(
+        value
+    ).strip()
+
+    if (
+        text.endswith(
+            ".0"
+        )
+        and text[
+            :-2
+        ].isdigit()
+    ):
+
+        text = text[
+            :-2
+        ]
+
+    return text
+
+
+def _auditor_request_number_map() -> dict[str, str]:
+
+    requests = _load_table(
+        "purchase_requests",
+        5000,
+    )
+
+    result = {}
+
+    if (
+        requests.empty
+        or "id" not in requests.columns
+    ):
+        return result
+
+    for _, row in requests.iterrows():
+
+        request_id = _auditor_id_text(
+            row.get(
+                "id"
+            )
+        )
+
+        if not request_id:
+            continue
+
+        request_no = str(
+            row.get(
+                "request_no"
+            )
+            or (
+                f"Request #{request_id}"
+            )
+        )
+
+        result[
+            request_id
+        ] = request_no
+
+    return result
+
+
+def _auditor_decrypted_bank_frame(
+    row: pd.Series,
+    request_no: str,
+) -> pd.DataFrame:
+
+    def reveal_field(
+        field: str,
+    ) -> str:
+
+        encrypted_column = (
+            f"{field}_encrypted"
+        )
+
+        encrypted = row.get(
+            encrypted_column
+        )
+
+        if _auditor_value_present(
+            encrypted
+        ):
+
+            value = _auditor_decrypt_text(
+                str(
+                    encrypted
+                )
+            )
+
+            return str(
+                value
+                or ""
+            )
+
+        # Compatibility fallback for older records that may use
+        # an already-readable field instead of the encrypted one.
+        value = row.get(
+            field
+        )
+
+        if _auditor_value_present(
+            value
+        ):
+            return str(
+                value
+            )
+
+        return ""
+
+    record = {
+        "Request No":
+            request_no,
+
+        "Request ID":
+            _auditor_id_text(
+                row.get(
+                    "purchase_request_id"
+                )
+            ),
+
+        "Payee Detail ID":
+            _auditor_id_text(
+                row.get(
+                    "id"
+                )
+            ),
+
+        "Account Name":
+            reveal_field(
+                "account_name"
+            ),
+
+        "Bank Name":
+            reveal_field(
+                "bank_name"
+            ),
+
+        "Account Number":
+            reveal_field(
+                "account_number"
+            ),
+
+        "Currency":
+            str(
+                row.get(
+                    "currency"
+                )
+                or ""
+            ),
+
+        "Verification Status":
+            str(
+                row.get(
+                    "verification_status"
+                )
+                or ""
+            ),
+
+        "Payment Readiness":
+            str(
+                row.get(
+                    "payment_readiness_status"
+                )
+                or row.get(
+                    "payment_readiness"
+                )
+                or ""
+            ),
+
+        "Created At":
+            row.get(
+                "created_at"
+            ),
+
+        "Updated At":
+            row.get(
+                "updated_at"
+            ),
+    }
+
+    return pd.DataFrame(
+        [
+            record
+        ]
+    )
+
+
+def _auditor_bank_detail_reveal_panel() -> None:
+
+    import time
+
+    st.markdown(
+        "### Controlled Bank Detail Reveal"
+    )
+
+    st.warning(
+        (
+            "Confidential payment information. "
+            "Revealing bank details requires an audit reason. "
+            "The reveal is available for five minutes in this "
+            "Auditor session and does not modify procurement records."
+        )
+    )
+
+    actor = (
+        st.session_state.get(
+            "user"
+        )
+        or {}
+    )
+
+    actor_role = str(
+        actor.get(
+            "role"
+        )
+        or ""
+    )
+
+    if actor_role != "Auditor":
+
+        st.error(
+            "Only the Auditor role may use this audit reveal surface."
+        )
+
+        return
+
+    try:
+        actor_user_id = int(
+            actor.get(
+                "id"
+            )
+            or 0
+        )
+    except Exception:
+        actor_user_id = 0
+
+    if actor_user_id <= 0:
+
+        st.error(
+            "The current Auditor session has no valid user identifier."
+        )
+
+        return
+
+    payees = _load_table(
+        "payment_payee_details",
+        5000,
+    )
+
+    if (
+        payees.empty
+        or "id" not in payees.columns
+    ):
+
+        st.info(
+            "No payment payee detail records are available."
+        )
+
+        return
+
+    request_numbers = (
+        _auditor_request_number_map()
+    )
+
+    labels = []
+
+    id_by_label = {}
+
+    for _, row in payees.iterrows():
+
+        payee_id = _auditor_id_text(
+            row.get(
+                "id"
+            )
+        )
+
+        if not payee_id:
+            continue
+
+        request_id = _auditor_id_text(
+            row.get(
+                "purchase_request_id"
+            )
+        )
+
+        request_no = request_numbers.get(
+            request_id,
+            (
+                f"Request #{request_id}"
+                if request_id
+                else "Unlinked Request"
+            ),
+        )
+
+        verification = str(
+            row.get(
+                "verification_status"
+            )
+            or "Unknown"
+        )
+
+        label = (
+            f"{request_no} ? "
+            f"Payee Detail #{payee_id} ? "
+            f"{verification}"
+        )
+
+        labels.append(
+            label
+        )
+
+        id_by_label[
+            label
+        ] = payee_id
+
+    if not labels:
+
+        st.info(
+            "No selectable payee detail records were found."
+        )
+
+        return
+
+    selected_label = st.selectbox(
+        "Payment payee record",
+        labels,
+        key="auditor_v3_bank_record",
+    )
+
+    selected_id = id_by_label[
+        selected_label
+    ]
+
+    selected_rows = payees[
+        payees[
+            "id"
+        ]
+        .astype(str)
+        .str.replace(
+            r"\.0$",
+            "",
+            regex=True,
+        )
+        .eq(
+            selected_id
+        )
+    ]
+
+    if selected_rows.empty:
+
+        st.error(
+            "The selected payee record could not be loaded."
+        )
+
+        return
+
+    selected_row = (
+        selected_rows.iloc[
+            0
+        ]
+    )
+
+    request_id = _auditor_id_text(
+        selected_row.get(
+            "purchase_request_id"
+        )
+    )
+
+    request_no = request_numbers.get(
+        request_id,
+        (
+            f"Request #{request_id}"
+            if request_id
+            else "Unlinked Request"
+        ),
+    )
+
+    reason = st.text_area(
+        "Reason for revealing bank details",
+        placeholder=(
+            "Example: Reviewing payment evidence for "
+            "internal audit case AUD-2026-..."
+        ),
+        key=(
+            f"auditor_v3_bank_reason_"
+            f"{selected_id}"
+        ),
+    )
+
+    reveal_state_key = (
+        "auditor_v3_bank_reveal"
+    )
+
+    state = (
+        st.session_state.get(
+            reveal_state_key
+        )
+        or {}
+    )
+
+    expires_at = float(
+        state.get(
+            "expires_at"
+        )
+        or 0
+    )
+
+    if (
+        state
+        and time.time()
+        >= expires_at
+    ):
+
+        st.session_state.pop(
+            reveal_state_key,
+            None,
+        )
+
+        state = {}
+
+        st.info(
+            "The previous bank-detail reveal has expired."
+        )
+
+    reveal_clicked = st.button(
+        "Reveal Bank Details for 5 Minutes",
+        type="primary",
+        disabled=not reason.strip(),
+        key=(
+            f"auditor_v3_reveal_bank_"
+            f"{selected_id}"
+        ),
+    )
+
+    if reveal_clicked:
+
+        try:
+
+            # Prove decryption succeeds before recording a
+            # successful reveal event.
+            _auditor_decrypted_bank_frame(
+                selected_row,
+                request_no,
+            )
+
+            _auditor_audit_payee_reveal(
+                int(
+                    selected_id
+                ),
+                actor_user_id,
+                actor_role,
+                reason.strip(),
+            )
+
+        except Exception:
+
+            st.error(
+                (
+                    "Bank details could not be securely revealed. "
+                    "No confidential values were displayed."
+                )
+            )
+
+            return
+
+        st.session_state[
+            reveal_state_key
+        ] = {
+            "payee_id":
+                selected_id,
+
+            "expires_at":
+                time.time()
+                + AUDITOR_BANK_REVEAL_SECONDS,
+        }
+
+        st.rerun()
+
+    state = (
+        st.session_state.get(
+            reveal_state_key
+        )
+        or {}
+    )
+
+    reveal_active = (
+        str(
+            state.get(
+                "payee_id"
+            )
+            or ""
+        )
+        == selected_id
+        and time.time()
+        < float(
+            state.get(
+                "expires_at"
+            )
+            or 0
+        )
+    )
+
+    if not reveal_active:
+        return
+
+    try:
+
+        revealed = (
+            _auditor_decrypted_bank_frame(
+                selected_row,
+                request_no,
+            )
+        )
+
+    except Exception:
+
+        st.session_state.pop(
+            reveal_state_key,
+            None,
+        )
+
+        st.error(
+            (
+                "The encrypted bank information could not "
+                "be decrypted with the active application key."
+            )
+        )
+
+        return
+
+    remaining_seconds = max(
+        0,
+        int(
+            float(
+                state[
+                    "expires_at"
+                ]
+            )
+            - time.time()
+        ),
+    )
+
+    st.success(
+        (
+            "Authorized bank details revealed. "
+            f"This view expires in about {remaining_seconds} seconds."
+        )
+    )
+
+    st.dataframe(
+        revealed,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    _auditor_download_surface(
+        (
+            f"{request_no} "
+            "Bank Details"
+        ),
+        revealed,
+        mask=False,
+        namespace=(
+            f"revealed_bank_"
+            f"{selected_id}"
+        ),
+    )
+
+    if st.button(
+        "Hide Bank Details Now",
+        key=(
+            f"auditor_v3_hide_bank_"
+            f"{selected_id}"
+        ),
+    ):
+
+        st.session_state.pop(
+            reveal_state_key,
+            None,
+        )
+
+        st.rerun()
+
+
+# Preserve the V2 schema renderer, then extend only the dedicated
+# Payment Payee / Bank Detail Access Audit page.
+_render_schema_audit_page_v2 = (
+    render_schema_audit_page
+)
+
+
+def render_schema_audit_page(
+    title: str,
+) -> None:
+
+    _render_schema_audit_page_v2(
+        title
+    )
+
+    if (
+        title
+        == "Payment Payee / Bank Detail Access Audit"
+    ):
+
+        st.divider()
+
+        _auditor_bank_detail_reveal_panel()
