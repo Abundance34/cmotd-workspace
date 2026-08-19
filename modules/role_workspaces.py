@@ -7365,7 +7365,7 @@ def audit_dashboard():
     dataframe(_redact_ui_df(logs, "audit_logs")) if not logs.empty else st.info("No audit logs yet.")
 
 
-def audit_workspace():
+def _legacy_audit_workspace():
     role_header("Audit & Compliance Workspace", "Read-only review of procurement, finance, gateway pass, history and audit reports.")
     section = st.session_state.get("audit_section", "Audit Dashboard")
     if section == "Audit Dashboard":
@@ -12705,3 +12705,55 @@ def approval_limit_configuration_panel():
         dataframe(display)
 
     st.divider()
+
+# === PROCUREFLOW AUDITOR CONTROL CENTRE V1 ===
+# The former active audit_workspace() is preserved as
+# _legacy_audit_workspace(). All existing specialist Auditor
+# evidence pages therefore remain available.
+#
+# New command-centre surfaces are deliberately read-only.
+from modules.auditor_control_centre import (
+    render_auditor_dashboard as _auditor_command_dashboard,
+    render_exception_centre as _auditor_exception_centre,
+    render_role_activity_mirrors as _auditor_role_mirrors,
+    render_transaction_360 as _auditor_transaction_360,
+    render_user_360 as _auditor_user_360,
+)
+
+
+def audit_dashboard():
+    _auditor_command_dashboard()
+
+
+def audit_workspace():
+
+    section = st.session_state.get(
+        "audit_section",
+        "Audit Dashboard",
+    )
+
+    if section == "Role Activity Mirrors":
+
+        _auditor_role_mirrors()
+
+        return
+
+    if section == "Transaction 360":
+
+        _auditor_transaction_360()
+
+        return
+
+    if section == "User 360":
+
+        _auditor_user_360()
+
+        return
+
+    if section == "Exception Centre":
+
+        _auditor_exception_centre()
+
+        return
+
+    _legacy_audit_workspace()

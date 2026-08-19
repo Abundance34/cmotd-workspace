@@ -184,6 +184,10 @@ ROLE_SECTIONS = {
         "audit_section",
         [
             "Audit Dashboard",
+            "Role Activity Mirrors",
+            "Transaction 360",
+            "User 360",
+            "Exception Centre",
             "All Activity & Evidence Ledger",
             "Procurement Records",
             "Sourcing & Vendor Quote Audit",
