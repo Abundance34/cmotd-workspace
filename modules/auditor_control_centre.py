@@ -4129,3 +4129,727 @@ def render_schema_audit_page(
         st.divider()
 
         _auditor_bank_detail_reveal_panel()
+
+# ============================================================
+# PROCUREFLOW_AUDITOR_DOWNLOAD_REVEAL_UX_V4
+#
+# - Download buttons do not rerun/navigation-race the app.
+# - Download payload signatures are validated.
+# - Bank detail controls appear before the long audit tables.
+# - Masked bank fields are always visibly presented.
+# - Reveal duration reduced to 60 seconds.
+# - Active reveal automatically refreshes until expiry.
+# ============================================================
+
+
+AUDITOR_BANK_REVEAL_SECONDS = 60
+
+
+def _auditor_validate_download_payload(
+    payload,
+    extension: str,
+) -> bytes:
+
+    if isinstance(
+        payload,
+        bytearray,
+    ):
+        payload = bytes(
+            payload
+        )
+
+    if not isinstance(
+        payload,
+        bytes,
+    ):
+        raise ValueError(
+            "Download payload is not binary data."
+        )
+
+    if not payload:
+        raise ValueError(
+            "Download payload is empty."
+        )
+
+    ext = str(
+        extension
+    ).lower()
+
+    if (
+        ext == "xlsx"
+        and not payload.startswith(
+            b"PK"
+        )
+    ):
+        raise ValueError(
+            "Excel payload signature is invalid."
+        )
+
+    if (
+        ext == "pdf"
+        and not payload.startswith(
+            b"%PDF"
+        )
+    ):
+        raise ValueError(
+            "PDF payload signature is invalid."
+        )
+
+    # Do not allow an HTML application/error page to be
+    # accidentally presented as CSV data.
+    if ext == "csv":
+
+        head = (
+            payload[
+                :512
+            ]
+            .lstrip()
+            .lower()
+        )
+
+        if (
+            head.startswith(
+                b"<!doctype html"
+            )
+            or head.startswith(
+                b"<html"
+            )
+        ):
+            raise ValueError(
+                "CSV payload unexpectedly contains HTML."
+            )
+
+    return payload
+
+
+def _auditor_download_surface(
+    title: str,
+    df: pd.DataFrame,
+    *,
+    mask: bool,
+    namespace: str,
+) -> None:
+
+    if (
+        df is None
+        or df.empty
+    ):
+        return
+
+    export_df = (
+        _mask_sensitive(
+            df
+        )
+        if mask
+        else df.copy()
+    )
+
+    key = _auditor_export_key(
+        f"{namespace}:{title}",
+        export_df,
+    )
+
+    filename = _auditor_safe_filename(
+        title
+    )
+
+    choice = st.selectbox(
+        f"Export {title}",
+        [
+            "Excel (.xlsx)",
+            "CSV (.csv)",
+            "PDF (.pdf)",
+        ],
+        key=(
+            "auditor_v4_export_format_"
+            + namespace
+            + "_"
+            + key
+        ),
+        label_visibility="collapsed",
+    )
+
+    try:
+
+        if choice.startswith(
+            "Excel"
+        ):
+
+            extension = "xlsx"
+
+            payload = (
+                _auditor_excel_bytes(
+                    export_df
+                )
+            )
+
+            mime = (
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            )
+
+        elif choice.startswith(
+            "CSV"
+        ):
+
+            extension = "csv"
+
+            payload = (
+                export_df
+                .to_csv(
+                    index=False
+                )
+                .encode(
+                    "utf-8-sig"
+                )
+            )
+
+            mime = "text/csv"
+
+        else:
+
+            extension = "pdf"
+
+            payload = (
+                _auditor_pdf_bytes(
+                    export_df,
+                    title,
+                )
+            )
+
+            mime = "application/pdf"
+
+        payload = (
+            _auditor_validate_download_payload(
+                payload,
+                extension,
+            )
+        )
+
+    except Exception:
+
+        st.error(
+            (
+                f"Could not prepare the {choice} file. "
+                "No HTML or invalid download was returned."
+            )
+        )
+
+        return
+
+    st.download_button(
+        label=(
+            f"Download {title} "
+            f"{extension.upper()}"
+        ),
+        data=payload,
+        file_name=(
+            f"{filename}.{extension}"
+        ),
+        mime=mime,
+        key=(
+            "auditor_v4_download_"
+            + namespace
+            + "_"
+            + key
+            + "_"
+            + extension
+        ),
+        on_click="ignore",
+        width="stretch",
+    )
+
+
+def _auditor_masked_bank_preview(
+    row: pd.Series,
+    request_no: str,
+) -> None:
+
+    request_id = _auditor_id_text(
+        row.get(
+            "purchase_request_id"
+        )
+    )
+
+    payee_id = _auditor_id_text(
+        row.get(
+            "id"
+        )
+    )
+
+    preview = pd.DataFrame(
+        [
+            {
+                "Request No":
+                    request_no,
+
+                "Request ID":
+                    request_id,
+
+                "Payee Detail ID":
+                    payee_id,
+
+                "Account Name":
+                    "????????",
+
+                "Bank Name":
+                    "????????",
+
+                "Account Number":
+                    "????????",
+
+                "Currency":
+                    str(
+                        row.get(
+                            "currency"
+                        )
+                        or ""
+                    ),
+
+                "Verification Status":
+                    str(
+                        row.get(
+                            "verification_status"
+                        )
+                        or ""
+                    ),
+            }
+        ]
+    )
+
+    st.markdown(
+        "#### Bank Details ? Masked by Default"
+    )
+
+    st.caption(
+        (
+            "Sensitive banking values remain hidden until "
+            "the Auditor provides a reason and explicitly reveals them."
+        )
+    )
+
+    st.dataframe(
+        preview,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def _auditor_bank_detail_reveal_panel() -> None:
+
+    import time
+
+    st.markdown(
+        "### Payment Bank Detail Review"
+    )
+
+    actor = (
+        st.session_state.get(
+            "user"
+        )
+        or {}
+    )
+
+    actor_role = str(
+        actor.get(
+            "role"
+        )
+        or ""
+    )
+
+    if actor_role != "Auditor":
+
+        st.error(
+            "Only the Auditor role can access this review surface."
+        )
+
+        return
+
+    try:
+
+        actor_user_id = int(
+            actor.get(
+                "id"
+            )
+            or 0
+        )
+
+    except Exception:
+
+        actor_user_id = 0
+
+    if actor_user_id <= 0:
+
+        st.error(
+            "The current Auditor session is invalid."
+        )
+
+        return
+
+    payees = _load_table(
+        "payment_payee_details",
+        5000,
+    )
+
+    if (
+        payees.empty
+        or "id" not in payees.columns
+    ):
+
+        st.info(
+            "No payment payee details are available."
+        )
+
+        return
+
+    request_numbers = (
+        _auditor_request_number_map()
+    )
+
+    labels = []
+
+    ids = {}
+
+    for _, row in payees.iterrows():
+
+        payee_id = _auditor_id_text(
+            row.get(
+                "id"
+            )
+        )
+
+        if not payee_id:
+            continue
+
+        request_id = _auditor_id_text(
+            row.get(
+                "purchase_request_id"
+            )
+        )
+
+        request_no = (
+            request_numbers.get(
+                request_id,
+                (
+                    f"Request #{request_id}"
+                    if request_id
+                    else "Unlinked Request"
+                ),
+            )
+        )
+
+        label = (
+            f"{request_no} ? "
+            f"Payee Detail #{payee_id}"
+        )
+
+        labels.append(
+            label
+        )
+
+        ids[
+            label
+        ] = payee_id
+
+    if not labels:
+
+        st.info(
+            "No selectable payee details were found."
+        )
+
+        return
+
+    selected_label = st.selectbox(
+        "Select payment bank record",
+        labels,
+        key="auditor_v4_bank_record",
+    )
+
+    selected_id = ids[
+        selected_label
+    ]
+
+    matching = payees[
+        payees[
+            "id"
+        ]
+        .astype(str)
+        .str.replace(
+            r"\.0$",
+            "",
+            regex=True,
+        )
+        .eq(
+            selected_id
+        )
+    ]
+
+    if matching.empty:
+
+        st.error(
+            "The selected bank record could not be loaded."
+        )
+
+        return
+
+    row = matching.iloc[
+        0
+    ]
+
+    request_id = _auditor_id_text(
+        row.get(
+            "purchase_request_id"
+        )
+    )
+
+    request_no = request_numbers.get(
+        request_id,
+        (
+            f"Request #{request_id}"
+            if request_id
+            else "Unlinked Request"
+        ),
+    )
+
+    _auditor_masked_bank_preview(
+        row,
+        request_no,
+    )
+
+    state_key = (
+        "auditor_v4_bank_reveal"
+    )
+
+    state = (
+        st.session_state.get(
+            state_key
+        )
+        or {}
+    )
+
+    expires_at = float(
+        state.get(
+            "expires_at"
+        )
+        or 0
+    )
+
+    now = time.time()
+
+    if (
+        state
+        and now >= expires_at
+    ):
+
+        st.session_state.pop(
+            state_key,
+            None,
+        )
+
+        state = {}
+
+        st.info(
+            "Unmasked bank details have been automatically hidden."
+        )
+
+    reason = st.text_area(
+        "Reason for viewing unmasked bank details",
+        placeholder=(
+            "Enter the audit purpose for accessing this payment record."
+        ),
+        key=(
+            "auditor_v4_bank_reason_"
+            + selected_id
+        ),
+    )
+
+    if st.button(
+        "Reveal Unmasked Bank Details",
+        type="primary",
+        disabled=not reason.strip(),
+        key=(
+            "auditor_v4_bank_reveal_button_"
+            + selected_id
+        ),
+    ):
+
+        try:
+
+            revealed = (
+                _auditor_decrypted_bank_frame(
+                    row,
+                    request_no,
+                )
+            )
+
+            _auditor_audit_payee_reveal(
+                int(
+                    selected_id
+                ),
+                actor_user_id,
+                actor_role,
+                reason.strip(),
+            )
+
+        except Exception:
+
+            st.error(
+                (
+                    "The bank details could not be securely revealed. "
+                    "No unmasked values were displayed."
+                )
+            )
+
+            return
+
+        st.session_state[
+            state_key
+        ] = {
+            "payee_id":
+                selected_id,
+
+            "expires_at":
+                time.time()
+                + AUDITOR_BANK_REVEAL_SECONDS,
+        }
+
+        st.rerun()
+
+    state = (
+        st.session_state.get(
+            state_key
+        )
+        or {}
+    )
+
+    active = (
+        str(
+            state.get(
+                "payee_id"
+            )
+            or ""
+        )
+        == selected_id
+        and time.time()
+        < float(
+            state.get(
+                "expires_at"
+            )
+            or 0
+        )
+    )
+
+    if not active:
+        return
+
+    # Force lightweight reruns while confidential data is visible
+    # so expiry does not depend on the user clicking another control.
+    try:
+
+        from streamlit_autorefresh import (
+            st_autorefresh,
+        )
+
+        st_autorefresh(
+            interval=2000,
+            key=(
+                "auditor_v4_bank_expiry_"
+                + selected_id
+            ),
+        )
+
+    except Exception:
+
+        pass
+
+    remaining = max(
+        0,
+        int(
+            float(
+                state[
+                    "expires_at"
+                ]
+            )
+            - time.time()
+        ),
+    )
+
+    try:
+
+        revealed = (
+            _auditor_decrypted_bank_frame(
+                row,
+                request_no,
+            )
+        )
+
+    except Exception:
+
+        st.session_state.pop(
+            state_key,
+            None,
+        )
+
+        st.error(
+            "The encrypted bank details could not be decrypted."
+        )
+
+        return
+
+    st.success(
+        (
+            "Unmasked bank details are visible. "
+            f"They will be hidden automatically in {remaining} seconds."
+        )
+    )
+
+    st.dataframe(
+        revealed,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    _auditor_download_surface(
+        f"{request_no} Bank Details",
+        revealed,
+        mask=False,
+        namespace=(
+            "unmasked_bank_"
+            + selected_id
+        ),
+    )
+
+    if st.button(
+        "Hide Bank Details Now",
+        key=(
+            "auditor_v4_hide_bank_"
+            + selected_id
+        ),
+    ):
+
+        st.session_state.pop(
+            state_key,
+            None,
+        )
+
+        st.rerun()
+
+
+# Put the bank review controls at the TOP of the dedicated page.
+# The V3 alias still points to the original V2 generic renderer.
+def render_schema_audit_page(
+    title: str,
+) -> None:
+
+    if (
+        title
+        == "Payment Payee / Bank Detail Access Audit"
+    ):
+
+        _auditor_bank_detail_reveal_panel()
+
+        st.divider()
+
+    _render_schema_audit_page_v2(
+        title
+    )

@@ -512,3 +512,104 @@ def test_auditor_v3_bank_reveal_is_controlled_and_audited():
     ):
 
         assert token in source
+
+def test_auditor_v4_downloads_do_not_rerun():
+
+    source = AUDITOR.read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "PROCUREFLOW_AUDITOR_DOWNLOAD_REVEAL_UX_V4"
+        in source
+    )
+
+    assert (
+        'on_click="ignore"'
+        in source
+    )
+
+    assert (
+        "_auditor_validate_download_payload"
+        in source
+    )
+
+
+def test_auditor_v4_bank_preview_and_short_timeout():
+
+    source = AUDITOR.read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "AUDITOR_BANK_REVEAL_SECONDS = 60"
+        in source
+    )
+
+    assert (
+        "Bank Details ? Masked by Default"
+        in source
+    )
+
+    assert (
+        "Reveal Unmasked Bank Details"
+        in source
+    )
+
+    assert (
+        "st_autorefresh"
+        in source
+    )
+
+
+def test_auditor_v4_rejects_html_download_payload():
+
+    from modules import (
+        auditor_control_centre as auditor,
+    )
+
+    import pytest
+
+    with pytest.raises(
+        ValueError
+    ):
+
+        auditor._auditor_validate_download_payload(
+            b"<html><body>Error</body></html>",
+            "csv",
+        )
+
+
+def test_auditor_v4_excel_signature_is_valid():
+
+    import pandas as pd
+
+    from modules import (
+        auditor_control_centre as auditor,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "id": [1],
+            "created_at": [
+                pd.Timestamp(
+                    "2026-08-19T12:00:00Z"
+                )
+            ],
+        }
+    )
+
+    payload = auditor._auditor_excel_bytes(
+        frame
+    )
+
+    payload = (
+        auditor._auditor_validate_download_payload(
+            payload,
+            "xlsx",
+        )
+    )
+
+    assert payload.startswith(
+        b"PK"
+    )
