@@ -4751,7 +4751,7 @@ def _auditor_bank_detail_reveal_panel() -> None:
         )
 
         st_autorefresh(
-            interval=2000,
+            interval=10000,
             key=(
                 "auditor_v4_bank_expiry_"
                 + selected_id

@@ -561,6 +561,11 @@ def test_auditor_v4_bank_preview_and_short_timeout():
         in source
     )
 
+    assert (
+        "interval=10000"
+        in source.replace(" ", "")
+    )
+
 
 def test_auditor_v4_rejects_html_download_payload():
 
