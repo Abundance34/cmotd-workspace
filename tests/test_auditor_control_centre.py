@@ -313,3 +313,125 @@ def test_auditor_runtime_reads_do_not_mutate_database(
     finally:
 
         conn.close()
+
+def test_auditor_v2_routes_all_sidebar_sections():
+
+    workspace = WORKSPACE.read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "PROCUREFLOW_AUDITOR_ROUTING_V2"
+        in workspace
+    )
+
+    for label in (
+        "Audit Dashboard",
+        "Role Activity Mirrors",
+        "Transaction 360",
+        "User 360",
+        "Exception Centre",
+        "Approval Trails",
+        "Procurement Records",
+        "Delegated Approval Review",
+        "Gateway Pass Audit",
+        "Vendor History",
+        "Budget Audit",
+        "Facility / Utility Handoff Trail",
+        "Expense Review",
+        "Compliance Reports",
+        "Income",
+        "Settings",
+    ):
+
+        assert (
+            f'"{label}"'
+            in workspace
+        )
+
+
+def test_auditor_v2_has_missing_sidebar_schema_routes():
+
+    source = AUDITOR.read_text(
+        encoding="utf-8"
+    )
+
+    for label in (
+        "All Activity & Evidence Ledger",
+        "Sourcing & Vendor Quote Audit",
+        "Purchase Order & Logistics Evidence",
+        "Receiving Slips, Proof of Delivery & Returns",
+        "Finance, Invoice & Payment Audit",
+        "Payment Payee / Bank Detail Access Audit",
+        "Document Archive & Download Audit",
+        "Notification Delivery Audit",
+        "User & Security Audit",
+    ):
+
+        assert (
+            f'"{label}"'
+            in source
+        )
+
+
+def test_auditor_v2_event_window_starts_august_2026():
+
+    source = AUDITOR.read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        'AUDITOR_EVENT_WINDOW_START = '
+        '"2026-08-01T00:00:00Z"'
+        in source
+    )
+
+    assert (
+        "_auditor_filter_event_window"
+        in source
+    )
+
+
+def test_auditor_v2_approval_trails_are_request_linked():
+
+    source = AUDITOR.read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "render_enhanced_approval_trails"
+        in source
+    )
+
+    for label in (
+        "Request No",
+        "Request ID",
+        "Department / Project",
+        "Category",
+        "Request Amount",
+        "Current Request Status",
+        "Requester",
+    ):
+
+        assert (
+            f'"{label}"'
+            in source
+        )
+
+
+def test_auditor_v2_schema_exports_have_excel_csv_pdf():
+
+    source = AUDITOR.read_text(
+        encoding="utf-8"
+    )
+
+    for token in (
+        "Excel (.xlsx)",
+        "CSV (.csv)",
+        "PDF (.pdf)",
+        "_auditor_excel_bytes",
+        "_auditor_pdf_bytes",
+        "_auditor_schema_download",
+    ):
+
+        assert token in source

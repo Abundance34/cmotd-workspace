@@ -1857,3 +1857,1305 @@ def render_exception_centre() -> None:
         "Security / Account Signals",
         security,
     )
+
+# ============================================================
+# PROCUREFLOW_AUDITOR_INTERFACE_V2
+#
+# Auditor UI corrections:
+# - August 2026 onward event scope
+# - exact request linkage in Approval Trails
+# - Excel / CSV / PDF schema exports
+# - generic read-only evidence pages for sidebar sections
+# ============================================================
+
+AUDITOR_EVENT_WINDOW_START = "2026-08-01T00:00:00Z"
+
+
+READ_ONLY_TABLES = READ_ONLY_TABLES | {
+    "budgets",
+    "imported_legacy_documents",
+}
+
+
+AUDITOR_EVENT_TABLES = {
+    "audit_events",
+    "audit_logs",
+    "activity_logs",
+    "workflow_events",
+    "approval_history",
+    "approval_rescissions",
+}
+
+
+AUDITOR_SCHEMA_PAGES = {
+    "All Activity & Evidence Ledger": (
+        "audit_events",
+        "audit_logs",
+        "activity_logs",
+        "workflow_events",
+        "audit_chain_verifications",
+    ),
+
+    "Sourcing & Vendor Quote Audit": (
+        "sourcing_tasks",
+        "vendor_quotes",
+        "vendor_quote_items",
+        "vendor_documents",
+        "vendors",
+    ),
+
+    "Purchase Order & Logistics Evidence": (
+        "purchase_orders",
+        "purchase_order_items",
+        "logistics_documents",
+        "logistics_exceptions",
+    ),
+
+    "Receiving Slips, Proof of Delivery & Returns": (
+        "receiving_slips",
+        "receiving_slip_items",
+        "logistics_exceptions",
+        "logistics_documents",
+    ),
+
+    "Finance, Invoice & Payment Audit": (
+        "payments",
+        "invoices",
+        "invoice_items",
+        "receipt_records",
+        "receipt_items",
+        "expenses",
+        "cash_advances",
+    ),
+
+    "Payment Payee / Bank Detail Access Audit": (
+        "payment_payee_details",
+        "payment_payee_detail_versions",
+        "audit_events",
+        "audit_logs",
+    ),
+
+    "Document Archive & Download Audit": (
+        "attachments",
+        "imported_legacy_documents",
+        "vendor_documents",
+        "logistics_documents",
+        "receipt_records",
+        "receipt_document_versions",
+        "audit_events",
+    ),
+
+    "Notification Delivery Audit": (
+        "notifications",
+        "audit_events",
+        "audit_logs",
+    ),
+
+    "User & Security Audit": (
+        "users",
+        "user_sessions",
+        "user_availability",
+        "audit_events",
+        "audit_logs",
+    ),
+}
+
+
+def _auditor_filter_event_window(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+
+    if (
+        df is None
+        or df.empty
+    ):
+        return pd.DataFrame(
+            columns=(
+                []
+                if df is None
+                else df.columns
+            )
+        )
+
+    start = pd.Timestamp(
+        AUDITOR_EVENT_WINDOW_START
+    )
+
+    for column in (
+        "created_at",
+        "timestamp",
+        "event_at",
+        "occurred_at",
+        "approved_at",
+        "updated_at",
+        "submitted_at",
+    ):
+
+        if column not in df.columns:
+            continue
+
+        parsed = pd.to_datetime(
+            df[column],
+            errors="coerce",
+            utc=True,
+        )
+
+        if not parsed.notna().any():
+            continue
+
+        return (
+            df.loc[
+                parsed.ge(start)
+            ]
+            .copy()
+            .reset_index(
+                drop=True
+            )
+        )
+
+    return df.copy().reset_index(
+        drop=True
+    )
+
+
+def _auditor_export_key(
+    title: str,
+    df: pd.DataFrame,
+) -> str:
+
+    import hashlib
+
+    columns = "|".join(
+        str(column)
+        for column in df.columns
+    )
+
+    raw = (
+        str(title)
+        + "|"
+        + columns
+    )
+
+    return hashlib.sha1(
+        raw.encode(
+            "utf-8"
+        )
+    ).hexdigest()[:12]
+
+
+def _auditor_safe_filename(
+    title: str,
+) -> str:
+
+    import re
+
+    name = re.sub(
+        r"[^A-Za-z0-9_-]+",
+        "_",
+        str(title).strip(),
+    ).strip("_")
+
+    return (
+        name.lower()
+        or "audit_export"
+    )
+
+
+def _auditor_excel_bytes(
+    df: pd.DataFrame,
+) -> bytes:
+
+    from io import BytesIO
+
+    out = BytesIO()
+
+    with pd.ExcelWriter(
+        out,
+        engine="openpyxl",
+    ) as writer:
+
+        df.to_excel(
+            writer,
+            index=False,
+            sheet_name="Audit Data",
+        )
+
+    return out.getvalue()
+
+
+def _auditor_pdf_bytes(
+    df: pd.DataFrame,
+    title: str,
+) -> bytes:
+
+    from html import escape
+    from io import BytesIO
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import (
+        ParagraphStyle,
+        getSampleStyleSheet,
+    )
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        PageBreak,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    out = BytesIO()
+
+    page_width, _ = landscape(
+        A4
+    )
+
+    doc = SimpleDocTemplate(
+        out,
+        pagesize=landscape(A4),
+        rightMargin=8 * mm,
+        leftMargin=8 * mm,
+        topMargin=9 * mm,
+        bottomMargin=9 * mm,
+    )
+
+    styles = getSampleStyleSheet()
+
+    heading = ParagraphStyle(
+        "auditor_export_heading",
+        parent=styles["Heading1"],
+        fontSize=13,
+        leading=15,
+        spaceAfter=8,
+    )
+
+    small = ParagraphStyle(
+        "auditor_export_small",
+        parent=styles["Normal"],
+        fontSize=5.8,
+        leading=7,
+    )
+
+    story = [
+        Paragraph(
+            escape(
+                str(title)
+            ),
+            heading,
+        ),
+        Paragraph(
+            (
+                "ProcureFlow Auditor read-only evidence export. "
+                "Sensitive values are masked."
+            ),
+            small,
+        ),
+        Spacer(
+            1,
+            5,
+        ),
+    ]
+
+    if df.empty:
+
+        story.append(
+            Paragraph(
+                "No records.",
+                small,
+            )
+        )
+
+        doc.build(
+            story
+        )
+
+        return out.getvalue()
+
+    safe = df.fillna("").astype(str)
+
+    columns = list(
+        safe.columns
+    )
+
+    # Wide schemas are split into manageable column groups.
+    chunk_size = 7
+
+    chunks = [
+        columns[index:index + chunk_size]
+        for index in range(
+            0,
+            len(columns),
+            chunk_size,
+        )
+    ]
+
+    usable_width = (
+        page_width
+        - 16 * mm
+    )
+
+    for chunk_index, chunk in enumerate(
+        chunks
+    ):
+
+        if chunk_index:
+
+            story.append(
+                PageBreak()
+            )
+
+            story.append(
+                Paragraph(
+                    escape(
+                        f"{title} ? columns "
+                        f"{chunk_index * chunk_size + 1}"
+                        f"?"
+                        f"{chunk_index * chunk_size + len(chunk)}"
+                    ),
+                    heading,
+                )
+            )
+
+        matrix = [
+            [
+                Paragraph(
+                    f"<b>{escape(str(column))}</b>",
+                    small,
+                )
+                for column in chunk
+            ]
+        ]
+
+        for _, row in safe.iterrows():
+
+            matrix.append(
+                [
+                    Paragraph(
+                        escape(
+                            str(
+                                row[column]
+                            )
+                        ),
+                        small,
+                    )
+                    for column in chunk
+                ]
+            )
+
+        col_width = (
+            usable_width
+            / max(
+                1,
+                len(chunk),
+            )
+        )
+
+        table = Table(
+            matrix,
+            repeatRows=1,
+            colWidths=[
+                col_width
+                for _ in chunk
+            ],
+        )
+
+        table.setStyle(
+            TableStyle(
+                [
+                    (
+                        "BACKGROUND",
+                        (
+                            0,
+                            0,
+                        ),
+                        (
+                            -1,
+                            0,
+                        ),
+                        colors.HexColor(
+                            "#E8EEF8"
+                        ),
+                    ),
+                    (
+                        "GRID",
+                        (
+                            0,
+                            0,
+                        ),
+                        (
+                            -1,
+                            -1,
+                        ),
+                        0.25,
+                        colors.HexColor(
+                            "#CBD5E1"
+                        ),
+                    ),
+                    (
+                        "VALIGN",
+                        (
+                            0,
+                            0,
+                        ),
+                        (
+                            -1,
+                            -1,
+                        ),
+                        "TOP",
+                    ),
+                    (
+                        "LEFTPADDING",
+                        (
+                            0,
+                            0,
+                        ),
+                        (
+                            -1,
+                            -1,
+                        ),
+                        2,
+                    ),
+                    (
+                        "RIGHTPADDING",
+                        (
+                            0,
+                            0,
+                        ),
+                        (
+                            -1,
+                            -1,
+                        ),
+                        2,
+                    ),
+                    (
+                        "TOPPADDING",
+                        (
+                            0,
+                            0,
+                        ),
+                        (
+                            -1,
+                            -1,
+                        ),
+                        2,
+                    ),
+                    (
+                        "BOTTOMPADDING",
+                        (
+                            0,
+                            0,
+                        ),
+                        (
+                            -1,
+                            -1,
+                        ),
+                        2,
+                    ),
+                ]
+            )
+        )
+
+        story.append(
+            table
+        )
+
+    doc.build(
+        story
+    )
+
+    return out.getvalue()
+
+
+def _auditor_schema_download(
+    title: str,
+    df: pd.DataFrame,
+) -> None:
+
+    if (
+        df is None
+        or df.empty
+    ):
+        return
+
+    safe = _mask_sensitive(
+        df
+    )
+
+    key = _auditor_export_key(
+        title,
+        safe,
+    )
+
+    filename = _auditor_safe_filename(
+        title
+    )
+
+    choice = st.selectbox(
+        f"Export {title}",
+        [
+            "Excel (.xlsx)",
+            "CSV (.csv)",
+            "PDF (.pdf)",
+        ],
+        key=f"auditor_export_format_{key}",
+        label_visibility="collapsed",
+    )
+
+    if choice.startswith(
+        "Excel"
+    ):
+
+        payload = _auditor_excel_bytes(
+            safe
+        )
+
+        extension = "xlsx"
+
+        mime = (
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        )
+
+    elif choice.startswith(
+        "CSV"
+    ):
+
+        payload = safe.to_csv(
+            index=False
+        ).encode(
+            "utf-8-sig"
+        )
+
+        extension = "csv"
+
+        mime = "text/csv"
+
+    else:
+
+        payload = _auditor_pdf_bytes(
+            safe,
+            title,
+        )
+
+        extension = "pdf"
+
+        mime = "application/pdf"
+
+    st.download_button(
+        (
+            f"Download {title} "
+            f"{extension.upper()}"
+        ),
+        data=payload,
+        file_name=(
+            f"{filename}.{extension}"
+        ),
+        mime=mime,
+        key=(
+            f"auditor_export_"
+            f"{key}_{extension}"
+        ),
+        use_container_width=True,
+    )
+
+
+def _show(
+    title: str,
+    df: pd.DataFrame,
+) -> None:
+
+    st.markdown(
+        f"#### {title}"
+    )
+
+    if (
+        df is None
+        or df.empty
+    ):
+
+        st.info(
+            "No records found."
+        )
+
+        return
+
+    safe = _mask_sensitive(
+        df
+    )
+
+    st.dataframe(
+        safe,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    _auditor_schema_download(
+        title,
+        safe,
+    )
+
+
+# Preserve the original all-history activity builder and scope
+# its visible result to August 2026 onward.
+_activity_feed_all_history = activity_feed
+
+
+def activity_feed(
+    limit: int = 300,
+) -> pd.DataFrame:
+
+    source = _activity_feed_all_history(
+        5000
+    )
+
+    if source.empty:
+        return source
+
+    if "Timestamp" not in source.columns:
+        return source.head(
+            limit
+        ).reset_index(
+            drop=True
+        )
+
+    timestamps = pd.to_datetime(
+        source["Timestamp"],
+        errors="coerce",
+        utc=True,
+    )
+
+    start = pd.Timestamp(
+        AUDITOR_EVENT_WINDOW_START
+    )
+
+    source = source.loc[
+        timestamps.ge(start)
+    ].copy()
+
+    return source.head(
+        limit
+    ).reset_index(
+        drop=True
+    )
+
+
+def _auditor_request_id_series(
+    df: pd.DataFrame,
+) -> pd.Series:
+
+    result = pd.Series(
+        None,
+        index=df.index,
+        dtype="object",
+    )
+
+    for column in (
+        "request_id",
+        "purchase_request_id",
+    ):
+
+        if column not in df.columns:
+            continue
+
+        values = (
+            df[column]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+        result = result.where(
+            result.notna()
+            & result.astype(str).ne(""),
+            values,
+        )
+
+    if (
+        "entity_id" in df.columns
+        and "entity_type" in df.columns
+    ):
+
+        entity_type = (
+            df["entity_type"]
+            .fillna("")
+            .astype(str)
+            .str.casefold()
+        )
+
+        entity_id = (
+            df["entity_id"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+        request_mask = (
+            entity_type.str.contains(
+                "request",
+                regex=False,
+            )
+            & result.fillna("")
+            .astype(str)
+            .str.strip()
+            .eq("")
+        )
+
+        result.loc[
+            request_mask
+        ] = entity_id.loc[
+            request_mask
+        ]
+
+    return (
+        result
+        .fillna("")
+        .astype(str)
+        .str.replace(
+            r"\.0$",
+            "",
+            regex=True,
+        )
+        .str.strip()
+    )
+
+
+def _auditor_request_value(
+    row: pd.Series,
+    names: tuple[str, ...],
+) -> Any:
+
+    for name in names:
+
+        if name not in row.index:
+            continue
+
+        value = row.get(
+            name
+        )
+
+        if value is None:
+            continue
+
+        if str(
+            value
+        ).strip() in {
+            "",
+            "nan",
+            "None",
+        }:
+            continue
+
+        return value
+
+    return ""
+
+
+def _auditor_enrich_request_reference(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+
+    if (
+        df is None
+        or df.empty
+    ):
+
+        return pd.DataFrame(
+            columns=(
+                []
+                if df is None
+                else df.columns
+            )
+        )
+
+    result = df.copy()
+
+    request_ids = _auditor_request_id_series(
+        result
+    )
+
+    requests = _load_table(
+        "purchase_requests",
+        5000,
+    )
+
+    request_map = {}
+
+    if (
+        not requests.empty
+        and "id" in requests.columns
+    ):
+
+        for _, row in requests.iterrows():
+
+            key = str(
+                row.get(
+                    "id"
+                )
+            ).replace(
+                ".0",
+                "",
+            ).strip()
+
+            request_map[
+                key
+            ] = row
+
+    request_no = []
+    department = []
+    category = []
+    amount = []
+    request_status = []
+    requester = []
+
+    for request_id in request_ids:
+
+        request = request_map.get(
+            str(
+                request_id
+            ),
+        )
+
+        if request is None:
+
+            request_no.append("")
+            department.append("")
+            category.append("")
+            amount.append("")
+            request_status.append("")
+            requester.append("")
+
+            continue
+
+        request_no.append(
+            _auditor_request_value(
+                request,
+                (
+                    "request_no",
+                    "request_number",
+                    "reference",
+                ),
+            )
+        )
+
+        department.append(
+            _auditor_request_value(
+                request,
+                (
+                    "department_project",
+                    "department",
+                    "project",
+                ),
+            )
+        )
+
+        category.append(
+            _auditor_request_value(
+                request,
+                (
+                    "category",
+                    "request_category",
+                ),
+            )
+        )
+
+        amount.append(
+            _auditor_request_value(
+                request,
+                (
+                    "estimated_amount",
+                    "approved_amount",
+                    "amount",
+                    "total_amount",
+                ),
+            )
+        )
+
+        request_status.append(
+            _auditor_request_value(
+                request,
+                (
+                    "status",
+                ),
+            )
+        )
+
+        requester.append(
+            _auditor_request_value(
+                request,
+                (
+                    "requested_by",
+                    "created_by",
+                    "requester_user_id",
+                    "user_id",
+                ),
+            )
+        )
+
+    result.insert(
+        0,
+        "Request No",
+        request_no,
+    )
+
+    result.insert(
+        1,
+        "Request ID",
+        request_ids,
+    )
+
+    result.insert(
+        2,
+        "Department / Project",
+        department,
+    )
+
+    result.insert(
+        3,
+        "Category",
+        category,
+    )
+
+    result.insert(
+        4,
+        "Request Amount",
+        amount,
+    )
+
+    result.insert(
+        5,
+        "Current Request Status",
+        request_status,
+    )
+
+    result.insert(
+        6,
+        "Requester",
+        requester,
+    )
+
+    return result
+
+
+def render_enhanced_approval_trails() -> None:
+
+    st.subheader(
+        "Approval Trails"
+    )
+
+    st.caption(
+        "Read-only approval evidence from 1 August 2026 onward. "
+        "Each approval is linked to the exact procurement request "
+        "where a request reference can be resolved."
+    )
+
+    history = _load_table(
+        "approval_history",
+        5000,
+    )
+
+    history = _auditor_filter_event_window(
+        history
+    )
+
+    history = _auditor_enrich_request_reference(
+        history
+    )
+
+    _show(
+        "Approval History ? Request Linked",
+        history,
+    )
+
+    rescissions = _load_table(
+        "approval_rescissions",
+        5000,
+    )
+
+    rescissions = _auditor_filter_event_window(
+        rescissions
+    )
+
+    rescissions = _auditor_enrich_request_reference(
+        rescissions
+    )
+
+    _show(
+        "Approval Rescissions ? Request Linked",
+        rescissions,
+    )
+
+    audit_rows = _load_table(
+        "audit_events",
+        5000,
+    )
+
+    audit_rows = _auditor_filter_event_window(
+        audit_rows
+    )
+
+    if not audit_rows.empty:
+
+        search_columns = [
+            column
+            for column in (
+                "action",
+                "event",
+                "event_type",
+                "status_before",
+                "status_after",
+                "reason",
+                "details",
+                "message",
+            )
+            if column in audit_rows.columns
+        ]
+
+        if search_columns:
+
+            combined = (
+                audit_rows[
+                    search_columns
+                ]
+                .fillna("")
+                .astype(str)
+                .agg(
+                    " ".join,
+                    axis=1,
+                )
+                .str.casefold()
+            )
+
+            approval_mask = (
+                combined.str.contains(
+                    "approv",
+                    regex=False,
+                )
+                | combined.str.contains(
+                    "reject",
+                    regex=False,
+                )
+                | combined.str.contains(
+                    "rescind",
+                    regex=False,
+                )
+            )
+
+            audit_rows = audit_rows.loc[
+                approval_mask
+            ].copy()
+
+    audit_rows = _auditor_enrich_request_reference(
+        audit_rows
+    )
+
+    _show(
+        "Approval Audit Events ? Request Linked",
+        audit_rows,
+    )
+
+
+def render_schema_audit_page(
+    title: str,
+) -> None:
+
+    st.subheader(
+        title
+    )
+
+    tables = AUDITOR_SCHEMA_PAGES.get(
+        title,
+        (),
+    )
+
+    if not tables:
+
+        st.warning(
+            "No read-only schema mapping is configured "
+            "for this Auditor page."
+        )
+
+        return
+
+    if any(
+        table in AUDITOR_EVENT_TABLES
+        for table in tables
+    ):
+
+        st.caption(
+            "Audit/activity event schemas are shown from "
+            "1 August 2026 onward. Older evidence remains "
+            "stored in the database."
+        )
+
+    else:
+
+        st.caption(
+            "Read-only evidence view. Sensitive values "
+            "are masked before display and export."
+        )
+
+    for table in tables:
+
+        df = _load_table(
+            table,
+            5000,
+        )
+
+        if table in AUDITOR_EVENT_TABLES:
+
+            df = _auditor_filter_event_window(
+                df
+            )
+
+        _show(
+            table.replace(
+                "_",
+                " ",
+            ).title(),
+            df,
+        )
+
+
+def render_auditor_dashboard() -> None:
+
+    st.subheader(
+        "Audit & Compliance Command Centre"
+    )
+
+    st.caption(
+        "Read-only oversight across ProcureFlow. "
+        "Audit and activity event counts begin on "
+        "1 August 2026; older evidence remains retained."
+    )
+
+    events = _auditor_filter_event_window(
+        _load_table(
+            "audit_events",
+            5000,
+        )
+    )
+
+    users = _load_table(
+        "users",
+        5000,
+    )
+
+    requests = _load_table(
+        "purchase_requests",
+        5000,
+    )
+
+    rescissions = _auditor_filter_event_window(
+        _load_table(
+            "approval_rescissions",
+            5000,
+        )
+    )
+
+    active_users = len(
+        users
+    )
+
+    if (
+        not users.empty
+        and "is_active" in users.columns
+    ):
+
+        active_users = int(
+            users["is_active"]
+            .astype(str)
+            .str.casefold()
+            .isin(
+                {
+                    "1",
+                    "true",
+                    "yes",
+                    "active",
+                }
+            )
+            .sum()
+        )
+
+    deleted = 0
+
+    if (
+        not requests.empty
+        and "status" in requests.columns
+    ):
+
+        deleted = int(
+            requests["status"]
+            .astype(str)
+            .str.casefold()
+            .eq(
+                "deleted draft"
+            )
+            .sum()
+        )
+
+    c1, c2, c3, c4 = st.columns(
+        4
+    )
+
+    c1.metric(
+        "Audit Events Since 01 Aug",
+        len(
+            events
+        ),
+    )
+
+    c2.metric(
+        "Active Users",
+        active_users,
+    )
+
+    c3.metric(
+        "Deleted Drafts",
+        deleted,
+    )
+
+    c4.metric(
+        "Approval Rescissions Since 01 Aug",
+        len(
+            rescissions
+        ),
+    )
+
+    st.markdown(
+        "### Cross-role visibility"
+    )
+
+    coverage = pd.DataFrame(
+        [
+            {
+                "Role":
+                    role,
+
+                "Auditor visibility":
+                    ROLE_PURPOSE[
+                        role
+                    ],
+
+                "Mode":
+                    "READ ONLY",
+            }
+            for role in ROLE_MIRRORS
+        ]
+    )
+
+    _show(
+        "Role Coverage",
+        coverage,
+    )
+
+    feed = activity_feed(
+        250
+    )
+
+    _show(
+        "Activity Since 01 August 2026",
+        feed,
+    )

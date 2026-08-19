@@ -12757,3 +12757,158 @@ def audit_workspace():
         return
 
     _legacy_audit_workspace()
+
+# ============================================================
+# PROCUREFLOW_AUDITOR_ROUTING_V2
+#
+# Exact sidebar routing for every Auditor navigation item.
+# Unknown labels no longer silently fall back to Dashboard.
+# ============================================================
+
+from modules.auditor_control_centre import (
+    AUDITOR_SCHEMA_PAGES as _auditor_schema_pages_v2,
+    render_enhanced_approval_trails as _auditor_approval_trails_v2,
+    render_schema_audit_page as _auditor_schema_page_v2,
+)
+
+
+def audit_workspace():
+
+    role_header(
+        "Audit & Compliance Workspace",
+        (
+            "Read-only review of procurement, finance, "
+            "gateway pass, history and audit evidence."
+        ),
+    )
+
+    section = st.session_state.get(
+        "audit_section",
+        "Audit Dashboard",
+    )
+
+    # New Control Centre pages.
+    if section == "Audit Dashboard":
+
+        _auditor_command_dashboard()
+
+        return
+
+    if section == "Role Activity Mirrors":
+
+        _auditor_role_mirrors()
+
+        return
+
+    if section == "Transaction 360":
+
+        _auditor_transaction_360()
+
+        return
+
+    if section == "User 360":
+
+        _auditor_user_360()
+
+        return
+
+    if section == "Exception Centre":
+
+        _auditor_exception_centre()
+
+        return
+
+    # Approval Trails gets an explicit request-linked audit view.
+    if section == "Approval Trails":
+
+        _auditor_approval_trails_v2()
+
+        return
+
+    # Sidebar areas that did not exist in the older legacy router
+    # now use dedicated read-only schema views.
+    if section in _auditor_schema_pages_v2:
+
+        _auditor_schema_page_v2(
+            section
+        )
+
+        return
+
+    # Existing specialist pages that already have working
+    # read-only Auditor implementations are preserved.
+    if section == "Procurement Records":
+
+        if "auditor_records_page" in globals():
+
+            auditor_records_page()
+
+        else:
+
+            all_records_page()
+
+        return
+
+    if section == "Delegated Approval Review":
+
+        delegated_approval_review_page()
+
+        return
+
+    if section == "Gateway Pass Audit":
+
+        gateway_pass_audit_page()
+
+        return
+
+    if section == "Vendor History":
+
+        vendor_history_page()
+
+        return
+
+    if section == "Budget Audit":
+
+        budget_audit_page()
+
+        return
+
+    if section == "Facility / Utility Handoff Trail":
+
+        facility_handoff_trail_page()
+
+        return
+
+    if section == "Expense Review":
+
+        expense_review_page()
+
+        return
+
+    if section == "Compliance Reports":
+
+        compliance_reports()
+
+        return
+
+    if section == "Income":
+
+        income_page(
+            manage=False
+        )
+
+        return
+
+    if section == "Settings":
+
+        settings_page()
+
+        return
+
+    # Never silently send an unknown Auditor page to Dashboard.
+    st.error(
+        (
+            "This Auditor navigation item is not mapped: "
+            f"{section}"
+        )
+    )
