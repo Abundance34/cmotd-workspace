@@ -1,4 +1,4 @@
 {
-  "installCommand": "npm install --include=dev",
+  "installCommand": "sh install-vercel.sh",
   "buildCommand": "npm run build"
 }
