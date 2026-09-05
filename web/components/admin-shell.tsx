@@ -14,6 +14,7 @@ import {
 } from "@/components/admin-controls";
 import { AdminDirectoryControls, AdminRolePermissionControls } from "@/components/admin-directory-controls";
 import { AdminAvailabilityControls } from "@/components/admin-availability-controls";
+import { IncomeWorkspace } from "@/components/income-workspace";
 
 type ShellUser = { id: number; fullName: string; username: string; role: "Admin" };
 
@@ -99,7 +100,7 @@ export function AdminShell({user,data,securityStatus}:{user:ShellUser;data:Admin
   else if(section==="Roles & Permissions")content=<Stack><AdminRolePermissionControls data={data} securityStatus={securityStatus}/><RolesPermissions data={data}/></Stack>;
   else if(section==="Security & Access Management")content=<Stack><AdminUserManagementControls data={data} securityStatus={securityStatus}/><h3 className="admin-subhead">Active and historical sessions</h3><SessionsTable data={data}/></Stack>;
   else if(section==="Budget Tracker")content=<BudgetTable data={data}/>;
-  else if(section==="Income")content=<Empty text="Income remains in the migration queue. No Admin-side income mutation has been introduced."/>;
+  else if(section==="Income")content=<IncomeWorkspace role="Admin"/>;
   else if(section==="Approval Configuration")content=<AdminApprovalConfigurationControls data={data} securityStatus={securityStatus}/>;
   else if(section==="Import Center")content=<Empty text="The migrated production database contains no imported legacy document rows. A Vercel-compatible upload/import storage path remains to be ported before imports are re-enabled."/>;
   else if(section==="All Procurement Records")content=<Stack><RequestsTable data={data}/><h3 className="admin-subhead">Purchase orders</h3><PurchaseOrdersTable data={data}/><h3 className="admin-subhead">Payments</h3><PaymentsTable data={data}/></Stack>;
