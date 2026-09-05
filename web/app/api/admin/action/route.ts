@@ -16,6 +16,7 @@ import {
   updateAdminRolePermission,
   type AdminPermissionChange,
 } from "@/lib/procureflow/admin-user-actions";
+import { reviewAdminAvailability, type AdminAvailabilityAction } from "@/lib/procureflow/admin-availability-actions";
 
 type Body = {
   action?: string;
@@ -34,6 +35,13 @@ type Body = {
   forcePasswordChange?: boolean;
   permission?: string;
   permissionChange?: AdminPermissionChange;
+  availabilityId?: number;
+  availabilityAction?: AdminAvailabilityAction;
+  adminNote?: string;
+  delegateRole?: string | null;
+  delegateUserId?: number | null;
+  startDate?: string | null;
+  endDate?: string | null;
 };
 
 export async function POST(request: Request) {
@@ -92,6 +100,16 @@ export async function POST(request: Request) {
         permission: String(body?.permission || ""),
         change: String(body?.permissionChange || "") as AdminPermissionChange,
         reason: String(body?.reason || ""),
+      });
+    } else if (action === "availability-review") {
+      result = await reviewAdminAvailability(user, {
+        availabilityId: Number(body?.availabilityId),
+        action: String(body?.availabilityAction || "") as AdminAvailabilityAction,
+        adminNote: String(body?.adminNote || ""),
+        delegateRole: body?.delegateRole == null ? null : String(body.delegateRole),
+        delegateUserId: body?.delegateUserId == null ? null : Number(body.delegateUserId),
+        startDate: body?.startDate == null ? null : String(body.startDate),
+        endDate: body?.endDate == null ? null : String(body.endDate),
       });
     } else if (action === "set-approval-limit") {
       result = await setProcurementManagerApprovalLimit(
