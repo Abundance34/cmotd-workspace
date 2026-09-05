@@ -12,6 +12,7 @@ import "./settings.css";
 import "./parity.css";
 import "./minia-theme.css";
 import "./minia-theme-polish.css";
+import "./minia-theme-controls.css";
 
 export const metadata: Metadata = {
   title: "ProcureFlow",
