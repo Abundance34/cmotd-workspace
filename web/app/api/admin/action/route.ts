@@ -8,6 +8,7 @@ import {
   type AdminRequestInterventionAction,
   type AdminUserSecurityAction,
 } from "@/lib/procureflow/admin-actions";
+import { rescindRequestApproval } from "@/lib/procureflow/admin-rescission";
 
 type Body = {
   action?: string;
@@ -58,6 +59,12 @@ export async function POST(request: Request) {
         String(body?.interventionAction || "") as AdminRequestInterventionAction,
         String(body?.reason || ""),
         body?.targetProcurementManagerId == null ? null : Number(body.targetProcurementManagerId),
+      );
+    } else if (action === "rescind-approval") {
+      result = await rescindRequestApproval(
+        user,
+        Number(body?.requestId),
+        String(body?.reason || ""),
       );
     } else {
       return NextResponse.json({ error: "Choose a valid Admin control action." }, { status: 400 });
