@@ -30,7 +30,8 @@ else if (!shell.includes(facilityApprovedRegister)) throw new Error("Cannot find
 
 fs.writeFileSync(shellPath, shell, "utf8");
 
-// Keep duplicate-account fingerprinting compatible with the existing Facility payee workflow.
+// Keep duplicate-account fingerprinting compatible with the existing Facility payee workflow,
+// and avoid generic type arguments on the intentionally untyped transaction helper.
 {
   const draftPath = path.join(root, "lib/procureflow/request-draft-actions.ts");
   let source = fs.readFileSync(draftPath, "utf8");
@@ -38,7 +39,24 @@ fs.writeFileSync(shellPath, shell, "utf8");
   const newFingerprint = 'createHmac("sha256", activeAuditSigningKey()).update(`fingerprint:${payee.accountNumber.replace(/\\s+/g, "").toUpperCase()}`, "utf8").digest("hex")';
   if (source.includes(oldFingerprint)) source = source.replace(oldFingerprint, newFingerprint);
   else if (!source.includes(newFingerprint)) throw new Error("Cannot find request draft account fingerprint logic.");
+  source = source.replaceAll('tx<{ count: number }[]>', 'tx').replaceAll('tx<{ id: number }[]>', 'tx');
   fs.writeFileSync(draftPath, source, "utf8");
+}
+
+// Keep state-derived request ids narrowed inside async editor callbacks and ensure a new editor always has one line.
+for (const relativePath of ["components/facility-request-register.tsx", "components/procurement-request-register.tsx"]) {
+  const file = path.join(root, relativePath);
+  let source = fs.readFileSync(file, "utf8");
+  source = source.replaceAll('loadDetail(selectedId)', 'loadDetail(Number(selectedId))');
+  fs.writeFileSync(file, source, "utf8");
+}
+{
+  const file = path.join(root, "components/request-draft-editor.tsx");
+  let source = fs.readFileSync(file, "utf8");
+  const oldItems = '  const [items, setItems] = useState<Item[]>(() => (detail?.items || []).map((item: any) => ({\n    itemName: String(item.item_name || ""), description: String(item.description || ""), itemCategory: String(item.category || ""), suggestedVendor: String(item.suggested_vendor || ""), quantity: String(item.quantity ?? 1), unitPrice: String(item.unit_price ?? ""),\n  })) || [blankItem()]);';
+  const newItems = '  const [items, setItems] = useState<Item[]>(() => {\n    const mapped = (detail?.items || []).map((item: any) => ({\n      itemName: String(item.item_name || ""), description: String(item.description || ""), itemCategory: String(item.category || ""), suggestedVendor: String(item.suggested_vendor || ""), quantity: String(item.quantity ?? 1), unitPrice: String(item.unit_price ?? ""),\n    }));\n    return mapped.length ? mapped : [blankItem()];\n  });';
+  if (source.includes(oldItems)) source = source.replace(oldItems, newItems);
+  fs.writeFileSync(file, source, "utf8");
 }
 
 // The configured policy is authoritative. The fallback is aligned with the migration default.
