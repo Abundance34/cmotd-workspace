@@ -12,6 +12,7 @@ export type CurrentUser = {
   username: string;
   fullName: string;
   role: ProcureFlowRole;
+  mustChangePassword: boolean;
 };
 
 function decode(value: string) {
@@ -62,8 +63,9 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
     username: string;
     full_name: string;
     role: string;
+    must_change_password: boolean | null;
   }[]>`
-    SELECT u.id, u.username, u.full_name, u.role
+    SELECT u.id, u.username, u.full_name, u.role, COALESCE(u.must_change_password,FALSE) must_change_password
     FROM user_sessions s
     JOIN users u ON u.id = s.user_id
     WHERE s.session_token = ${tokenHash}
@@ -78,5 +80,11 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
   const row = rows[0];
   if (!row || !isProcureFlowRole(row.role)) return null;
   await sql`UPDATE user_sessions SET last_seen_at = NOW(), updated_at = NOW() WHERE session_token = ${tokenHash}`;
-  return { id: Number(row.id), username: row.username, fullName: row.full_name, role: row.role };
+  return {
+    id: Number(row.id),
+    username: row.username,
+    fullName: row.full_name,
+    role: row.role,
+    mustChangePassword: Boolean(row.must_change_password),
+  };
 }
