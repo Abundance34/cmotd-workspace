@@ -74,8 +74,9 @@ function replaceRequired(source, search, replacement, label) {
     );
   }
 
-  // Facility register unread dots should use the same resolved targets as the rest of the shell.
-  source = source.replaceAll('notifications={parityData.notifications}', 'notifications={standardNotifications}');
+  // Facility request-level unread dots live inside FacilitySection, where the shell-level
+  // standardNotifications variable is intentionally out of scope. Keep the raw list there:
+  // request dots key by entity id/type, not by section target, so no routing normalization is needed.
 
   // Standard sidebar unread badge for every role.
   const rawUnread = 'parityData.notifications.filter((n:any)=>!n.is_read&&String(n.section_target||"")===item).length';
