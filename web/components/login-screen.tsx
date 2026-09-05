@@ -1,15 +1,28 @@
 "use client";
 
 import Image from "next/image";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Eye, EyeOff, LockKeyhole, UserRound } from "lucide-react";
+import { ArrowRight, Eye, EyeOff, LockKeyhole, Moon, Sun, UserRound } from "lucide-react";
 
 export function LoginScreen({ previewAvailable }: { previewAvailable: boolean }) {
   const router = useRouter();
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [theme, setTheme] = useState<"light" | "dark">("light");
+
+  useEffect(() => {
+    const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+    setTheme(current);
+  }, []);
+
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    document.documentElement.dataset.theme = next;
+    window.localStorage.setItem("procureflow-theme", next);
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -37,6 +50,9 @@ export function LoginScreen({ previewAvailable }: { previewAvailable: boolean })
 
   return (
     <main className="login-page">
+      <button type="button" className="login-theme-toggle" onClick={toggleTheme} aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}>
+        {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+      </button>
       <section className="login-card">
         <div className="login-art" aria-hidden="true">
           <Image src="/branding/cmotd_login_left_panel.webp" alt="" fill priority sizes="(max-width: 900px) 0px, 50vw" />
