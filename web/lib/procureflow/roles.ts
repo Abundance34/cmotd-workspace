@@ -44,9 +44,9 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
   "Procurement Manager": {
     title: "Procurement Navigation",
     sections: [
-      "Operations Dashboard", "Purchase Requests", "Low-Value Approvals", "Utility Head / Facility Head Inbox",
-      "Import Center", "Sourcing", "Vendor Quotes", "Vendor Recommendation", "Commercial PO Management",
-      "Vendors", "Gateway Pass Review", "Post-Payment Closure", "Availability / Away Notice",
+      "Operations Dashboard", "Create Request Draft", "My Draft Requests", "Purchase Requests", "Low-Value Approvals",
+      "Utility Head / Facility Head Inbox", "Import Center", "Sourcing", "Vendor Quotes", "Vendor Recommendation",
+      "Commercial PO Management", "Vendors", "Gateway Pass Review", "Post-Payment Closure", "Availability / Away Notice",
       "Procurement Documents", "Procurement Reports", "Income", "My Activity History", "Settings",
     ],
   },
