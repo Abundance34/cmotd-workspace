@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import "./live-data.css";
 import "./facility.css";
+import "./approver.css";
 
 export const metadata: Metadata = {
   title: "ProcureFlow",
