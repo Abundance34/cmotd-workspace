@@ -7,6 +7,7 @@ import { AlertTriangle, ChevronRight, Circle, FileSearch, LogOut, ShieldCheck } 
 import { ROLE_LABELS, ROLE_LANDING, ROLE_SECTIONS } from "@/lib/procureflow/roles";
 import type { AuditorDashboardData } from "@/lib/procureflow/auditor-data";
 import type { SecurityMigrationStatus } from "@/lib/procureflow/security-check";
+import { IncomeWorkspace } from "@/components/income-workspace";
 
 type ShellUser = { id: number; fullName: string; username: string; role: "Auditor" };
 
@@ -191,7 +192,7 @@ export function AuditorShell({ user, data, securityStatus }: { user: ShellUser; 
     <article><span>Active v2 chain</span><strong>{securityStatus.activeAuditChainStarted ? "Started" : "Not started"}</strong><small>{securityStatus.activeAuditKeyVerified ? "Key verified" : "Write guard locked"}</small></article>
     <article><span>Open logistics exceptions</span><strong>{data.metrics.openLogisticsExceptions}</strong><small>Current operational exceptions</small></article>
   </div>;
-  else if (section === "Income") content = <Empty text="Income remains in the migration queue. No Auditor-side income write action is being introduced." />;
+  else if (section === "Income") content = <IncomeWorkspace role="Auditor" />;
   else if (section === "Settings") content = <Empty text="Shared account settings remain in the migration queue." />;
 
   return <main className="app-frame">
