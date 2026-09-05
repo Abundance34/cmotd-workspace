@@ -60,7 +60,7 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
                payment_readiness_status, verification_status, confirmed_at,
                verified_at, updated_at
         FROM payment_payee_details
-        WHERE purchase_request_id = ${requestId} AND COALESCE(is_current, TRUE) = TRUE
+        WHERE purchase_request_id = ${requestId}
         ORDER BY updated_at DESC, id DESC
         LIMIT 1
       `,
