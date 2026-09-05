@@ -9,7 +9,10 @@ RUN npm install
 
 COPY . .
 
-RUN chmod +x /app/scripts/local-entrypoint.sh
+# Windows Git checkouts can convert shell scripts to CRLF. Normalize them inside
+# the Linux image so /bin/sh can execute the entrypoint reliably.
+RUN find /app/scripts -type f -name '*.sh' -exec sed -i 's/\r$//' {} + \
+    && chmod +x /app/scripts/local-entrypoint.sh
 
 EXPOSE 3000
 
