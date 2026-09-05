@@ -20,7 +20,14 @@ export default async function ProcureFlowApp() {
       getLogisticsPOItems(),
       getSecurityMigrationStatus(),
     ]);
-    return <LogisticsShell user={user} data={logisticsData} items={logisticsItems} securityStatus={securityStatus} />;
+    return (
+      <LogisticsShell
+        user={{ id: user.id, fullName: user.fullName, username: user.username, role: "Logistics Officer" }}
+        data={logisticsData}
+        items={logisticsItems}
+        securityStatus={securityStatus}
+      />
+    );
   }
 
   const [facilityData, procurementData, approverData, financeData, securityStatus] = await Promise.all([
