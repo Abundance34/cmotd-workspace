@@ -76,13 +76,17 @@ export async function getFacilityDashboardData(userId: number): Promise<Facility
   }[]>`
     SELECT
       COUNT(*) FILTER (
-        WHERE status IN ('Sent for Procurement Review', 'Requires Sourcing', 'Vendor Quote Collection', 'Vendor Recommendation')
+        WHERE status IN (
+          'Sent for Procurement Review', 'Submitted to Procurement Manager',
+          'Requires Sourcing', 'Vendor Quote Collection', 'Vendor Recommendation'
+        )
       )::int AS pending_review,
       COUNT(*) FILTER (
-        WHERE status IN ('Reviewed by Procurement', 'Submitted for Approval')
+        WHERE status IN ('Reviewed by Procurement', 'Submitted for Approval', 'Pending Approver/MD Approval')
       )::int AS pending_approval,
       COUNT(*) FILTER (
-        WHERE status IN ('Approved', 'PO Created') OR payment_status = 'Approved for Payment'
+        WHERE status IN ('Approved', 'PO Created', 'Awaiting Payment', 'Approved for Payment')
+           OR payment_status = 'Approved for Payment'
       )::int AS awaiting_payment,
       COUNT(*) FILTER (
         WHERE status = 'Paid' AND receipt_uploaded_at IS NULL
@@ -112,7 +116,7 @@ export async function getFacilityDashboardData(userId: number): Promise<Facility
   const drafts = await sql<RawRequestRow[]>`
     ${baseSelect}
     WHERE (requested_by = ${userId} OR facility_manager_user_id = ${userId})
-      AND status = 'FM Draft'
+      AND status IN ('FM Draft', 'Draft')
     ORDER BY COALESCE(updated_at, created_at) DESC
     LIMIT 100
   `;
@@ -120,7 +124,7 @@ export async function getFacilityDashboardData(userId: number): Promise<Facility
   const returned = await sql<RawRequestRow[]>`
     ${baseSelect}
     WHERE (requested_by = ${userId} OR facility_manager_user_id = ${userId})
-      AND status = 'Returned for Correction'
+      AND status IN ('Returned for Correction', 'Returned to Facility Manager', 'Returned')
     ORDER BY COALESCE(updated_at, created_at) DESC
     LIMIT 100
   `;
@@ -128,7 +132,7 @@ export async function getFacilityDashboardData(userId: number): Promise<Facility
   const approved = await sql<RawRequestRow[]>`
     ${baseSelect}
     WHERE (requested_by = ${userId} OR facility_manager_user_id = ${userId})
-      AND status IN ('Approved', 'PO Created', 'Paid', 'Completed')
+      AND status IN ('Approved', 'PO Created', 'Awaiting Payment', 'Approved for Payment', 'Paid', 'Completed', 'Closed')
     ORDER BY COALESCE(updated_at, created_at) DESC
     LIMIT 100
   `;
