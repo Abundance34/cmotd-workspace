@@ -29,3 +29,5 @@ When importing the repository into Vercel, set the project Root Directory to `we
 ## Cutover rule
 
 Cloud Run and Cloud SQL remain the production rollback path until Next.js passes role-by-role E2E testing and the PostgreSQL migration is reconciled.
+
+<!-- Production deployment trigger: 2026-09-05 -->
