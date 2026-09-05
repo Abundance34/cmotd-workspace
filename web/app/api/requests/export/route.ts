@@ -14,21 +14,14 @@ function canExport(role: string) {
   return ["Facility Manager", "Procurement Manager", "Admin"].includes(role);
 }
 
-function accessSql(user: { id: number; role: string }) {
-  if (user.role === "Facility Manager") {
-    return { clause: "(pr.requested_by = $USER OR pr.facility_manager_user_id = $USER)", userId: user.id };
-  }
-  if (user.role === "Procurement Manager") {
-    return { clause: "(pr.requested_by = $USER OR pr.assigned_procurement_manager_id = $USER)", userId: user.id };
-  }
-  return { clause: "TRUE", userId: user.id };
-}
-
 async function requestRows(user: { id: number; role: string }, requestId: number | null) {
   const sql = db();
-  const access = accessSql(user);
+  const isAdmin = user.role === "Admin";
+  const isFacility = user.role === "Facility Manager";
+  const isProcurement = user.role === "Procurement Manager";
+  const allRows = requestId == null;
 
-  const baseSelect = sql`
+  const rows = await sql<any[]>`
     SELECT
       pr.id,
       pr.request_no,
@@ -80,22 +73,15 @@ async function requestRows(user: { id: number; role: string }, requestId: number
       ORDER BY COALESCE(ppd.is_current, FALSE) DESC, ppd.updated_at DESC, ppd.id DESC
       LIMIT 1
     ) payee ON TRUE
+    WHERE (
+      ${isAdmin}
+      OR (${isFacility} AND (pr.requested_by = ${user.id} OR pr.facility_manager_user_id = ${user.id}))
+      OR (${isProcurement} AND (pr.requested_by = ${user.id} OR pr.assigned_procurement_manager_id = ${user.id}))
+    )
+      AND (${allRows} OR pr.id = ${requestId})
+    ORDER BY COALESCE(pr.updated_at, pr.created_at) DESC, pr.id DESC, item.id
+    LIMIT 5000
   `;
-
-  let rows: any[];
-  if (user.role === "Admin") {
-    rows = requestId
-      ? await sql<any[]>`${baseSelect} WHERE pr.id = ${requestId} ORDER BY item.id`
-      : await sql<any[]>`${baseSelect} ORDER BY COALESCE(pr.updated_at, pr.created_at) DESC, pr.id DESC, item.id LIMIT 5000`;
-  } else if (user.role === "Facility Manager") {
-    rows = requestId
-      ? await sql<any[]>`${baseSelect} WHERE pr.id = ${requestId} AND (pr.requested_by = ${access.userId} OR pr.facility_manager_user_id = ${access.userId}) ORDER BY item.id`
-      : await sql<any[]>`${baseSelect} WHERE pr.requested_by = ${access.userId} OR pr.facility_manager_user_id = ${access.userId} ORDER BY COALESCE(pr.updated_at, pr.created_at) DESC, pr.id DESC, item.id LIMIT 5000`;
-  } else {
-    rows = requestId
-      ? await sql<any[]>`${baseSelect} WHERE pr.id = ${requestId} AND (pr.requested_by = ${access.userId} OR pr.assigned_procurement_manager_id = ${access.userId}) ORDER BY item.id`
-      : await sql<any[]>`${baseSelect} WHERE pr.requested_by = ${access.userId} OR pr.assigned_procurement_manager_id = ${access.userId} ORDER BY COALESCE(pr.updated_at, pr.created_at) DESC, pr.id DESC, item.id LIMIT 5000`;
-  }
 
   if (requestId && !rows.length) throw new Error("This request is not available to your account.");
 
@@ -167,25 +153,13 @@ export async function GET(request: Request) {
     const filename = safeName(`procureflow-${reference}-${new Date().toISOString().slice(0, 10)}`);
 
     if (format === "json") {
-      return new NextResponse(JSON.stringify(rows, null, 2), {
-        headers: {
-          "Content-Type": "application/json; charset=utf-8",
-          "Content-Disposition": `attachment; filename="${filename}.json"`,
-        },
-      });
+      return new NextResponse(JSON.stringify(rows, null, 2), { headers: { "Content-Type": "application/json; charset=utf-8", "Content-Disposition": `attachment; filename="${filename}.json"` } });
     }
 
     if (format === "pdf") {
-      const title = requestId && rows[0]?.request_no
-        ? `ProcureFlow Purchase Request — ${rows[0].request_no}`
-        : `ProcureFlow ${user.role === "Facility Manager" ? "Facility" : user.role === "Procurement Manager" ? "Procurement" : "All"} Request Register`;
+      const title = requestId && rows[0]?.request_no ? `ProcureFlow Purchase Request — ${rows[0].request_no}` : `ProcureFlow ${user.role === "Facility Manager" ? "Facility" : user.role === "Procurement Manager" ? "Procurement" : "All"} Request Register`;
       const pdf = simplePdf(title, pdfLines(rows), "CMOTD ProcureFlow");
-      return new NextResponse(pdf, {
-        headers: {
-          "Content-Type": "application/pdf",
-          "Content-Disposition": `attachment; filename="${filename}.pdf"`,
-        },
-      });
+      return new NextResponse(pdf, { headers: { "Content-Type": "application/pdf", "Content-Disposition": `attachment; filename="${filename}.pdf"` } });
     }
 
     if (format === "xlsx" || format === "excel") {
@@ -193,20 +167,10 @@ export async function GET(request: Request) {
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, requestId ? "Request" : "Requests");
       const output = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
-      return new NextResponse(new Uint8Array(output), {
-        headers: {
-          "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          "Content-Disposition": `attachment; filename="${filename}.xlsx"`,
-        },
-      });
+      return new NextResponse(new Uint8Array(output), { headers: { "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Content-Disposition": `attachment; filename="${filename}.xlsx"` } });
     }
 
-    return new NextResponse(csvText(rows), {
-      headers: {
-        "Content-Type": "text/csv; charset=utf-8",
-        "Content-Disposition": `attachment; filename="${filename}.csv"`,
-      },
-    });
+    return new NextResponse(csvText(rows), { headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="${filename}.csv"` } });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to generate request export." }, { status: 400 });
   }
