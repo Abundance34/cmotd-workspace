@@ -6,8 +6,8 @@ export async function GET() {
   try {
     const user = await getCurrentUser();
     if (!user) return NextResponse.json({ error: "Authentication required." }, { status: 401 });
-    if (user.role !== "Facility Manager" && user.role !== "Admin") {
-      return NextResponse.json({ error: "Facility reference data is not available to this role." }, { status: 403 });
+    if (user.role !== "Facility Manager" && user.role !== "Procurement Manager" && user.role !== "Admin") {
+      return NextResponse.json({ error: "Request reference data is not available to this role." }, { status: 403 });
     }
 
     const sql = db();
@@ -24,7 +24,7 @@ export async function GET() {
     });
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unable to load Facility reference data." },
+      { error: error instanceof Error ? error.message : "Unable to load request reference data." },
       { status: 500 },
     );
   }
