@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { verifyActiveAuditSigningKey } from "@/lib/procureflow/security-check";
 import {
+  adminRequestIntervention,
   adminUserSecurityAction,
   setProcurementManagerApprovalLimit,
+  type AdminRequestInterventionAction,
   type AdminUserSecurityAction,
 } from "@/lib/procureflow/admin-actions";
 
@@ -13,6 +15,9 @@ type Body = {
   securityAction?: AdminUserSecurityAction;
   reason?: string;
   amount?: string | number;
+  requestId?: number;
+  interventionAction?: AdminRequestInterventionAction;
+  targetProcurementManagerId?: number;
 };
 
 export async function POST(request: Request) {
@@ -45,6 +50,14 @@ export async function POST(request: Request) {
         user,
         body?.amount ?? "",
         String(body?.reason || ""),
+      );
+    } else if (action === "request-intervention") {
+      result = await adminRequestIntervention(
+        user,
+        Number(body?.requestId),
+        String(body?.interventionAction || "") as AdminRequestInterventionAction,
+        String(body?.reason || ""),
+        body?.targetProcurementManagerId == null ? null : Number(body.targetProcurementManagerId),
       );
     } else {
       return NextResponse.json({ error: "Choose a valid Admin control action." }, { status: 400 });
