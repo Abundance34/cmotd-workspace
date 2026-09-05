@@ -8,6 +8,7 @@ import { ROLE_LABELS, ROLE_LANDING, ROLE_SECTIONS } from "@/lib/procureflow/role
 import type { AuditorDashboardData } from "@/lib/procureflow/auditor-data";
 import type { SecurityMigrationStatus } from "@/lib/procureflow/security-check";
 import { IncomeWorkspace } from "@/components/income-workspace";
+import { SettingsWorkspace } from "@/components/settings-workspace";
 
 type ShellUser = { id: number; fullName: string; username: string; role: "Auditor" };
 
@@ -193,7 +194,7 @@ export function AuditorShell({ user, data, securityStatus }: { user: ShellUser; 
     <article><span>Open logistics exceptions</span><strong>{data.metrics.openLogisticsExceptions}</strong><small>Current operational exceptions</small></article>
   </div>;
   else if (section === "Income") content = <IncomeWorkspace role="Auditor" />;
-  else if (section === "Settings") content = <Empty text="Shared account settings remain in the migration queue." />;
+  else if (section === "Settings") content = <SettingsWorkspace username={user.username} fullName={user.fullName} role="Auditor" />;
 
   return <main className="app-frame">
     <aside className="sidebar">
