@@ -3,24 +3,39 @@ import path from "node:path";
 
 const root = "/app";
 
-function patchFile(relativePath, replacements) {
+function patchFile(relativePath, replacements, importNames = ["requestConfirmation"]) {
   const file = path.join(root, relativePath);
   let source = fs.readFileSync(file, "utf8");
   const original = source;
 
-  if (!source.includes('import { requestConfirmation } from "@/components/in-app-confirmation";')) {
+  const importLine = `import { ${importNames.join(", ")} } from "@/components/in-app-confirmation";`;
+  if (!source.includes(importLine)) {
     const marker = 'import { useRouter } from "next/navigation";';
-    if (!source.includes(marker)) throw new Error(`Cannot inject confirmation import into ${relativePath}.`);
-    source = source.replace(marker, `${marker}\nimport { requestConfirmation } from "@/components/in-app-confirmation";`);
+    if (!source.includes(marker)) throw new Error(`Cannot inject in-app dialog import into ${relativePath}.`);
+    source = source.replace(marker, `${marker}\n${importLine}`);
   }
 
   for (const [from, to] of replacements) {
-    if (!source.includes(from)) throw new Error(`Expected browser-confirmation pattern was not found in ${relativePath}: ${from}`);
+    if (!source.includes(from)) throw new Error(`Expected browser-dialog pattern was not found in ${relativePath}: ${from}`);
     source = source.replace(from, to);
   }
 
   if (source !== original) fs.writeFileSync(file, source, "utf8");
 }
+
+patchFile("components/app-shell.tsx", [
+  [
+    'if (!window.confirm(`Submit ${row.requestNo} to the Procurement Manager?`)) return;',
+    'if (!(await requestConfirmation({ eyebrow: "REQUEST SUBMISSION", title: "Submit this request to Procurement Manager?", description: `${row.requestNo} will leave the Facility draft queue and enter Procurement review.`, reference: row.requestNo, confirmLabel: "Submit to Procurement", tone: "primary" }))) return;'
+  ],
+]);
+
+patchFile("components/logistics-shell.tsx", [
+  [
+    'if (!window.confirm(`Save the Logistics delivery handover for ${row.poNo}?`)) return;',
+    'if (!(await requestConfirmation({ eyebrow: "LOGISTICS HANDOVER", title: "Save this delivery handover?", description: `${row.poNo} will be saved with the delivery contact, expected date, vehicle and dispatch details currently entered.`, reference: row.poNo, detail: expectedDeliveryDate ? `Expected delivery: ${expectedDeliveryDate}` : undefined, confirmLabel: "Save Delivery Handover", tone: "primary" }))) return;'
+  ],
+]);
 
 patchFile("components/approver-requests.tsx", [
   [
@@ -65,6 +80,13 @@ patchFile("components/procurement-sourcing.tsx", [
   ],
 ]);
 
+patchFile("components/parity-workspace.tsx", [
+  [
+    'async function close(id:number){const note=window.prompt("Enter the settlement / closure note:");if(!note)return;',
+    'async function close(id:number){const advance=data.cashAdvances.find((a:any)=>a.id===id);const note=await requestTextPrompt({eyebrow:"CASH ADVANCE CLOSURE",title:"Close this cash advance?",description:"Enter the settlement or closure note that will be written to the Finance record and audit history.",reference:advance?.advance_no||`Advance #${id}`,label:"Settlement / closure note",placeholder:"Explain how the cash advance was settled or closed.",confirmLabel:"Close Cash Advance",required:true,tone:"warning"});if(!note)return;'
+  ],
+], ["requestTextPrompt"]);
+
 function walk(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const full = path.join(dir, entry.name);
@@ -78,7 +100,7 @@ const offenders = [];
 for (const scanRoot of scanRoots) {
   for (const file of walk(scanRoot)) {
     const source = fs.readFileSync(file, "utf8");
-    const nativePattern = /\bwindow\.(confirm|alert|prompt)\s*\(/g;
+    const nativePattern = /\b(?:window\.)?(confirm|alert|prompt)\s*\(/g;
     const matches = [...source.matchAll(nativePattern)];
     if (matches.length) offenders.push(`${path.relative(root, file)}: ${matches.map((match) => match[0]).join(", ")}`);
   }
@@ -88,4 +110,4 @@ if (offenders.length) {
   throw new Error(`Native browser dialogs remain in ProcureFlow:\n${offenders.join("\n")}`);
 }
 
-console.log("Local in-app confirmation standard applied: native browser confirm/alert/prompt dialogs are blocked across ProcureFlow UI source.");
+console.log("Local in-app confirmation standard applied: all native browser confirm/alert/prompt dialogs are blocked across ProcureFlow UI source.");
