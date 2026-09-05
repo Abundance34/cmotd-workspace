@@ -4,13 +4,14 @@ import { AppShell } from "@/components/app-shell";
 import { getFacilityDashboardData } from "@/lib/procureflow/facility-data";
 import { getProcurementDashboardData } from "@/lib/procureflow/procurement-data";
 import { getApproverDashboardData } from "@/lib/procureflow/approver-data";
+import { getFinanceDashboardData } from "@/lib/procureflow/finance-data";
 import { getSecurityMigrationStatus } from "@/lib/procureflow/security-check";
 
 export default async function ProcureFlowApp() {
   const user = await getCurrentUser();
   if (!user) redirect("/");
 
-  const [facilityData, procurementData, approverData, securityStatus] = await Promise.all([
+  const [facilityData, procurementData, approverData, financeData, securityStatus] = await Promise.all([
     user.role === "Facility Manager"
       ? getFacilityDashboardData(user.id)
       : Promise.resolve(undefined),
@@ -19,6 +20,9 @@ export default async function ProcureFlowApp() {
       : Promise.resolve(undefined),
     user.role === "Approver"
       ? getApproverDashboardData(user.id)
+      : Promise.resolve(undefined),
+    user.role === "Finance"
+      ? getFinanceDashboardData()
       : Promise.resolve(undefined),
     getSecurityMigrationStatus(),
   ]);
@@ -29,6 +33,7 @@ export default async function ProcureFlowApp() {
       facilityData={facilityData}
       procurementData={procurementData}
       approverData={approverData}
+      financeData={financeData}
       securityStatus={securityStatus}
     />
   );
