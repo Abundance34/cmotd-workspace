@@ -9,6 +9,13 @@ import {
   type AdminUserSecurityAction,
 } from "@/lib/procureflow/admin-actions";
 import { rescindRequestApproval } from "@/lib/procureflow/admin-rescission";
+import {
+  createAdminManagedUser,
+  resetAdminManagedUserPassword,
+  updateAdminManagedUser,
+  updateAdminRolePermission,
+  type AdminPermissionChange,
+} from "@/lib/procureflow/admin-user-actions";
 
 type Body = {
   action?: string;
@@ -19,6 +26,14 @@ type Body = {
   requestId?: number;
   interventionAction?: AdminRequestInterventionAction;
   targetProcurementManagerId?: number;
+  username?: string;
+  fullName?: string;
+  email?: string | null;
+  role?: string;
+  temporaryPassword?: string;
+  forcePasswordChange?: boolean;
+  permission?: string;
+  permissionChange?: AdminPermissionChange;
 };
 
 export async function POST(request: Request) {
@@ -46,6 +61,38 @@ export async function POST(request: Request) {
         String(body?.securityAction || "") as AdminUserSecurityAction,
         String(body?.reason || ""),
       );
+    } else if (action === "create-user") {
+      result = await createAdminManagedUser(user, {
+        username: String(body?.username || ""),
+        fullName: String(body?.fullName || ""),
+        email: body?.email == null ? null : String(body.email),
+        role: String(body?.role || ""),
+        temporaryPassword: String(body?.temporaryPassword || ""),
+        forcePasswordChange: body?.forcePasswordChange !== false,
+        reason: String(body?.reason || ""),
+      });
+    } else if (action === "update-user") {
+      result = await updateAdminManagedUser(user, {
+        targetUserId: Number(body?.targetUserId),
+        username: String(body?.username || ""),
+        fullName: String(body?.fullName || ""),
+        email: body?.email == null ? null : String(body.email),
+        role: String(body?.role || ""),
+        reason: String(body?.reason || ""),
+      });
+    } else if (action === "reset-user-password") {
+      result = await resetAdminManagedUserPassword(user, {
+        targetUserId: Number(body?.targetUserId),
+        temporaryPassword: String(body?.temporaryPassword || ""),
+        reason: String(body?.reason || ""),
+      });
+    } else if (action === "role-permission") {
+      result = await updateAdminRolePermission(user, {
+        role: String(body?.role || ""),
+        permission: String(body?.permission || ""),
+        change: String(body?.permissionChange || "") as AdminPermissionChange,
+        reason: String(body?.reason || ""),
+      });
     } else if (action === "set-approval-limit") {
       result = await setProcurementManagerApprovalLimit(
         user,
