@@ -95,10 +95,45 @@ function replaceOnce(source, search, replacement, label) {
 {
   const path = "/app/lib/procureflow/facility-draft-actions.ts";
   let source = read(path);
-  const creatorBlock = `    await tx\`\n      INSERT INTO notifications (\n        user_id, role, title, message, entity_type, entity_id,\n        is_read, popup_shown, importance, delivery_channel,\n        push_sent, email_sent, action_label, section_target, created_at\n      ) VALUES (\n        \${user.id}, NULL, 'Draft request created',\n        \${\`\${reqNo} was saved and is ready for review or submission.\`},\n        'Purchase Request', \${requestId}, FALSE, FALSE, 'Normal', 'in_app', FALSE, FALSE,\n        'My Draft Requests', 'My Draft Requests', \${now}\n      )\n    \`;`;
   if (!source.includes("'New Facility draft created'")) {
-    const broadcast = `${creatorBlock}\n\n    await tx\`\n      INSERT INTO notifications (\n        user_id, role, title, message, entity_type, entity_id,\n        is_read, popup_shown, importance, delivery_channel,\n        push_sent, email_sent, action_label, section_target, created_at\n      )\n      SELECT\n        u.id, NULL, 'New Facility draft created',\n        \${\`\${reqNo} was created by \${user.fullName}. It remains a draft until the Utility / Facility Head sends it to Procurement Manager.\`},\n        'Purchase Request', \${requestId}, FALSE, FALSE, 'Normal', 'in_app', FALSE, FALSE,\n        'View Draft Activity',\n        CASE u.role\n          WHEN 'Facility Manager' THEN 'My Draft Requests'\n          WHEN 'Procurement Manager' THEN 'Purchase Requests'\n          WHEN 'Approver' THEN 'Dashboard'\n          WHEN 'Finance' THEN 'Dashboard'\n          WHEN 'Logistics Officer' THEN 'Logistics Dashboard'\n          WHEN 'Admin' THEN 'All Procurement Records'\n          WHEN 'Auditor' THEN 'Audit Dashboard'\n          ELSE 'Dashboard'\n        END,\n        \${now}\n      FROM users u\n      WHERE u.id <> \${user.id}\n        AND COALESCE(u.is_active, TRUE) = TRUE\n        AND COALESCE(u.account_locked, FALSE) = FALSE\n      ON CONFLICT DO NOTHING\n    \`;`;
-    source = replaceOnce(source, creatorBlock, broadcast, "draft creator notification");
+    const auditorMarker = "        NULL, 'Auditor', 'Audit activity: DRAFT_CREATED',";
+    const auditorMarkerIndex = source.indexOf(auditorMarker);
+    if (auditorMarkerIndex < 0) throw new Error("Local parity overlay could not find Auditor draft notification marker.");
+    const auditorBlockStart = source.lastIndexOf("    await tx`", auditorMarkerIndex);
+    if (auditorBlockStart < 0) throw new Error("Local parity overlay could not locate the Auditor notification block start.");
+
+    const broadcast = [
+      '    await tx`',
+      '      INSERT INTO notifications (',
+      '        user_id, role, title, message, entity_type, entity_id,',
+      '        is_read, popup_shown, importance, delivery_channel,',
+      '        push_sent, email_sent, action_label, section_target, created_at',
+      '      )',
+      '      SELECT',
+      "        u.id, NULL, 'New Facility draft created',",
+      '        ${`${reqNo} was created by ${user.fullName}. It remains a draft until the Utility / Facility Head sends it to Procurement Manager.`},',
+      "        'Purchase Request', ${requestId}, FALSE, FALSE, 'Normal', 'in_app', FALSE, FALSE,",
+      "        'View Draft Activity',",
+      '        CASE u.role',
+      "          WHEN 'Facility Manager' THEN 'My Draft Requests'",
+      "          WHEN 'Procurement Manager' THEN 'Purchase Requests'",
+      "          WHEN 'Approver' THEN 'Dashboard'",
+      "          WHEN 'Finance' THEN 'Dashboard'",
+      "          WHEN 'Logistics Officer' THEN 'Logistics Dashboard'",
+      "          WHEN 'Admin' THEN 'All Procurement Records'",
+      "          WHEN 'Auditor' THEN 'Audit Dashboard'",
+      "          ELSE 'Dashboard'",
+      '        END,',
+      '        ${now}',
+      '      FROM users u',
+      '      WHERE u.id <> ${user.id}',
+      '        AND COALESCE(u.is_active, TRUE) = TRUE',
+      '        AND COALESCE(u.account_locked, FALSE) = FALSE',
+      '      ON CONFLICT DO NOTHING',
+      '    `;',
+    ].join("\n");
+
+    source = source.slice(0, auditorBlockStart) + broadcast + "\n\n" + source.slice(auditorBlockStart);
   }
   write(path, source);
 }
