@@ -9,6 +9,7 @@ import "./auditor.css";
 import "./admin.css";
 import "./income.css";
 import "./settings.css";
+import "./parity.css";
 
 export const metadata: Metadata = {
   title: "ProcureFlow",

@@ -1,9 +1,6 @@
 import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth";
-import { AppShell } from "@/components/app-shell";
-import { LogisticsShell } from "@/components/logistics-shell";
-import { AuditorShell } from "@/components/auditor-shell";
-import { AdminShell } from "@/components/admin-shell";
+import { CompleteRoleShell } from "@/components/complete-role-shell";
 import { ForcedPasswordChangeScreen } from "@/components/settings-workspace";
 import { getFacilityDashboardData } from "@/lib/procureflow/facility-data";
 import { getProcurementDashboardData } from "@/lib/procureflow/procurement-data";
@@ -14,89 +11,42 @@ import { getLogisticsPOItems } from "@/lib/procureflow/logistics-items";
 import { getAuditorDashboardData } from "@/lib/procureflow/auditor-data";
 import { getAdminDashboardData } from "@/lib/procureflow/admin-data";
 import { getSecurityMigrationStatus } from "@/lib/procureflow/security-check";
+import { getParityData } from "@/lib/procureflow/parity-data";
 
 export default async function ProcureFlowApp() {
   const user = await getCurrentUser();
   if (!user) redirect("/");
 
   if (user.mustChangePassword) {
-    return (
-      <ForcedPasswordChangeScreen
-        username={user.username}
-        fullName={user.fullName}
-        role={user.role}
-      />
-    );
+    return <ForcedPasswordChangeScreen username={user.username} fullName={user.fullName} role={user.role} />;
   }
 
-  if (user.role === "Logistics Officer") {
-    const [logisticsData, logisticsItems, securityStatus] = await Promise.all([
-      getLogisticsDashboardData(),
-      getLogisticsPOItems(),
-      getSecurityMigrationStatus(),
-    ]);
-    return (
-      <LogisticsShell
-        user={{ id: user.id, fullName: user.fullName, username: user.username, role: "Logistics Officer" }}
-        data={logisticsData}
-        items={logisticsItems}
-        securityStatus={securityStatus}
-      />
-    );
-  }
-
-  if (user.role === "Auditor") {
-    const [auditorData, securityStatus] = await Promise.all([
-      getAuditorDashboardData(),
-      getSecurityMigrationStatus(),
-    ]);
-    return (
-      <AuditorShell
-        user={{ id: user.id, fullName: user.fullName, username: user.username, role: "Auditor" }}
-        data={auditorData}
-        securityStatus={securityStatus}
-      />
-    );
-  }
-
-  if (user.role === "Admin") {
-    const [adminData, securityStatus] = await Promise.all([
-      getAdminDashboardData(),
-      getSecurityMigrationStatus(),
-    ]);
-    return (
-      <AdminShell
-        user={{ id: user.id, fullName: user.fullName, username: user.username, role: "Admin" }}
-        data={adminData}
-        securityStatus={securityStatus}
-      />
-    );
-  }
-
-  const [facilityData, procurementData, approverData, financeData, securityStatus] = await Promise.all([
-    user.role === "Facility Manager"
-      ? getFacilityDashboardData(user.id)
-      : Promise.resolve(undefined),
-    user.role === "Procurement Manager"
-      ? getProcurementDashboardData(user.id)
-      : Promise.resolve(undefined),
-    user.role === "Approver"
-      ? getApproverDashboardData(user.id)
-      : Promise.resolve(undefined),
-    user.role === "Finance"
-      ? getFinanceDashboardData()
-      : Promise.resolve(undefined),
+  const [facilityData, procurementData, approverData, financeData, logisticsData, logisticsItems, adminData, auditorData, securityStatus, parityData] = await Promise.all([
+    user.role === "Facility Manager" ? getFacilityDashboardData(user.id) : Promise.resolve(undefined),
+    user.role === "Procurement Manager" ? getProcurementDashboardData(user.id) : Promise.resolve(undefined),
+    user.role === "Approver" ? getApproverDashboardData(user.id) : Promise.resolve(undefined),
+    user.role === "Finance" ? getFinanceDashboardData() : Promise.resolve(undefined),
+    user.role === "Logistics Officer" ? getLogisticsDashboardData() : Promise.resolve(undefined),
+    user.role === "Logistics Officer" ? getLogisticsPOItems() : Promise.resolve([]),
+    user.role === "Admin" ? getAdminDashboardData() : Promise.resolve(undefined),
+    user.role === "Auditor" ? getAuditorDashboardData() : Promise.resolve(undefined),
     getSecurityMigrationStatus(),
+    getParityData(user),
   ]);
 
   return (
-    <AppShell
-      user={user}
+    <CompleteRoleShell
+      user={{ id: user.id, fullName: user.fullName, username: user.username, role: user.role }}
       facilityData={facilityData}
       procurementData={procurementData}
       approverData={approverData}
       financeData={financeData}
+      logisticsData={logisticsData}
+      logisticsItems={logisticsItems}
+      adminData={adminData}
+      auditorData={auditorData}
       securityStatus={securityStatus}
+      parityData={parityData}
     />
   );
 }
