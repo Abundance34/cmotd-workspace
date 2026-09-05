@@ -1,0 +1,24 @@
+name: ProcureFlow Local Docker Preview Build
+
+on:
+  push:
+    branches:
+      - local/docker-preview
+    paths:
+      - "web/**"
+      - ".github/workflows/local-preview-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout local preview branch
+        uses: actions/checkout@v4
+
+      - name: Build exact local Docker preview images
+        run: docker compose -f web/docker-compose.local.yml build
