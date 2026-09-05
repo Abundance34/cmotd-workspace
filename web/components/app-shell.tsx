@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { Bell, ChevronRight, Circle, LogOut, Search, Send, ShieldCheck } from "lucide-react";
 import { ROLE_LABELS, ROLE_LANDING, ROLE_SECTIONS, ROLES, type ProcureFlowRole } from "@/lib/procureflow/roles";
 import type { FacilityDashboardData, FacilityRequestRow } from "@/lib/procureflow/facility-data";
+import type { ProcurementDashboardData, ProcurementRequestRow } from "@/lib/procureflow/procurement-data";
 import type { SecurityMigrationStatus } from "@/lib/procureflow/security-check";
 import { FacilityDraftForm } from "@/components/facility-draft-form";
 
@@ -75,16 +76,47 @@ function RequestTable({
               <td>{dateText(row.requiredDate)}</td>
               {actionLabel ? (
                 <td>
-                  <button
-                    className="row-action-button"
-                    disabled={busyId === row.id}
-                    onClick={() => onAction?.(row)}
-                  >
-                    <Send size={14} />
-                    {busyId === row.id ? "Submitting…" : actionLabel}
+                  <button className="row-action-button" disabled={busyId === row.id} onClick={() => onAction?.(row)}>
+                    <Send size={14} />{busyId === row.id ? "Submitting…" : actionLabel}
                   </button>
                 </td>
               ) : null}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ProcurementTable({ rows, emptyText }: { rows: ProcurementRequestRow[]; emptyText: string }) {
+  if (!rows.length) return <div className="empty-state">{emptyText}</div>;
+  return (
+    <div className="table-wrap">
+      <table className="data-table">
+        <thead>
+          <tr>
+            <th>Request</th>
+            <th>Utility / Facility Head</th>
+            <th>Department / Project</th>
+            <th>Category</th>
+            <th>Priority</th>
+            <th>Amount</th>
+            <th>Status</th>
+            <th>Required</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.id}>
+              <td><strong>{row.requestNo}</strong><small>{dateText(row.requestDate)}</small></td>
+              <td>{row.facilityManager || "—"}</td>
+              <td>{row.departmentProject || "—"}</td>
+              <td>{row.category || "—"}</td>
+              <td><span className={`priority priority-${(row.priority || "normal").toLowerCase()}`}>{row.priority || "Normal"}</span></td>
+              <td className="amount-cell">{money(row.estimatedAmount)}</td>
+              <td><span className="status-chip">{row.status || "—"}</span></td>
+              <td>{dateText(row.requiredDate)}</td>
             </tr>
           ))}
         </tbody>
@@ -106,9 +138,7 @@ function FacilitySection({
   busyId: number | null;
   actionMessage: { type: "success" | "error"; text: string } | null;
 }) {
-  if (section === "Create Request Draft") {
-    return <FacilityDraftForm />;
-  }
+  if (section === "Create Request Draft") return <FacilityDraftForm />;
 
   if (section === "My Draft Requests") {
     return (
@@ -160,7 +190,68 @@ function FacilitySection({
   return null;
 }
 
-export function AppShell({ user, preview = false, facilityData, securityStatus }: { user: ShellUser; preview?: boolean; facilityData?: FacilityDashboardData; securityStatus?: SecurityMigrationStatus }) {
+function ProcurementSection({ section, data }: { section: string; data: ProcurementDashboardData }) {
+  if (section === "Utility Head / Facility Head Inbox") {
+    return (
+      <article className="panel live-section-panel">
+        <div className="panel-heading"><div><h2>Utility Head / Facility Head Inbox</h2><p>Requests routed from Utility / Facility Heads and waiting for Procurement review.</p></div><span className="status-pill">{data.inbox.length} awaiting review</span></div>
+        <ProcurementTable rows={data.inbox} emptyText="There are no Facility requests waiting for procurement review." />
+      </article>
+    );
+  }
+
+  if (section === "Purchase Requests") {
+    return (
+      <article className="panel live-section-panel">
+        <div className="panel-heading"><div><h2>Purchase Requests</h2><p>Live procurement request register from Neon, including migrated and newly created records.</p></div><span className="status-pill">{data.requests.length} loaded</span></div>
+        <ProcurementTable rows={data.requests} emptyText="No procurement requests are available." />
+      </article>
+    );
+  }
+
+  if (section === "Sourcing") {
+    return (
+      <article className="panel live-section-panel">
+        <div className="panel-heading"><div><h2>Sourcing Queue</h2><p>Requests currently requiring supplier sourcing or quote collection.</p></div><span className="status-pill">{data.sourcing.length} active</span></div>
+        <ProcurementTable rows={data.sourcing} emptyText="No requests currently require sourcing." />
+      </article>
+    );
+  }
+
+  if (section === "Vendor Recommendation") {
+    return (
+      <article className="panel live-section-panel">
+        <div className="panel-heading"><div><h2>Vendor Recommendation</h2><p>Requests that have reached the vendor recommendation stage.</p></div><span className="status-pill">{data.recommendations.length} pending</span></div>
+        <ProcurementTable rows={data.recommendations} emptyText="No vendor recommendations are currently pending." />
+      </article>
+    );
+  }
+
+  if (section === "My Activity History") {
+    return (
+      <article className="panel live-section-panel">
+        <div className="panel-heading"><div><h2>Recent Procurement Pipeline</h2><p>Latest requests visible to the Procurement Manager and their current states.</p></div><span className="status-pill">Live Neon data</span></div>
+        <ProcurementTable rows={data.requests.slice(0, 50)} emptyText="No procurement activity is available." />
+      </article>
+    );
+  }
+
+  return null;
+}
+
+export function AppShell({
+  user,
+  preview = false,
+  facilityData,
+  procurementData,
+  securityStatus,
+}: {
+  user: ShellUser;
+  preview?: boolean;
+  facilityData?: FacilityDashboardData;
+  procurementData?: ProcurementDashboardData;
+  securityStatus?: SecurityMigrationStatus;
+}) {
   const router = useRouter();
   const [previewRole, setPreviewRole] = useState<ProcureFlowRole>(user.role);
   const role = preview ? previewRole : user.role;
@@ -185,7 +276,14 @@ export function AppShell({ user, preview = false, facilityData, securityStatus }
         ["Awaiting Payment", String(facilityData.metrics.awaitingPayment), "Finance queue"],
         ["Pending Receipt", String(facilityData.metrics.pendingReceipt), "Evidence queue"],
       ]
-    : defaultCards;
+    : role === "Procurement Manager" && procurementData
+      ? [
+          ["Pending Review", String(procurementData.metrics.pendingReview), "Facility / request queue"],
+          ["Requires Sourcing", String(procurementData.metrics.requiresSourcing), "Supplier comparison"],
+          ["Vendor Recommendation", String(procurementData.metrics.vendorRecommendation), "Recommendation queue"],
+          ["Approved / Processed", String(procurementData.metrics.approvedProcessed), "Downstream pipeline"],
+        ]
+      : defaultCards;
 
   async function logout() {
     if (preview) { router.push("/"); return; }
@@ -218,6 +316,15 @@ export function AppShell({ user, preview = false, facilityData, securityStatus }
   const facilitySection = role === "Facility Manager" && facilityData
     ? <FacilitySection section={activeSection} data={facilityData} onSubmit={submitRequest} busyId={busyId} actionMessage={actionMessage} />
     : null;
+  const procurementSection = role === "Procurement Manager" && procurementData
+    ? <ProcurementSection section={activeSection} data={procurementData} />
+    : null;
+
+  const liveSummary = role === "Facility Manager" && facilityData
+    ? `${facilityData.drafts.length} drafts · ${facilityData.returned.length} returned · ${facilityData.approved.length} approved/processed`
+    : role === "Procurement Manager" && procurementData
+      ? `${procurementData.inbox.length} awaiting review · ${procurementData.metrics.activeVendors} active vendors · ${procurementData.metrics.gatewayWaiting} gateway passes waiting`
+      : null;
 
   return (
     <main className="app-frame">
@@ -247,9 +354,9 @@ export function AppShell({ user, preview = false, facilityData, securityStatus }
           {isDashboard(activeSection) ? (
             <>
               <div className="metric-grid">{cards.map(([title, value, caption]) => <article className="metric-card" key={title}><span>{title}</span><strong>{value}</strong><small>{caption}</small></article>)}</div>
-              <div className="dashboard-grid"><article className="panel panel-large"><div className="panel-heading"><div><h2>Command chain</h2><p>Workflow preserved from the production Streamlit application.</p></div><span className="status-pill">Ported foundation</span></div><div className="chain"><span>Utility / Facility</span><ChevronRight /><span>Procurement</span><ChevronRight /><span>Approval</span><ChevronRight /><span>Finance</span><ChevronRight /><span>Closure</span><ChevronRight /><span>Audit</span></div>{role === "Facility Manager" && facilityData ? <div className="live-summary"><strong>Live data connected</strong><span>{facilityData.drafts.length} drafts · {facilityData.returned.length} returned · {facilityData.approved.length} approved/processed</span></div> : null}</article><article className="panel"><div className="panel-heading"><div><h2>Migration status</h2><p>Next.js + Vercel + Neon</p></div></div><ul className="status-list"><li><span>UI shell & branding</span><b>Ready</b></li><li><span>Role navigation</span><b>Ready</b></li><li><span>Workflow policy port</span><b>Ready</b></li><li><span>PostgreSQL auth adapter</span><b>Connected</b></li><li><span>Facility read layer</span><b>{role === "Facility Manager" && facilityData ? "Live" : "Queued"}</b></li><li><span>Audit signing key</span><b>{securityStatus?.auditKeyVerified ? "Verified" : securityStatus?.auditKeyConfigured ? "Check failed" : "Missing"}</b></li><li><span>Payee encryption key</span><b>{securityStatus?.payeeKeyVerified ? "Verified" : securityStatus?.payeeKeyConfigured ? "Check failed" : "Missing"}</b></li><li><span>Facility draft creation</span><b>Ported</b></li><li><span>Facility submit workflow</span><b>Ported</b></li></ul></article></div>
+              <div className="dashboard-grid"><article className="panel panel-large"><div className="panel-heading"><div><h2>Command chain</h2><p>Workflow preserved from the production Streamlit application.</p></div><span className="status-pill">Ported foundation</span></div><div className="chain"><span>Utility / Facility</span><ChevronRight /><span>Procurement</span><ChevronRight /><span>Approval</span><ChevronRight /><span>Finance</span><ChevronRight /><span>Closure</span><ChevronRight /><span>Audit</span></div>{liveSummary ? <div className="live-summary"><strong>Live data connected</strong><span>{liveSummary}</span></div> : null}</article><article className="panel"><div className="panel-heading"><div><h2>Migration status</h2><p>Next.js + Vercel + Neon</p></div></div><ul className="status-list"><li><span>UI shell & branding</span><b>Ready</b></li><li><span>Role navigation</span><b>Ready</b></li><li><span>Workflow policy port</span><b>Ready</b></li><li><span>PostgreSQL auth adapter</span><b>Connected</b></li><li><span>Facility read layer</span><b>{role === "Facility Manager" && facilityData ? "Live" : "Ported"}</b></li><li><span>Procurement read layer</span><b>{role === "Procurement Manager" && procurementData ? "Live" : "Ported"}</b></li><li><span>Audit signing key</span><b>{securityStatus?.auditKeyVerified ? "Verified" : securityStatus?.auditKeyConfigured ? "Check failed" : "Missing"}</b></li><li><span>Payee encryption key</span><b>{securityStatus?.payeeKeyVerified ? "Verified" : securityStatus?.payeeKeyConfigured ? "Check failed" : "Missing"}</b></li><li><span>Facility draft creation</span><b>Ported</b></li><li><span>Facility submit workflow</span><b>Ported</b></li></ul></article></div>
             </>
-          ) : facilitySection || (
+          ) : facilitySection || procurementSection || (
             <article className="panel section-panel"><div className="section-icon"><ShieldCheck size={22} /></div><div><h2>{activeSection}</h2><p>The navigation, role boundary and page shell for this production section are represented in Next.js. This section is next in the migration queue for forms, tables, actions and Neon-backed queries.</p><div className="section-tags"><span>Role: {ROLE_LABELS[role]}</span><span>Production section preserved</span><span>Neon migration active</span></div></div></article>
           )}
         </div>
