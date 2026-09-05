@@ -49,7 +49,7 @@ services:
         condition: service_completed_successfully
       db:
         condition: service_healthy
-    command: ["node", "scripts/local-bootstrap.mjs"]
+    command: ["sh", "-ec", "node scripts/local-bootstrap.mjs && node scripts/local-seed-departments.mjs"]
 
   app:
     build:
