@@ -4,6 +4,7 @@ import { AppShell } from "@/components/app-shell";
 import { LogisticsShell } from "@/components/logistics-shell";
 import { AuditorShell } from "@/components/auditor-shell";
 import { AdminShell } from "@/components/admin-shell";
+import { ForcedPasswordChangeScreen } from "@/components/settings-workspace";
 import { getFacilityDashboardData } from "@/lib/procureflow/facility-data";
 import { getProcurementDashboardData } from "@/lib/procureflow/procurement-data";
 import { getApproverDashboardData } from "@/lib/procureflow/approver-data";
@@ -17,6 +18,16 @@ import { getSecurityMigrationStatus } from "@/lib/procureflow/security-check";
 export default async function ProcureFlowApp() {
   const user = await getCurrentUser();
   if (!user) redirect("/");
+
+  if (user.mustChangePassword) {
+    return (
+      <ForcedPasswordChangeScreen
+        username={user.username}
+        fullName={user.fullName}
+        role={user.role}
+      />
+    );
+  }
 
   if (user.role === "Logistics Officer") {
     const [logisticsData, logisticsItems, securityStatus] = await Promise.all([
