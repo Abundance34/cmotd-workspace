@@ -169,7 +169,31 @@ try {
         'procurement_manager_approval_limit', 2000000, ${ids.admin || null},
         'Local Docker bootstrap default: Procurement Manager low-value limit', ${now}, ${now}
       )
-      ON CONFLICT (policy_key) DO NOTHING
+      ON CONFLICT (policy_key) DO UPDATE SET
+        amount = CASE
+          WHEN approval_policy_settings.update_reason = 'Local Docker bootstrap policy'
+               AND approval_policy_settings.amount = 100000
+          THEN EXCLUDED.amount
+          ELSE approval_policy_settings.amount
+        END,
+        updated_by = CASE
+          WHEN approval_policy_settings.update_reason = 'Local Docker bootstrap policy'
+               AND approval_policy_settings.amount = 100000
+          THEN EXCLUDED.updated_by
+          ELSE approval_policy_settings.updated_by
+        END,
+        update_reason = CASE
+          WHEN approval_policy_settings.update_reason = 'Local Docker bootstrap policy'
+               AND approval_policy_settings.amount = 100000
+          THEN EXCLUDED.update_reason
+          ELSE approval_policy_settings.update_reason
+        END,
+        updated_at = CASE
+          WHEN approval_policy_settings.update_reason = 'Local Docker bootstrap policy'
+               AND approval_policy_settings.amount = 100000
+          THEN EXCLUDED.updated_at
+          ELSE approval_policy_settings.updated_at
+        END
     `;
   });
 
