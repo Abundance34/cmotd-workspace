@@ -64,8 +64,8 @@ export function LoginScreen({ previewAvailable }: { previewAvailable: boolean })
               <button className="primary-button" type="submit" disabled={loading}>{loading ? "Signing in…" : "Sign in"}<ArrowRight size={17} /></button>
             </form>
 
-            {previewAvailable ? <button className="preview-link" type="button" onClick={() => router.push("/preview")}>Open migration interface preview</button> : null}
-            <p className="login-footnote">Authorized users only · ProcureFlow migration build</p>
+            {previewAvailable ? <button className="preview-link" type="button" onClick={() => router.push("/preview")}>Open development interface preview</button> : null}
+            <p className="login-footnote">Authorized users only · CMOTD ProcureFlow</p>
           </div>
         </div>
       </section>
