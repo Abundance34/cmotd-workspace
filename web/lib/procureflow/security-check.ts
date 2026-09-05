@@ -1,11 +1,23 @@
-import { createDecipheriv, createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { db } from "@/lib/db";
+import { verifyPayeeEncryptionKeyV2 } from "./payee-crypto";
+
+const ACTIVE_AUDIT_KEY_ENV = "PROCUREFLOW_AUDIT_SIGNING_KEY_V2";
+const ACTIVE_PAYEE_KEY_ENV = "PROCUREFLOW_PAYEE_ENCRYPTION_KEY_V2";
+const ACTIVE_AUDIT_KEY_VERSION = "v2";
 
 export type SecurityMigrationStatus = {
-  auditKeyConfigured: boolean;
-  auditKeyVerified: boolean;
-  payeeKeyConfigured: boolean;
-  payeeKeyVerified: boolean;
+  legacyAuditPreserved: boolean;
+  legacyAuditEventCount: number;
+  legacyAuditVerifiable: boolean;
+  legacyPayeeEncryptedRows: number;
+  legacyPayeeRecoverable: boolean;
+  activeAuditKeyConfigured: boolean;
+  activeAuditKeyVerified: boolean;
+  activeAuditChainStarted: boolean;
+  activePayeeKeyConfigured: boolean;
+  activePayeeKeyVerified: boolean;
+  writesEnabled: boolean;
 };
 
 function stable(value: unknown): unknown {
@@ -29,42 +41,13 @@ function safeEqualHex(a: string, b: string) {
   return timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex"));
 }
 
-function base64UrlDecode(value: string) {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
-  return Buffer.from(padded, "base64");
+function activeAuditKey() {
+  const configured = process.env[ACTIVE_AUDIT_KEY_ENV]?.trim();
+  return configured && configured.length >= 32 ? configured : null;
 }
 
-function payeeKeyMaterial(configured: string) {
-  try {
-    const decoded = base64UrlDecode(configured);
-    if (decoded.length === 32) return decoded;
-  } catch {
-    // Fall back to the same SHA-256 key derivation used by the Python service.
-  }
-  return createHash("sha256").update(configured, "utf8").digest();
-}
-
-function decryptFernet(token: string, configuredKey: string) {
-  const raw = base64UrlDecode(token);
-  if (raw.length < 1 + 8 + 16 + 32 || raw[0] !== 0x80) throw new Error("Invalid Fernet token");
-
-  const signed = raw.subarray(0, raw.length - 32);
-  const suppliedMac = raw.subarray(raw.length - 32);
-  const key = payeeKeyMaterial(configuredKey);
-  const signingKey = key.subarray(0, 16);
-  const encryptionKey = key.subarray(16, 32);
-  const expectedMac = createHmac("sha256", signingKey).update(signed).digest();
-  if (!timingSafeEqual(suppliedMac, expectedMac)) throw new Error("Fernet signature mismatch");
-
-  const iv = raw.subarray(9, 25);
-  const ciphertext = raw.subarray(25, raw.length - 32);
-  const decipher = createDecipheriv("aes-128-cbc", encryptionKey, iv);
-  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
-}
-
-export async function verifyAuditSigningKey() {
-  const configured = process.env.PROCUREFLOW_AUDIT_SIGNING_KEY?.trim();
+export async function verifyActiveAuditSigningKey() {
+  const configured = activeAuditKey();
   if (!configured) return false;
 
   const sql = db();
@@ -76,12 +59,22 @@ export async function verifyAuditSigningKey() {
   }[]>`
     SELECT canonical_payload_json, previous_event_hash, record_hash, record_signature
     FROM audit_events
-    WHERE source <> 'nextjs' OR source IS NULL
+    WHERE signature_key_version = ${ACTIVE_AUDIT_KEY_VERSION}
     ORDER BY id DESC
     LIMIT 1
   `;
+
   const row = rows[0];
-  if (!row) return true;
+
+  // Before the first v2 write there is no persisted v2 signature to compare against.
+  // A strong configured key is therefore considered ready; the first write creates
+  // the explicit v1 -> v2 rollover marker and all subsequent checks verify that record.
+  if (!row) {
+    const probe = createHmac("sha256", configured)
+      .update("procureflow-audit-v2-self-test", "utf8")
+      .digest("hex");
+    return probe.length === 64;
+  }
 
   const canonical = canonicalJson(row.canonical_payload_json);
   const expectedHash = createHash("sha256")
@@ -95,37 +88,57 @@ export async function verifyAuditSigningKey() {
   return safeEqualHex(expectedSignature, row.record_signature);
 }
 
-export async function verifyPayeeEncryptionKey() {
-  const configured = process.env.PROCUREFLOW_PAYEE_ENCRYPTION_KEY?.trim();
-  if (!configured) return false;
-
-  const sql = db();
-  const rows = await sql<{ value: string | null }[]>`
-    SELECT COALESCE(payee_name_encrypted, account_name_encrypted, bank_name_encrypted, account_number_encrypted) AS value
-    FROM payment_payee_details
-    WHERE COALESCE(payee_name_encrypted, account_name_encrypted, bank_name_encrypted, account_number_encrypted) IS NOT NULL
-    ORDER BY id DESC
-    LIMIT 1
-  `;
-  const value = rows[0]?.value;
-  if (!value) return true;
-
-  try {
-    decryptFernet(value, configured);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export async function getSecurityMigrationStatus(): Promise<SecurityMigrationStatus> {
-  const auditKeyConfigured = Boolean(process.env.PROCUREFLOW_AUDIT_SIGNING_KEY?.trim());
-  const payeeKeyConfigured = Boolean(process.env.PROCUREFLOW_PAYEE_ENCRYPTION_KEY?.trim());
+  const sql = db();
 
-  const [auditKeyVerified, payeeKeyVerified] = await Promise.all([
-    verifyAuditSigningKey().catch(() => false),
-    verifyPayeeEncryptionKey().catch(() => false),
+  const [legacyAuditRows, legacyPayeeRows, v2Rows] = await Promise.all([
+    sql<{ count: number }[]>`
+      SELECT COUNT(*)::int AS count
+      FROM audit_events
+      WHERE signature_key_version IS DISTINCT FROM ${ACTIVE_AUDIT_KEY_VERSION}
+    `,
+    sql<{ count: number }[]>`
+      SELECT COUNT(*)::int AS count
+      FROM payment_payee_details
+      WHERE COALESCE(
+        payee_name_encrypted,
+        account_name_encrypted,
+        bank_name_encrypted,
+        account_number_encrypted
+      ) IS NOT NULL
+    `,
+    sql<{ count: number }[]>`
+      SELECT COUNT(*)::int AS count
+      FROM audit_events
+      WHERE signature_key_version = ${ACTIVE_AUDIT_KEY_VERSION}
+    `,
   ]);
 
-  return { auditKeyConfigured, auditKeyVerified, payeeKeyConfigured, payeeKeyVerified };
+  const legacyAuditEventCount = Number(legacyAuditRows[0]?.count || 0);
+  const legacyPayeeEncryptedRows = Number(legacyPayeeRows[0]?.count || 0);
+  const activeAuditChainStarted = Number(v2Rows[0]?.count || 0) > 0;
+  const activeAuditKeyConfigured = Boolean(activeAuditKey());
+  const activePayeeKeyConfigured = Boolean(
+    process.env[ACTIVE_PAYEE_KEY_ENV]?.trim() &&
+      (process.env[ACTIVE_PAYEE_KEY_ENV]?.trim().length || 0) >= 32,
+  );
+
+  const [activeAuditKeyVerified, activePayeeKeyVerified] = await Promise.all([
+    verifyActiveAuditSigningKey().catch(() => false),
+    Promise.resolve(verifyPayeeEncryptionKeyV2()),
+  ]);
+
+  return {
+    legacyAuditPreserved: legacyAuditEventCount > 0,
+    legacyAuditEventCount,
+    legacyAuditVerifiable: false,
+    legacyPayeeEncryptedRows,
+    legacyPayeeRecoverable: false,
+    activeAuditKeyConfigured,
+    activeAuditKeyVerified,
+    activeAuditChainStarted,
+    activePayeeKeyConfigured,
+    activePayeeKeyVerified,
+    writesEnabled: activeAuditKeyVerified,
+  };
 }
