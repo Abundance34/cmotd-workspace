@@ -7,8 +7,44 @@
 .metric-card:nth-child(4):before{background:linear-gradient(135deg,transparent 10%,rgba(241,180,76,.15) 10% 28%,transparent 28% 42%,rgba(241,180,76,.08) 42% 62%,transparent 62% 100%)}
 .metric-card>span,.metric-card>strong,.metric-card>small{position:relative;z-index:2;max-width:64%}
 .status-chip,.status-pill{white-space:nowrap}.parity-danger,.logistics-danger{background:rgba(244,106,106,.08)!important;border-color:rgba(244,106,106,.28)!important;color:var(--pf-danger)!important}
+
+/* Normalize role-specific cards to the same enterprise surface language. */
+.finance-ready-card,.finance-payment-card,.finance-payee-panel,.finance-record-box,.finance-verify-box,
+.approver-request-card,.approver-decision-card,.approver-quote-section,.operational-list-card,.operational-decision-card,.operational-detail-section,
+.logistics-po-card,.logistics-editor,.logistics-exception-card,
+.admin-role-grid article,.admin-exception-card,.admin-backup-grid article,.admin-control-card,.admin-selected-record>div,.admin-policy-current,
+.income-metric-grid article,.income-subpanel,.income-entry-form,.income-entry-register,
+.settings-account-card,.settings-password-card{
+  border-radius:var(--pf-radius)!important;
+  box-shadow:none!important;
+}
+.finance-ready-card,.finance-payee-panel,.finance-record-box,.finance-verify-box,.approver-request-card,.approver-quote-section,.operational-list-card,.operational-detail-section,.logistics-po-card,.logistics-exception-card,.admin-role-grid article,.admin-exception-card,.admin-backup-grid article,.admin-control-card,.income-metric-grid article,.income-subpanel,.income-entry-form,.income-entry-register,.settings-account-card,.settings-password-card{background:var(--pf-surface)!important;border-color:var(--pf-border)!important;color:var(--pf-text)!important}
+.finance-payment-card,.approver-decision-card,.operational-decision-card,.logistics-editor{background:var(--pf-surface-2)!important;border-color:var(--pf-border)!important;color:var(--pf-text)!important}
+.finance-ready-card.active,.approver-request-card.active,.operational-list-card.active,.logistics-po-card.active{background:var(--pf-primary-soft)!important;border-color:rgba(85,110,230,.38)!important;box-shadow:none!important}
+.finance-ready-card strong,.finance-ready-card b,.finance-panel-title strong,.approver-request-card strong,.approver-request-card b,.operational-list-card strong,.operational-list-card b,.logistics-po-card strong,.logistics-po-card b,.admin-role-grid strong,.admin-exception-card strong,.admin-exception-card b,.admin-backup-grid strong,.admin-control-title,.admin-control-title strong,.admin-selected-record strong,.admin-policy-current strong,.income-metric-grid article strong,.income-subhead strong,.income-trend-row strong,.settings-card-title strong,.settings-account-card dd{color:var(--pf-text)!important}
+.finance-ready-card span,.finance-ready-card small,.finance-panel-title span,.finance-form-grid label span,.finance-verify-box label span,.approver-request-card span,.approver-request-card small,.operational-list-card span,.operational-list-card small,.operational-section-title span,.logistics-po-card span,.logistics-po-card small,.logistics-form-grid label>span,.admin-role-grid article>span,.admin-role-grid b,.admin-exception-card p,.admin-exception-card>div,.admin-backup-grid span,.admin-backup-grid small,.admin-control-title span,.admin-control-card label>span,.admin-selected-record span,.admin-selected-record small,.admin-submit-row small,.income-metric-grid article span,.income-metric-grid article small,.income-subhead span,.income-trend-row>span,.settings-card-title span,.settings-account-card dt{color:var(--pf-muted)!important}
+
+/* Color-coded informational notices stay semantic in both themes. */
+.finance-v2-ready,.approver-recommendation-summary,.procurement-review-note,.admin-write-gate.ready,.income-authority.manage{background:rgba(52,195,143,.09)!important;border-color:rgba(52,195,143,.26)!important;color:#278d68!important}
+.finance-legacy-warning,.settings-required-banner,.logistics-warning{background:rgba(241,180,76,.10)!important;border-color:rgba(241,180,76,.28)!important;color:#9b6b18!important}
+.finance-blocker,.admin-write-gate.locked,.admin-control-card.danger,.logistics-exception-card{background:rgba(244,106,106,.06)!important;border-color:rgba(244,106,106,.25)!important}
+.finance-archive-note,.approval-policy-note,.gateway-purpose-card,.admin-readonly-banner,.admin-policy-current,.admin-intervention-description,.income-formula{background:var(--pf-primary-soft)!important;border-color:rgba(85,110,230,.25)!important;color:var(--pf-primary)!important}
+.finance-separation-note{background:rgba(111,76,255,.09)!important;border-color:rgba(111,76,255,.22)!important;color:#7567d9!important}
+
+/* Income + settings components use the dashboard palette. */
+.income-filter-row input,.income-filter-row select,.income-entry-grid input,.income-entry-grid select,.income-notes textarea,.settings-password-card input{background:var(--pf-surface)!important;border-color:var(--pf-border-strong)!important;color:var(--pf-text)!important;border-radius:6px!important}
+.income-refresh{background:var(--pf-surface)!important;border-color:var(--pf-border)!important;color:var(--pf-text)!important;border-radius:6px!important}
+.income-trend-row>div{background:var(--pf-surface-2)!important}.income-trend-row i{background:linear-gradient(90deg,var(--pf-primary),#7c8ff2)!important}.income-authority.read,.settings-security-note,.settings-policy-grid span{background:var(--pf-surface-2)!important;border-color:var(--pf-border)!important;color:var(--pf-muted)!important}.settings-policy-grid span.met{background:rgba(52,195,143,.09)!important;color:#278d68!important}
+.settings-account-card dl div{border-color:var(--pf-border)!important}
+.forced-settings-page{background:var(--pf-bg)!important;color:var(--pf-text)!important}.forced-settings-header{background:var(--pf-surface)!important;border-color:var(--pf-border)!important}.forced-settings-heading p,.forced-settings-header small,.settings-signout{color:var(--pf-muted)!important}
+
+/* Full dark-mode cleanup for role-specific fixed colors. */
 html[data-theme="dark"] .draft-line,html[data-theme="dark"] .recipient-choice label,html[data-theme="dark"] .review-facts>div,html[data-theme="dark"] .review-justification,html[data-theme="dark"] .sourcing-task-card,html[data-theme="dark"] .quote-card,html[data-theme="dark"] .quote-score-row,html[data-theme="dark"] .comparison-metric-grid>div,html[data-theme="dark"] .recommendation-list-card,html[data-theme="dark"] .recommended-vendor-hero,html[data-theme="dark"] .parity-line-item,html[data-theme="dark"] .admin-permission-chips span{background:var(--pf-surface-2)!important;border-color:var(--pf-border)!important;color:var(--pf-text)!important}
 html[data-theme="dark"] .recipient-choice label.selected,html[data-theme="dark"] .sourcing-task-card.active,html[data-theme="dark"] .recommendation-list-card.active,html[data-theme="dark"] .comparison-metric-grid>div.recommended-metric{background:var(--pf-primary-soft)!important;border-color:rgba(85,110,230,.4)!important}
 html[data-theme="dark"] .draft-total{background:#191d29!important}html[data-theme="dark"] .quote-card.recommended-quote{background:rgba(52,195,143,.09)!important}
 html[data-theme="dark"] .review-action.reviewed{background:rgba(52,195,143,.10)!important;color:#61d6ad!important;border-color:rgba(52,195,143,.24)!important}html[data-theme="dark"] .review-action.return{background:rgba(241,180,76,.10)!important;color:#f7c873!important;border-color:rgba(241,180,76,.25)!important}
+html[data-theme="dark"] .finance-v2-ready,html[data-theme="dark"] .approver-recommendation-summary,html[data-theme="dark"] .procurement-review-note,html[data-theme="dark"] .admin-write-gate.ready,html[data-theme="dark"] .income-authority.manage{color:#61d6ad!important}
+html[data-theme="dark"] .finance-legacy-warning,html[data-theme="dark"] .settings-required-banner,html[data-theme="dark"] .logistics-warning{color:#f6c96e!important}
+html[data-theme="dark"] .finance-blocker,html[data-theme="dark"] .admin-write-gate.locked,html[data-theme="dark"] .logistics-exception-card{color:#ff9292!important}
+
 @media(max-width:1100px){.topbar>div:first-child{max-width:280px}.global-search-shell{width:220px}}
