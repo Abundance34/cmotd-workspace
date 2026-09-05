@@ -7,6 +7,21 @@ function replaceRequired(source, search, replacement, label) {
   return source.replace(search, replacement);
 }
 
+// Load the local-only standardized notification surface styles after the base parity layer.
+{
+  const path = "/app/app/layout.tsx";
+  let source = read(path);
+  if (!source.includes('import "./local-standard-notifications.css";')) {
+    source = replaceRequired(
+      source,
+      'import "./local-preview-parity.css";',
+      'import "./local-preview-parity.css";\nimport "./local-standard-notifications.css";',
+      "local notification stylesheet import",
+    );
+  }
+  write(path, source);
+}
+
 // Keep the Facility -> Procurement handoff assigned to the actual Procurement Manager
 // and point it at a real sidebar section. Other notifications are normalized at render
 // time so stale/legacy section names cannot break indicators or navigation.
@@ -43,7 +58,6 @@ function replaceRequired(source, search, replacement, label) {
         `${importMarker}\nimport { StandardNotificationBanner, standardizeNotifications } from "@/components/standard-notifications";`,
       );
     } else {
-      // GlobalTools can be grouped differently in future source; insert before the first local component import we know exists.
       source = replaceRequired(
         source,
         'import { FacilityDraftForm } from "@/components/facility-draft-form";',
