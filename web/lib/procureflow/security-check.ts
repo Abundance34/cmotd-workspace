@@ -18,6 +18,11 @@ export type SecurityMigrationStatus = {
   activePayeeKeyConfigured: boolean;
   activePayeeKeyVerified: boolean;
   writesEnabled: boolean;
+  // Compatibility aliases used by the current dashboard while the UI is being relabelled.
+  auditKeyConfigured: boolean;
+  auditKeyVerified: boolean;
+  payeeKeyConfigured: boolean;
+  payeeKeyVerified: boolean;
 };
 
 function stable(value: unknown): unknown {
@@ -140,5 +145,9 @@ export async function getSecurityMigrationStatus(): Promise<SecurityMigrationSta
     activePayeeKeyConfigured,
     activePayeeKeyVerified,
     writesEnabled: activeAuditKeyVerified,
+    auditKeyConfigured: activeAuditKeyConfigured,
+    auditKeyVerified: activeAuditKeyVerified,
+    payeeKeyConfigured: activePayeeKeyConfigured,
+    payeeKeyVerified: activePayeeKeyVerified,
   };
 }
