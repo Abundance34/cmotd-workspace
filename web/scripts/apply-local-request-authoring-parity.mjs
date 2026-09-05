@@ -15,11 +15,13 @@ if (!shell.includes('import { ProcurementDraftForm } from "@/components/procurem
 if (!shell.includes('if(section==="Create Request Draft")return <ProcurementDraftForm/>;')) {
   const marker = 'function ProcurementSection({section,data,parityData}:{section:string;data:any;parityData:ParityData}){\n';
   if (!shell.includes(marker)) throw new Error("Cannot find ProcurementSection in complete-role-shell.tsx.");
-  shell = shell.replace(
-    marker,
-    `${marker}  if(section==="Create Request Draft")return <ProcurementDraftForm/>;\n  if(section==="My Draft Requests")return <ProcurementOwnedDrafts/>;\n`,
-  );
+  shell = shell.replace(marker, `${marker}  if(section==="Create Request Draft")return <ProcurementDraftForm/>;\n  if(section==="My Draft Requests")return <ProcurementOwnedDrafts/>;\n`);
 }
+
+const oldInbox = '  if(section==="Utility Head / Facility Head Inbox")return <ProcurementInbox rows={data?.inbox||[]}/>;';
+const newInbox = '  if(section==="Utility Head / Facility Head Inbox")return <ProcurementInbox rows={data?.inbox||[]} approvalLimit={data?.approvalLimit||parityData.policyLimit}/>;';
+if (shell.includes(oldInbox)) shell = shell.replace(oldInbox, newInbox);
+else if (!shell.includes(newInbox)) throw new Error("Cannot find Procurement inbox renderer in complete-role-shell.tsx.");
 
 const facilityApprovedGeneric = '  if(section==="Approved / Accepted Requests")return <GenericRequestTable rows={data?.approved||[]}/>;';
 const facilityApprovedRegister = '  if(section==="Approved / Accepted Requests")return <FacilityRequestRegister rows={data?.approved||[]} notifications={parityData.notifications} emptyText="No approved or accepted requests are available."/>;';
@@ -27,4 +29,41 @@ if (shell.includes(facilityApprovedGeneric)) shell = shell.replace(facilityAppro
 else if (!shell.includes(facilityApprovedRegister)) throw new Error("Cannot find Facility approved-request renderer in complete-role-shell.tsx.");
 
 fs.writeFileSync(shellPath, shell, "utf8");
-console.log("Local request-authoring parity applied: Procurement Manager create/edit drafts, direct Approver routing, Facility approved-request opening and role-scoped request exports are wired into the local shell.");
+
+// Keep duplicate-account fingerprinting compatible with the existing Facility payee workflow.
+{
+  const draftPath = path.join(root, "lib/procureflow/request-draft-actions.ts");
+  let source = fs.readFileSync(draftPath, "utf8");
+  const oldFingerprint = 'createHmac("sha256", activeAuditSigningKey()).update(payee.accountNumber, "utf8").digest("hex")';
+  const newFingerprint = 'createHmac("sha256", activeAuditSigningKey()).update(`fingerprint:${payee.accountNumber.replace(/\\s+/g, "").toUpperCase()}`, "utf8").digest("hex")';
+  if (source.includes(oldFingerprint)) source = source.replace(oldFingerprint, newFingerprint);
+  else if (!source.includes(newFingerprint)) throw new Error("Cannot find request draft account fingerprint logic.");
+  fs.writeFileSync(draftPath, source, "utf8");
+}
+
+// The configured policy is authoritative. The fallback is aligned with the migration default.
+{
+  const dataPath = path.join(root, "lib/procureflow/parity-data.ts");
+  let source = fs.readFileSync(dataPath, "utf8");
+  source = source.replace('policyRows[0]?.amount || 100000', 'policyRows[0]?.amount || 2000000');
+  fs.writeFileSync(dataPath, source, "utf8");
+
+  const actionPath = path.join(root, "lib/procureflow/parity-actions.ts");
+  source = fs.readFileSync(actionPath, "utf8").replaceAll('amount||100000', 'amount||2000000');
+  fs.writeFileSync(actionPath, source, "utf8");
+}
+
+// Facility-originated requests within the configured threshold must use Procurement Manager low-value approval.
+{
+  const actionPath = path.join(root, "lib/procureflow/procurement-actions.ts");
+  let source = fs.readFileSync(actionPath, "utf8");
+  const marker = '    const now = new Date().toISOString();\n    const finalNote = note.trim() || policy.defaultNote;';
+  const guard = `    if (action === "submit_approval") {\n      const limitRows = await tx<{ amount: string | number }[]>\`\n        SELECT amount FROM approval_policy_settings\n        WHERE policy_key = 'procurement_manager_approval_limit'\n        LIMIT 1\n      \`;\n      const approvalLimit = Number(limitRows[0]?.amount || 2000000);\n      if (Number(request.estimated_amount || 0) <= approvalLimit) {\n        throw new Error(\`This Facility request is within the Procurement Manager low-value approval limit of NGN \${approvalLimit.toLocaleString("en-NG")}. Mark it reviewed and decide it under Low-Value Approvals instead of sending it to Approver / MD.\`);\n      }\n    }\n\n`;
+  if (!source.includes('This Facility request is within the Procurement Manager low-value approval limit')) {
+    if (!source.includes(marker)) throw new Error("Cannot find Procurement review transition marker for low-value guard.");
+    source = source.replace(marker, `${guard}${marker}`);
+  }
+  fs.writeFileSync(actionPath, source, "utf8");
+}
+
+console.log("Local request-authoring parity applied: PM-owned drafts route directly to Approver, Facility low-value requests stay with Procurement up to the configured limit, draft editing/account replacement and CSV/Excel/PDF/JSON exports are enabled.");
