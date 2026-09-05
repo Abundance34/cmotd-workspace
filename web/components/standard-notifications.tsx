@@ -1,6 +1,7 @@
 "use client";
 
-import { BellRing, ChevronRight } from "lucide-react";
+import { BellRing, Check, ChevronRight } from "lucide-react";
+import { useRouter } from "next/navigation";
 
 const ROLE_SECTIONS: Record<string, string[]> = {
   "Facility Manager": [
@@ -162,6 +163,15 @@ function importanceRank(value: unknown) {
   return 1;
 }
 
+async function markRead(notificationId: number) {
+  if (!notificationId) return;
+  await fetch("/api/parity/action", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "notification-read", payload: { notificationId } }),
+  });
+}
+
 export function StandardNotificationBanner({
   role,
   notifications,
@@ -171,12 +181,19 @@ export function StandardNotificationBanner({
   notifications: any[];
   onNavigate: (section: string) => void;
 }) {
+  const router = useRouter();
   const unread = standardizeNotifications(role, notifications)
     .filter((notification) => !notification.is_read)
     .sort((a, b) => importanceRank(b.importance) - importanceRank(a.importance));
 
   if (!unread.length) return null;
   const visible = unread.slice(0, 3);
+
+  async function openNotification(notification: any) {
+    await markRead(Number(notification.id)).catch(() => undefined);
+    onNavigate(notification.section_target);
+    router.refresh();
+  }
 
   return <section className="standard-notification-banner" aria-label="Unread notifications">
     <div className="standard-notification-heading">
@@ -186,11 +203,41 @@ export function StandardNotificationBanner({
     <div className="standard-notification-list">
       {visible.map((notification) => <article key={notification.id} data-importance={String(notification.importance || "Normal").toLowerCase()}>
         <div><span>{notification.importance || "Normal"}</span><strong>{notification.title || "ProcureFlow notification"}</strong><p>{notification.message || "New workflow activity is available."}</p></div>
-        <button type="button" onClick={() => onNavigate(notification.section_target)}>
+        <button type="button" onClick={() => void openNotification(notification)}>
           Open {notification.section_target}<ChevronRight size={15}/>
         </button>
       </article>)}
     </div>
     {unread.length > visible.length ? <small>+ {unread.length - visible.length} more unread notification{unread.length - visible.length === 1 ? "" : "s"} in the notification bell.</small> : null}
   </section>;
+}
+
+export function StandardSectionNotice({
+  role,
+  section,
+  notifications,
+}: {
+  role: string;
+  section: string;
+  notifications: any[];
+}) {
+  const router = useRouter();
+  const relevant = standardizeNotifications(role, notifications)
+    .filter((notification) => !notification.is_read && String(notification.section_target || "") === section)
+    .sort((a, b) => importanceRank(b.importance) - importanceRank(a.importance))
+    .slice(0, 3);
+
+  if (!relevant.length) return null;
+
+  async function dismiss(notificationId: number) {
+    await markRead(notificationId).catch(() => undefined);
+    router.refresh();
+  }
+
+  return <div className="standard-section-notices" aria-label={`Unread ${section} notifications`}>
+    {relevant.map((notification) => <article key={notification.id}>
+      <div><span>NEW</span><strong>{notification.title || "New activity"}</strong><p>{notification.message || "New workflow activity is available."}</p></div>
+      <button type="button" onClick={() => void dismiss(Number(notification.id))}><Check size={14}/> Mark read</button>
+    </article>)}
+  </div>;
 }
