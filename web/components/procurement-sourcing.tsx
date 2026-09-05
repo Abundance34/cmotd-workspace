@@ -2,8 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CirclePlus, PackageSearch, ShieldCheck, Star } from "lucide-react";
-import type { ProcurementSourcingTaskRow, ProcurementVendorOption } from "@/lib/procureflow/procurement-data";
+import { Award, CirclePlus, PackageSearch, ShieldCheck, Sparkles, Star } from "lucide-react";
+import type { ProcurementQuoteRow, ProcurementSourcingTaskRow, ProcurementVendorOption } from "@/lib/procureflow/procurement-data";
 
 function money(value: number, currency = "NGN") {
   try {
@@ -22,6 +22,20 @@ function dateText(value: string | null) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return new Intl.DateTimeFormat("en-NG", { day: "2-digit", month: "short", year: "numeric" }).format(date);
+}
+
+function scoreQuotes(quotes: ProcurementQuoteRow[]) {
+  if (!quotes.length) return [] as Array<ProcurementQuoteRow & { calculatedScore: number }>;
+  const maxAmount = Math.max(1, ...quotes.map((quote) => Number(quote.quotedAmount || 0)));
+  const maxDelivery = Math.max(1, ...quotes.map((quote) => Number(quote.deliveryDays || 0)));
+  return quotes.map((quote) => ({
+    ...quote,
+    calculatedScore: Math.round((
+      (1 - Number(quote.quotedAmount || 0) / maxAmount) * 45 +
+      (1 - Number(quote.deliveryDays || 0) / maxDelivery) * 25 +
+      (Number(quote.vendorRating || 0) / 5) * 30
+    ) * 10) / 10,
+  }));
 }
 
 export function ProcurementSourcing({
@@ -43,11 +57,30 @@ export function ProcurementSourcing({
   const [vendorRating, setVendorRating] = useState("3");
   const [notes, setNotes] = useState("");
   const [busy, setBusy] = useState(false);
+  const [recommendBusy, setRecommendBusy] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const selected = useMemo(
     () => tasks.find((task) => task.id === selectedId) || tasks[0] || null,
     [tasks, selectedId],
+  );
+
+  const scoredQuotes = useMemo(() => scoreQuotes(selected?.quotes || []), [selected]);
+  const lowest = useMemo(
+    () => scoredQuotes.length ? [...scoredQuotes].sort((a, b) => a.quotedAmount - b.quotedAmount)[0] : null,
+    [scoredQuotes],
+  );
+  const fastest = useMemo(
+    () => scoredQuotes.length ? [...scoredQuotes].sort((a, b) => a.deliveryDays - b.deliveryDays)[0] : null,
+    [scoredQuotes],
+  );
+  const bestRated = useMemo(
+    () => scoredQuotes.length ? [...scoredQuotes].sort((a, b) => b.vendorRating - a.vendorRating)[0] : null,
+    [scoredQuotes],
+  );
+  const predictedRecommendation = useMemo(
+    () => scoredQuotes.length ? [...scoredQuotes].sort((a, b) => b.calculatedScore - a.calculatedScore || a.quotedAmount - b.quotedAmount || a.deliveryDays - b.deliveryDays || b.vendorRating - a.vendorRating || a.id - b.id)[0] : null,
+    [scoredQuotes],
   );
 
   function resetQuoteForm() {
@@ -109,6 +142,32 @@ export function ProcurementSourcing({
     }
   }
 
+  async function recommendVendor() {
+    if (!selected || !predictedRecommendation) return;
+    if (!window.confirm(`Recommend ${predictedRecommendation.vendorName} for ${selected.requestNo} using the weighted quote score?`)) return;
+
+    setRecommendBusy(true);
+    setMessage(null);
+    try {
+      const response = await fetch("/api/procurement/sourcing/recommend", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourcingTaskId: selected.id }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error || "Unable to recommend vendor.");
+      setMessage({
+        type: "success",
+        text: `${payload?.result?.vendorName || predictedRecommendation.vendorName} is now the vendor recommendation for ${selected.requestNo} with score ${payload?.result?.score ?? predictedRecommendation.calculatedScore}.`,
+      });
+      router.refresh();
+    } catch (error) {
+      setMessage({ type: "error", text: error instanceof Error ? error.message : "Unable to recommend vendor." });
+    } finally {
+      setRecommendBusy(false);
+    }
+  }
+
   if (!tasks.length) {
     return (
       <div className="empty-state sourcing-empty">
@@ -156,20 +215,43 @@ export function ProcurementSourcing({
             </div>
           </section>
 
+          {scoredQuotes.length ? (
+            <section className="quote-comparison-panel">
+              <div className="sourcing-section-heading">
+                <div><h3>Weighted quote comparison</h3><p>Production scoring model: price 45% · delivery 25% · vendor rating 30%.</p></div>
+                <Sparkles size={18} />
+              </div>
+              <div className="comparison-metric-grid">
+                <div><span>Lowest Price</span><strong>{lowest?.vendorName || "—"}</strong><small>{lowest ? money(lowest.quotedAmount, lowest.currency) : "—"}</small></div>
+                <div><span>Fastest Delivery</span><strong>{fastest?.vendorName || "—"}</strong><small>{fastest ? `${fastest.deliveryDays} day${fastest.deliveryDays === 1 ? "" : "s"}` : "—"}</small></div>
+                <div><span>Best Rated</span><strong>{bestRated?.vendorName || "—"}</strong><small>{bestRated ? `${bestRated.vendorRating}/5` : "—"}</small></div>
+                <div className="recommended-metric"><span>Recommended</span><strong>{predictedRecommendation?.vendorName || "—"}</strong><small>{predictedRecommendation ? `Score ${predictedRecommendation.calculatedScore}` : "—"}</small></div>
+              </div>
+              <div className="recommendation-action-row">
+                <div><Award size={17} /><span>The server recalculates every quote score inside the same audited transaction before saving the recommendation.</span></div>
+                <button type="button" className="primary-form-button" disabled={recommendBusy || !predictedRecommendation} onClick={recommendVendor}>
+                  <Award size={16} />{recommendBusy ? "Calculating…" : selected.requestStatus === "Vendor Recommendation" ? "Recalculate Recommendation" : "Recommend Highest-Scoring Vendor"}
+                </button>
+              </div>
+            </section>
+          ) : null}
+
           <section className="sourcing-quotes-panel">
             <div className="sourcing-section-heading">
               <div><h3>Vendor quotes</h3><p>Each vendor price remains attached to that vendor for clear side-by-side comparison.</p></div>
               <span className="status-pill">{selected.quotes.length} captured</span>
             </div>
-            {selected.quotes.length ? (
+            {message ? <div className={`action-message ${message.type}`}>{message.text}</div> : null}
+            {scoredQuotes.length ? (
               <div className="quote-card-grid">
-                {selected.quotes.map((quote) => (
-                  <article className="quote-card" key={quote.id}>
+                {scoredQuotes.map((quote) => (
+                  <article className={quote.isRecommended ? "quote-card recommended-quote" : "quote-card"} key={quote.id}>
                     <div className="quote-card-head">
                       <div><strong>{quote.vendorName}</strong><span>{quote.vendorId ? "Registered vendor" : "Manual vendor"}</span></div>
                       <span className="quote-rating"><Star size={12} fill="currentColor" /> {quote.vendorRating}/5</span>
                     </div>
                     <div className="quote-price">{money(quote.quotedAmount, quote.currency)}</div>
+                    <div className="quote-score-row"><span>Weighted score</span><strong>{quote.score > 0 ? quote.score : quote.calculatedScore}</strong>{quote.isRecommended ? <em><Award size={12} /> Recommended</em> : null}</div>
                     <dl>
                       <div><dt>Delivery</dt><dd>{quote.deliveryDays} day{quote.deliveryDays === 1 ? "" : "s"}</dd></div>
                       <div><dt>Payment terms</dt><dd>{quote.paymentTerms || "—"}</dd></div>
@@ -185,10 +267,9 @@ export function ProcurementSourcing({
 
           <section className="quote-entry-panel">
             <div className="sourcing-section-heading">
-              <div><h3>Add Vendor Quote</h3><p>Capture a registered supplier or a manual vendor quote. Quote-document upload will be enabled with the GCP-free document storage layer.</p></div>
+              <div><h3>Add Vendor Quote</h3><p>Capture a registered supplier or a manual vendor quote. Adding another quote after a recommendation reopens quote collection so the comparison can be recalculated.</p></div>
               <CirclePlus size={18} />
             </div>
-            {message ? <div className={`action-message ${message.type}`}>{message.text}</div> : null}
             <form className="quote-entry-form" onSubmit={submitQuote}>
               <div className="form-grid form-grid-3">
                 <label><span>Registered vendor</span><select value={vendorId} onChange={(e) => setVendorId(e.target.value)}><option value="">Choose vendor</option>{vendors.map((vendor) => <option key={vendor.id} value={vendor.id}>{vendor.name}{vendor.category ? ` — ${vendor.category}` : ""}</option>)}</select></label>
