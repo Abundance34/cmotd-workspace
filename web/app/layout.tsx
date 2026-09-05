@@ -10,12 +10,22 @@ import "./admin.css";
 import "./income.css";
 import "./settings.css";
 import "./parity.css";
+import "./minia-theme.css";
 
 export const metadata: Metadata = {
   title: "ProcureFlow",
   description: "CMOTD enterprise procurement command centre",
 };
 
+const themeBoot = `
+(function(){
+  try {
+    var saved = localStorage.getItem('procureflow-theme');
+    var theme = saved === 'dark' || saved === 'light' ? saved : (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    document.documentElement.dataset.theme = theme;
+  } catch (_) {}
+})();`;
+
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body>{children}</body></html>;
+  return <html lang="en" suppressHydrationWarning><head><script dangerouslySetInnerHTML={{__html:themeBoot}} /></head><body>{children}</body></html>;
 }
