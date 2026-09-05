@@ -3,7 +3,7 @@
 import Image from "next/image";
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Bell, ChevronRight, Circle, LogOut, Search, ShieldCheck } from "lucide-react";
+import { Bell, ChevronRight, Circle, LogOut, Search, Send, ShieldCheck } from "lucide-react";
 import { ROLE_LABELS, ROLE_LANDING, ROLE_SECTIONS, ROLES, type ProcureFlowRole } from "@/lib/procureflow/roles";
 import type { FacilityDashboardData, FacilityRequestRow } from "@/lib/procureflow/facility-data";
 
@@ -32,7 +32,19 @@ function dateText(value: string | null) {
   return new Intl.DateTimeFormat("en-NG", { day: "2-digit", month: "short", year: "numeric" }).format(date);
 }
 
-function RequestTable({ rows, emptyText }: { rows: FacilityRequestRow[]; emptyText: string }) {
+function RequestTable({
+  rows,
+  emptyText,
+  actionLabel,
+  onAction,
+  busyId,
+}: {
+  rows: FacilityRequestRow[];
+  emptyText: string;
+  actionLabel?: string;
+  onAction?: (row: FacilityRequestRow) => void;
+  busyId?: number | null;
+}) {
   if (!rows.length) return <div className="empty-state">{emptyText}</div>;
   return (
     <div className="table-wrap">
@@ -46,6 +58,7 @@ function RequestTable({ rows, emptyText }: { rows: FacilityRequestRow[]; emptyTe
             <th>Amount</th>
             <th>Status</th>
             <th>Required</th>
+            {actionLabel ? <th>Action</th> : null}
           </tr>
         </thead>
         <tbody>
@@ -58,6 +71,18 @@ function RequestTable({ rows, emptyText }: { rows: FacilityRequestRow[]; emptyTe
               <td className="amount-cell">{money(row.estimatedAmount)}</td>
               <td><span className="status-chip">{row.status || "—"}</span></td>
               <td>{dateText(row.requiredDate)}</td>
+              {actionLabel ? (
+                <td>
+                  <button
+                    className="row-action-button"
+                    disabled={busyId === row.id}
+                    onClick={() => onAction?.(row)}
+                  >
+                    <Send size={14} />
+                    {busyId === row.id ? "Submitting…" : actionLabel}
+                  </button>
+                </td>
+              ) : null}
             </tr>
           ))}
         </tbody>
@@ -66,7 +91,19 @@ function RequestTable({ rows, emptyText }: { rows: FacilityRequestRow[]; emptyTe
   );
 }
 
-function FacilitySection({ section, data }: { section: string; data: FacilityDashboardData }) {
+function FacilitySection({
+  section,
+  data,
+  onSubmit,
+  busyId,
+  actionMessage,
+}: {
+  section: string;
+  data: FacilityDashboardData;
+  onSubmit: (row: FacilityRequestRow) => void;
+  busyId: number | null;
+  actionMessage: { type: "success" | "error"; text: string } | null;
+}) {
   if (section === "My Draft Requests") {
     return (
       <article className="panel live-section-panel">
@@ -77,10 +114,12 @@ function FacilitySection({ section, data }: { section: string; data: FacilityDas
   }
 
   if (section === "Submit to Procurement Manager") {
+    const rows = [...data.drafts, ...data.returned];
     return (
       <article className="panel live-section-panel">
-        <div className="panel-heading"><div><h2>Requests Ready for Submission</h2><p>Your live FM drafts are shown here. The submit action will be enabled in the write-workflow migration step.</p></div><span className="status-pill">Read layer live</span></div>
-        <RequestTable rows={data.drafts} emptyText="There are no drafts waiting for submission." />
+        <div className="panel-heading"><div><h2>Requests Ready for Submission</h2><p>Submit FM drafts or corrected requests into the Procurement Manager review queue. The transition writes workflow history, activity, notifications and audit evidence in the same transaction.</p></div><span className="status-pill">Write workflow enabled</span></div>
+        {actionMessage ? <div className={`action-message ${actionMessage.type}`}>{actionMessage.text}</div> : null}
+        <RequestTable rows={rows} emptyText="There are no drafts waiting for submission." actionLabel="Submit" onAction={onSubmit} busyId={busyId} />
       </article>
     );
   }
@@ -121,6 +160,8 @@ export function AppShell({ user, preview = false, facilityData }: { user: ShellU
   const role = preview ? previewRole : user.role;
   const nav = ROLE_SECTIONS[role];
   const [sectionByRole, setSectionByRole] = useState<Record<string, string>>({});
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [actionMessage, setActionMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const activeSection = sectionByRole[role] || nav.sections[0];
   const displayName = preview ? "Migration Preview" : user.fullName;
 
@@ -147,8 +188,29 @@ export function AppShell({ user, preview = false, facilityData }: { user: ShellU
     router.refresh();
   }
 
+  async function submitRequest(row: FacilityRequestRow) {
+    if (!window.confirm(`Submit ${row.requestNo} to the Procurement Manager?`)) return;
+    setBusyId(row.id);
+    setActionMessage(null);
+    try {
+      const response = await fetch("/api/facility/requests/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requestId: row.id }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error || "Unable to submit request.");
+      setActionMessage({ type: "success", text: `${row.requestNo} was submitted to the Procurement Manager successfully.` });
+      router.refresh();
+    } catch (error) {
+      setActionMessage({ type: "error", text: error instanceof Error ? error.message : "Unable to submit request." });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   const facilitySection = role === "Facility Manager" && facilityData
-    ? <FacilitySection section={activeSection} data={facilityData} />
+    ? <FacilitySection section={activeSection} data={facilityData} onSubmit={submitRequest} busyId={busyId} actionMessage={actionMessage} />
     : null;
 
   return (
@@ -158,7 +220,7 @@ export function AppShell({ user, preview = false, facilityData }: { user: ShellU
         <div className="sidebar-context"><span>{nav.title}</span>{preview ? <select value={role} onChange={(e) => setPreviewRole(e.target.value as ProcureFlowRole)}>{ROLES.map((item) => <option key={item} value={item}>{ROLE_LABELS[item]}</option>)}</select> : <strong>{ROLE_LABELS[role]}</strong>}</div>
         <nav className="sidebar-nav">
           {nav.sections.map((section) => (
-            <button key={section} className={activeSection === section ? "active" : ""} onClick={() => setSectionByRole((current) => ({ ...current, [role]: section }))}>
+            <button key={section} className={activeSection === section ? "active" : ""} onClick={() => { setActionMessage(null); setSectionByRole((current) => ({ ...current, [role]: section })); }}>
               <Circle size={8} fill="currentColor" /><span>{section}</span>
             </button>
           ))}
@@ -179,7 +241,7 @@ export function AppShell({ user, preview = false, facilityData }: { user: ShellU
           {isDashboard(activeSection) ? (
             <>
               <div className="metric-grid">{cards.map(([title, value, caption]) => <article className="metric-card" key={title}><span>{title}</span><strong>{value}</strong><small>{caption}</small></article>)}</div>
-              <div className="dashboard-grid"><article className="panel panel-large"><div className="panel-heading"><div><h2>Command chain</h2><p>Workflow preserved from the production Streamlit application.</p></div><span className="status-pill">Ported foundation</span></div><div className="chain"><span>Utility / Facility</span><ChevronRight /><span>Procurement</span><ChevronRight /><span>Approval</span><ChevronRight /><span>Finance</span><ChevronRight /><span>Closure</span><ChevronRight /><span>Audit</span></div>{role === "Facility Manager" && facilityData ? <div className="live-summary"><strong>Live data connected</strong><span>{facilityData.drafts.length} drafts · {facilityData.returned.length} returned · {facilityData.approved.length} approved/processed</span></div> : null}</article><article className="panel"><div className="panel-heading"><div><h2>Migration status</h2><p>Next.js + Vercel + Neon</p></div></div><ul className="status-list"><li><span>UI shell & branding</span><b>Ready</b></li><li><span>Role navigation</span><b>Ready</b></li><li><span>Workflow policy port</span><b>Ready</b></li><li><span>PostgreSQL auth adapter</span><b>Connected</b></li><li><span>Facility read layer</span><b>{role === "Facility Manager" && facilityData ? "Live" : "Queued"}</b></li></ul></article></div>
+              <div className="dashboard-grid"><article className="panel panel-large"><div className="panel-heading"><div><h2>Command chain</h2><p>Workflow preserved from the production Streamlit application.</p></div><span className="status-pill">Ported foundation</span></div><div className="chain"><span>Utility / Facility</span><ChevronRight /><span>Procurement</span><ChevronRight /><span>Approval</span><ChevronRight /><span>Finance</span><ChevronRight /><span>Closure</span><ChevronRight /><span>Audit</span></div>{role === "Facility Manager" && facilityData ? <div className="live-summary"><strong>Live data connected</strong><span>{facilityData.drafts.length} drafts · {facilityData.returned.length} returned · {facilityData.approved.length} approved/processed</span></div> : null}</article><article className="panel"><div className="panel-heading"><div><h2>Migration status</h2><p>Next.js + Vercel + Neon</p></div></div><ul className="status-list"><li><span>UI shell & branding</span><b>Ready</b></li><li><span>Role navigation</span><b>Ready</b></li><li><span>Workflow policy port</span><b>Ready</b></li><li><span>PostgreSQL auth adapter</span><b>Connected</b></li><li><span>Facility read layer</span><b>{role === "Facility Manager" && facilityData ? "Live" : "Queued"}</b></li><li><span>Facility submit workflow</span><b>Ported</b></li></ul></article></div>
             </>
           ) : facilitySection || (
             <article className="panel section-panel"><div className="section-icon"><ShieldCheck size={22} /></div><div><h2>{activeSection}</h2><p>The navigation, role boundary and page shell for this production section are represented in Next.js. This section is next in the migration queue for forms, tables, actions and Neon-backed queries.</p><div className="section-tags"><span>Role: {ROLE_LABELS[role]}</span><span>Production section preserved</span><span>Neon migration active</span></div></div></article>
