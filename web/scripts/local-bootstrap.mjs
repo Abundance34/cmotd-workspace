@@ -53,7 +53,7 @@ const permissions = [
 const grants = {
   "Admin": permissions,
   "Facility Manager": ["create_request", "view_request", "submit_request", "manage_documents", "manage_settings"],
-  "Procurement Manager": ["view_request", "source_vendors", "manage_vendors", "approve_low_value", "create_purchase_order", "manage_documents", "export_reports", "manage_settings"],
+  "Procurement Manager": ["create_request", "view_request", "submit_request", "source_vendors", "manage_vendors", "approve_low_value", "create_purchase_order", "manage_documents", "export_reports", "manage_settings"],
   "Approver": ["view_request", "approve_request", "approve_purchase_order", "approve_payment", "approve_gateway_pass", "export_reports", "manage_settings"],
   "Finance": ["view_request", "manage_finance", "manage_budget", "manage_income", "manage_documents", "export_reports", "manage_settings"],
   "Logistics Officer": ["view_request", "manage_logistics", "manage_receiving", "manage_documents", "manage_settings"],
@@ -166,19 +166,16 @@ try {
       INSERT INTO approval_policy_settings (
         policy_key, amount, updated_by, update_reason, created_at, updated_at
       ) VALUES (
-        'procurement_manager_approval_limit', 100000, ${ids.admin || null},
-        'Local Docker bootstrap policy', ${now}, ${now}
+        'procurement_manager_approval_limit', 2000000, ${ids.admin || null},
+        'Local Docker bootstrap default: Procurement Manager low-value limit', ${now}, ${now}
       )
-      ON CONFLICT (policy_key) DO UPDATE SET
-        amount = EXCLUDED.amount,
-        updated_by = EXCLUDED.updated_by,
-        update_reason = EXCLUDED.update_reason,
-        updated_at = EXCLUDED.updated_at
+      ON CONFLICT (policy_key) DO NOTHING
     `;
   });
 
   console.log("ProcureFlow local PostgreSQL bootstrap complete.");
   console.log("Local users: admin, facility, manager, approver, finance, logistics, auditor");
+  console.log("Procurement Manager default low-value approval limit: NGN 2,000,000 (Admin changes are preserved across rebuilds).");
   console.log("All local users use the generated password stored in the Docker secrets volume.");
 } finally {
   await sql.end({ timeout: 5 });
