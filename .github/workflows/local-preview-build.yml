@@ -20,5 +20,19 @@ jobs:
       - name: Checkout local preview branch
         uses: actions/checkout@v4
 
+      - name: Simulate Windows working-tree line endings
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          suffixes = {".ts", ".tsx", ".js", ".mjs"}
+          for file in Path("web").rglob("*"):
+              if not file.is_file() or file.suffix.lower() not in suffixes:
+                  continue
+              data = file.read_bytes()
+              data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+              file.write_bytes(data.replace(b"\n", b"\r\n"))
+          PY
+
       - name: Build exact local Docker preview images
         run: docker compose -f web/docker-compose.local.yml build
