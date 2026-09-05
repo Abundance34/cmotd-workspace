@@ -13,6 +13,7 @@ import "./parity.css";
 import "./minia-theme.css";
 import "./minia-theme-polish.css";
 import "./minia-theme-controls.css";
+import { ConfirmationCenter } from "@/components/in-app-confirmation";
 
 export const metadata: Metadata = {
   title: "ProcureFlow",
@@ -29,5 +30,5 @@ const themeBoot = `
 })();`;
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en" suppressHydrationWarning><head><script dangerouslySetInnerHTML={{__html:themeBoot}} /></head><body>{children}</body></html>;
+  return <html lang="en" suppressHydrationWarning><head><script dangerouslySetInnerHTML={{__html:themeBoot}} /></head><body>{children}<ConfirmationCenter /></body></html>;
 }
