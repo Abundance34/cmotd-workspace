@@ -36,6 +36,7 @@ export type ProcurementQuoteRow = {
   vendorRating: number;
   notes: string | null;
   quoteDate: string | null;
+  score: number;
   isRecommended: boolean;
   isSelected: boolean;
 };
@@ -46,6 +47,7 @@ export type ProcurementSourcingTaskRow = {
   requestId: number;
   requestNo: string;
   facilityManager: string | null;
+  requesterRole: string | null;
   departmentProject: string | null;
   category: string | null;
   estimatedAmount: number;
@@ -54,6 +56,7 @@ export type ProcurementSourcingTaskRow = {
   approvalStatus: string | null;
   requiredItemService: string | null;
   recommendedVendor: string | null;
+  reasonForRecommendation: string | null;
   quoteCount: number;
   lowestQuote: number | null;
   highestQuote: number | null;
@@ -70,6 +73,7 @@ export type ProcurementDashboardData = {
     activeVendors: number;
     gatewayWaiting: number;
   };
+  approvalLimit: number;
   inbox: ProcurementRequestRow[];
   requests: ProcurementRequestRow[];
   sourcing: ProcurementRequestRow[];
@@ -100,6 +104,7 @@ type RawSourcingRow = {
   request_id: number;
   request_no: string;
   facility_manager: string | null;
+  requester_role: string | null;
   department_project: string | null;
   category: string | null;
   estimated_amount: string | number | null;
@@ -108,6 +113,7 @@ type RawSourcingRow = {
   approval_status: string | null;
   required_item_service: string | null;
   recommended_vendor: string | null;
+  reason_for_recommendation: string | null;
   quote_count: number;
   lowest_quote: string | number | null;
   highest_quote: string | number | null;
@@ -130,6 +136,7 @@ type RawQuoteRow = {
   notes: string | null;
   quote_date: Date | string | null;
   created_at: Date | string;
+  score: string | number | null;
   is_recommended: boolean | null;
   is_selected: boolean;
 };
@@ -160,7 +167,7 @@ function mapRow(row: RawRow): ProcurementRequestRow {
 export async function getProcurementDashboardData(userId: number): Promise<ProcurementDashboardData> {
   const sql = db();
 
-  const [metrics, auxiliary] = await Promise.all([
+  const [metrics, auxiliary, policyRows] = await Promise.all([
     sql<{
       pending_review: number;
       requires_sourcing: number;
@@ -185,6 +192,12 @@ export async function getProcurementDashboardData(userId: number): Promise<Procu
       SELECT
         (SELECT COUNT(*)::int FROM vendors WHERE COALESCE(status, 'Active') = 'Active') AS active_vendors,
         (SELECT COUNT(*)::int FROM gateway_passes WHERE status IN ('Submitted', 'Pending Procurement Manager / Approver Review')) AS gateway_waiting
+    `,
+    sql<{ amount: string | number }[]>`
+      SELECT amount
+      FROM approval_policy_settings
+      WHERE policy_key = 'procurement_manager_approval_limit'
+      LIMIT 1
     `,
   ]);
 
@@ -237,6 +250,7 @@ export async function getProcurementDashboardData(userId: number): Promise<Procu
         st.request_id,
         pr.request_no,
         fm.full_name AS facility_manager,
+        requester.role AS requester_role,
         pr.department_project,
         pr.category,
         pr.estimated_amount,
@@ -245,6 +259,7 @@ export async function getProcurementDashboardData(userId: number): Promise<Procu
         st.approval_status,
         st.required_item_service,
         rv.name AS recommended_vendor,
+        st.reason_for_recommendation,
         COUNT(vq.id)::int AS quote_count,
         MIN(COALESCE(vq.quotation_total, vq.quoted_amount)) AS lowest_quote,
         MAX(COALESCE(vq.quotation_total, vq.quoted_amount)) AS highest_quote,
@@ -252,14 +267,15 @@ export async function getProcurementDashboardData(userId: number): Promise<Procu
       FROM sourcing_tasks st
       JOIN purchase_requests pr ON pr.id = st.request_id
       LEFT JOIN users fm ON fm.id = pr.facility_manager_user_id
+      LEFT JOIN users requester ON requester.id = pr.requested_by
       LEFT JOIN vendors rv ON rv.id = st.recommended_vendor_id
       LEFT JOIN vendor_quotes vq ON vq.sourcing_task_id = st.id
       WHERE (st.assigned_to = ${userId} OR pr.assigned_procurement_manager_id = ${userId} OR st.assigned_to IS NULL)
         AND pr.status IN ('Requires Sourcing', 'Vendor Quote Collection', 'Vendor Recommendation')
       GROUP BY st.id, st.sourcing_no, st.request_id, pr.request_no, fm.full_name,
-               pr.department_project, pr.category, pr.estimated_amount, pr.status,
+               requester.role, pr.department_project, pr.category, pr.estimated_amount, pr.status,
                st.status, st.approval_status, st.required_item_service, rv.name,
-               st.updated_at, st.created_at
+               st.reason_for_recommendation, st.updated_at, st.created_at
       ORDER BY COALESCE(st.updated_at, st.created_at) DESC
       LIMIT 100
     `,
@@ -270,7 +286,7 @@ export async function getProcurementDashboardData(userId: number): Promise<Procu
         vq.quoted_amount, vq.quotation_total, vq.currency,
         vq.delivery_time_days, vq.payment_terms, vq.warranty,
         vq.vendor_rating, vq.notes, vq.quote_date, vq.created_at,
-        vq.is_recommended, vq.is_selected
+        vq.score, vq.is_recommended, vq.is_selected
       FROM vendor_quotes vq
       JOIN sourcing_tasks st ON st.id = vq.sourcing_task_id
       JOIN purchase_requests pr ON pr.id = st.request_id
@@ -305,6 +321,7 @@ export async function getProcurementDashboardData(userId: number): Promise<Procu
       vendorRating: Number(quote.vendor_rating || 3),
       notes: quote.notes,
       quoteDate: dateValue(quote.quote_date || quote.created_at),
+      score: Number(quote.score || 0),
       isRecommended: Boolean(quote.is_recommended),
       isSelected: Boolean(quote.is_selected),
     };
@@ -315,6 +332,7 @@ export async function getProcurementDashboardData(userId: number): Promise<Procu
 
   const metric = metrics[0] || { pending_review: 0, requires_sourcing: 0, vendor_recommendation: 0, approved_processed: 0 };
   const aux = auxiliary[0] || { active_vendors: 0, gateway_waiting: 0 };
+  const approvalLimit = Number(policyRows[0]?.amount || 0);
 
   return {
     metrics: {
@@ -325,30 +343,37 @@ export async function getProcurementDashboardData(userId: number): Promise<Procu
       activeVendors: Number(aux.active_vendors || 0),
       gatewayWaiting: Number(aux.gateway_waiting || 0),
     },
+    approvalLimit,
     inbox: inboxRows.map(mapRow),
     requests: requestRows.map(mapRow),
     sourcing: sourcingRows.map(mapRow),
     recommendations: recommendationRows.map(mapRow),
-    sourcingTasks: sourcingTaskRows.map((task) => ({
-      id: Number(task.id),
-      sourcingNo: task.sourcing_no,
-      requestId: Number(task.request_id),
-      requestNo: task.request_no,
-      facilityManager: task.facility_manager,
-      departmentProject: task.department_project,
-      category: task.category,
-      estimatedAmount: Number(task.estimated_amount || 0),
-      requestStatus: task.request_status,
-      taskStatus: task.task_status,
-      approvalStatus: task.approval_status,
-      requiredItemService: task.required_item_service,
-      recommendedVendor: task.recommended_vendor,
-      quoteCount: Number(task.quote_count || 0),
-      lowestQuote: task.lowest_quote == null ? null : Number(task.lowest_quote),
-      highestQuote: task.highest_quote == null ? null : Number(task.highest_quote),
-      updatedAt: dateValue(task.updated_at),
-      quotes: quotesByTask.get(Number(task.id)) || [],
-    })),
+    sourcingTasks: sourcingTaskRows.map((task) => {
+      const quotes = quotesByTask.get(Number(task.id)) || [];
+      const recommendedQuote = quotes.find((quote) => quote.isRecommended);
+      return {
+        id: Number(task.id),
+        sourcingNo: task.sourcing_no,
+        requestId: Number(task.request_id),
+        requestNo: task.request_no,
+        facilityManager: task.facility_manager,
+        requesterRole: task.requester_role,
+        departmentProject: task.department_project,
+        category: task.category,
+        estimatedAmount: Number(task.estimated_amount || 0),
+        requestStatus: task.request_status,
+        taskStatus: task.task_status,
+        approvalStatus: task.approval_status,
+        requiredItemService: task.required_item_service,
+        recommendedVendor: task.recommended_vendor || recommendedQuote?.vendorName || null,
+        reasonForRecommendation: task.reason_for_recommendation,
+        quoteCount: Number(task.quote_count || 0),
+        lowestQuote: task.lowest_quote == null ? null : Number(task.lowest_quote),
+        highestQuote: task.highest_quote == null ? null : Number(task.highest_quote),
+        updatedAt: dateValue(task.updated_at),
+        quotes,
+      };
+    }),
     vendors: vendorRows.map((vendor) => ({
       id: Number(vendor.id),
       name: vendor.name,
