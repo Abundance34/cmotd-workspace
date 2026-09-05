@@ -3,6 +3,7 @@ import "./globals.css";
 import "./live-data.css";
 import "./facility.css";
 import "./approver.css";
+import "./finance.css";
 
 export const metadata: Metadata = {
   title: "ProcureFlow",
