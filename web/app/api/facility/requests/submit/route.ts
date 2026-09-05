@@ -1,17 +1,17 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { submitFacilityRequest } from "@/lib/procureflow/facility-actions";
-import { verifyAuditSigningKey } from "@/lib/procureflow/security-check";
+import { verifyActiveAuditSigningKey } from "@/lib/procureflow/security-check";
 
 export async function POST(request: Request) {
   try {
     const user = await getCurrentUser();
     if (!user) return NextResponse.json({ error: "Authentication required." }, { status: 401 });
 
-    const auditKeyVerified = await verifyAuditSigningKey().catch(() => false);
+    const auditKeyVerified = await verifyActiveAuditSigningKey().catch(() => false);
     if (!auditKeyVerified) {
       return NextResponse.json(
-        { error: "ProcureFlow writes are temporarily locked because the migrated production audit signing key has not been verified." },
+        { error: "ProcureFlow writes are temporarily locked until the approved v2 audit signing key is configured and verified." },
         { status: 503 },
       );
     }
