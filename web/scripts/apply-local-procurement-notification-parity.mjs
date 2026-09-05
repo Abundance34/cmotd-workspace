@@ -44,24 +44,22 @@ function replaceRequired(source, search, replacement, label) {
 }
 
 // Apply one notification experience to Facility, Procurement, Approver, Finance,
-// Logistics, Admin and Auditor: bell count, sidebar badge, dashboard alert and
-// role-valid navigation target all use the same standardized notification list.
+// Logistics, Admin and Auditor: bell count, sidebar badge, dashboard alert,
+// section notice and role-valid navigation target all use the same standardized list.
 {
   const path = "/app/components/complete-role-shell.tsx";
   let source = read(path);
 
-  if (!source.includes('import { StandardNotificationBanner, standardizeNotifications } from "@/components/standard-notifications";')) {
+  if (!source.includes('import { StandardNotificationBanner, StandardSectionNotice, standardizeNotifications } from "@/components/standard-notifications";')) {
     const importMarker = 'import { GlobalTools } from "@/components/global-tools";';
+    const importLine = 'import { StandardNotificationBanner, StandardSectionNotice, standardizeNotifications } from "@/components/standard-notifications";';
     if (source.includes(importMarker)) {
-      source = source.replace(
-        importMarker,
-        `${importMarker}\nimport { StandardNotificationBanner, standardizeNotifications } from "@/components/standard-notifications";`,
-      );
+      source = source.replace(importMarker, `${importMarker}\n${importLine}`);
     } else {
       source = replaceRequired(
         source,
         'import { FacilityDraftForm } from "@/components/facility-draft-form";',
-        'import { StandardNotificationBanner, standardizeNotifications } from "@/components/standard-notifications";\nimport { FacilityDraftForm } from "@/components/facility-draft-form";',
+        `${importLine}\nimport { FacilityDraftForm } from "@/components/facility-draft-form";`,
         "notification component import anchor",
       );
     }
@@ -98,6 +96,16 @@ function replaceRequired(source, search, replacement, label) {
     );
   }
 
+  // Every non-dashboard workspace shows its own unread notices above the records/actions.
+  if (!source.includes('<StandardSectionNotice role={user.role}')) {
+    source = replaceRequired(
+      source,
+      '<span className="status-pill"><ShieldCheck size={13}/> Connected</span></div>{content}</article>',
+      '<span className="status-pill"><ShieldCheck size={13}/> Connected</span></div><StandardSectionNotice role={user.role} section={section} notifications={standardNotifications}/>{content}</article>',
+      "section notification notice anchor",
+    );
+  }
+
   // Local preview must describe its real runtime, not production Neon/Vercel.
   source = source.replaceAll("Complete Vercel + Neon operational workflow.", "Complete ProcureFlow operational workflow.");
   source = source.replaceAll("Feature-parity build", "Local parity preview");
@@ -108,4 +116,4 @@ function replaceRequired(source, search, replacement, label) {
   write(path, source);
 }
 
-console.log("Local notification standardization applied: all seven roles now share bell counts, sidebar indicators, dashboard alerts and valid role-specific navigation targets.");
+console.log("Local notification standardization applied: all seven roles now share bell counts, sidebar indicators, dashboard alerts, section notices and valid role-specific navigation targets.");
