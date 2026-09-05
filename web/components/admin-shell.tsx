@@ -13,6 +13,7 @@ import {
   AdminWorkflowInterventionControls,
 } from "@/components/admin-controls";
 import { AdminDirectoryControls, AdminRolePermissionControls } from "@/components/admin-directory-controls";
+import { AdminAvailabilityControls } from "@/components/admin-availability-controls";
 
 type ShellUser = { id: number; fullName: string; username: string; role: "Admin" };
 
@@ -103,7 +104,7 @@ export function AdminShell({user,data,securityStatus}:{user:ShellUser;data:Admin
   else if(section==="Import Center")content=<Empty text="The migrated production database contains no imported legacy document rows. A Vercel-compatible upload/import storage path remains to be ported before imports are re-enabled."/>;
   else if(section==="All Procurement Records")content=<Stack><RequestsTable data={data}/><h3 className="admin-subhead">Purchase orders</h3><PurchaseOrdersTable data={data}/><h3 className="admin-subhead">Payments</h3><PaymentsTable data={data}/></Stack>;
   else if(section==="Notifications Monitor")content=<NotificationsTable data={data}/>;
-  else if(section==="Availability & Delegation Requests")content=<AvailabilityDelegation data={data}/>;
+  else if(section==="Availability & Delegation Requests")content=<Stack><AdminAvailabilityControls data={data} securityStatus={securityStatus}/><AvailabilityDelegation data={data}/></Stack>;
   else if(section==="Gateway Pass Management")content=<GatewayTable data={data}/>;
   else if(section==="Activity & History Logs")content=<div className="table-wrap"><table className="data-table admin-table"><thead><tr><th>Time</th><th>Role</th><th>Action</th><th>Entity</th><th>Summary</th><th>Visibility</th></tr></thead><tbody>{data.evidence.activities.map(r=><tr key={r.id}><td>{dateText(r.createdAt)}</td><td>{roleText(r.role)}</td><td><strong>{r.action}</strong></td><td>{r.entityType||"—"} {r.entityId?`#${r.entityId}`:""}</td><td>{r.summary||"—"}</td><td>{r.visibility||"—"}</td></tr>)}</tbody></table></div>;
   else if(section==="Audit Logs")content=<AuditTable data={data}/>;
