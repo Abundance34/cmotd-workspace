@@ -13,6 +13,7 @@ import "./parity.css";
 import "./minia-theme.css";
 import "./minia-theme-polish.css";
 import "./minia-theme-controls.css";
+import "./local-request-authoring.css";
 import { ConfirmationCenter } from "@/components/in-app-confirmation";
 
 export const metadata: Metadata = {
