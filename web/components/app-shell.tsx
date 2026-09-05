@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { Bell, ChevronRight, Circle, LogOut, Search, Send, ShieldCheck } from "lucide-react";
 import { ROLE_LABELS, ROLE_LANDING, ROLE_SECTIONS, ROLES, type ProcureFlowRole } from "@/lib/procureflow/roles";
 import type { FacilityDashboardData, FacilityRequestRow } from "@/lib/procureflow/facility-data";
+import type { SecurityMigrationStatus } from "@/lib/procureflow/security-check";
 
 export type ShellUser = { id?: number; fullName: string; username?: string; role: ProcureFlowRole };
 
@@ -154,7 +155,7 @@ function FacilitySection({
   return null;
 }
 
-export function AppShell({ user, preview = false, facilityData }: { user: ShellUser; preview?: boolean; facilityData?: FacilityDashboardData }) {
+export function AppShell({ user, preview = false, facilityData, securityStatus }: { user: ShellUser; preview?: boolean; facilityData?: FacilityDashboardData; securityStatus?: SecurityMigrationStatus }) {
   const router = useRouter();
   const [previewRole, setPreviewRole] = useState<ProcureFlowRole>(user.role);
   const role = preview ? previewRole : user.role;
@@ -241,7 +242,7 @@ export function AppShell({ user, preview = false, facilityData }: { user: ShellU
           {isDashboard(activeSection) ? (
             <>
               <div className="metric-grid">{cards.map(([title, value, caption]) => <article className="metric-card" key={title}><span>{title}</span><strong>{value}</strong><small>{caption}</small></article>)}</div>
-              <div className="dashboard-grid"><article className="panel panel-large"><div className="panel-heading"><div><h2>Command chain</h2><p>Workflow preserved from the production Streamlit application.</p></div><span className="status-pill">Ported foundation</span></div><div className="chain"><span>Utility / Facility</span><ChevronRight /><span>Procurement</span><ChevronRight /><span>Approval</span><ChevronRight /><span>Finance</span><ChevronRight /><span>Closure</span><ChevronRight /><span>Audit</span></div>{role === "Facility Manager" && facilityData ? <div className="live-summary"><strong>Live data connected</strong><span>{facilityData.drafts.length} drafts · {facilityData.returned.length} returned · {facilityData.approved.length} approved/processed</span></div> : null}</article><article className="panel"><div className="panel-heading"><div><h2>Migration status</h2><p>Next.js + Vercel + Neon</p></div></div><ul className="status-list"><li><span>UI shell & branding</span><b>Ready</b></li><li><span>Role navigation</span><b>Ready</b></li><li><span>Workflow policy port</span><b>Ready</b></li><li><span>PostgreSQL auth adapter</span><b>Connected</b></li><li><span>Facility read layer</span><b>{role === "Facility Manager" && facilityData ? "Live" : "Queued"}</b></li><li><span>Facility submit workflow</span><b>Ported</b></li></ul></article></div>
+              <div className="dashboard-grid"><article className="panel panel-large"><div className="panel-heading"><div><h2>Command chain</h2><p>Workflow preserved from the production Streamlit application.</p></div><span className="status-pill">Ported foundation</span></div><div className="chain"><span>Utility / Facility</span><ChevronRight /><span>Procurement</span><ChevronRight /><span>Approval</span><ChevronRight /><span>Finance</span><ChevronRight /><span>Closure</span><ChevronRight /><span>Audit</span></div>{role === "Facility Manager" && facilityData ? <div className="live-summary"><strong>Live data connected</strong><span>{facilityData.drafts.length} drafts · {facilityData.returned.length} returned · {facilityData.approved.length} approved/processed</span></div> : null}</article><article className="panel"><div className="panel-heading"><div><h2>Migration status</h2><p>Next.js + Vercel + Neon</p></div></div><ul className="status-list"><li><span>UI shell & branding</span><b>Ready</b></li><li><span>Role navigation</span><b>Ready</b></li><li><span>Workflow policy port</span><b>Ready</b></li><li><span>PostgreSQL auth adapter</span><b>Connected</b></li><li><span>Facility read layer</span><b>{role === "Facility Manager" && facilityData ? "Live" : "Queued"}</b></li><li><span>Audit signing key</span><b>{securityStatus?.auditKeyVerified ? "Verified" : securityStatus?.auditKeyConfigured ? "Check failed" : "Missing"}</b></li><li><span>Payee encryption key</span><b>{securityStatus?.payeeKeyVerified ? "Verified" : securityStatus?.payeeKeyConfigured ? "Check failed" : "Missing"}</b></li><li><span>Facility submit workflow</span><b>Ported</b></li></ul></article></div>
             </>
           ) : facilitySection || (
             <article className="panel section-panel"><div className="section-icon"><ShieldCheck size={22} /></div><div><h2>{activeSection}</h2><p>The navigation, role boundary and page shell for this production section are represented in Next.js. This section is next in the migration queue for forms, tables, actions and Neon-backed queries.</p><div className="section-tags"><span>Role: {ROLE_LABELS[role]}</span><span>Production section preserved</span><span>Neon migration active</span></div></div></article>
