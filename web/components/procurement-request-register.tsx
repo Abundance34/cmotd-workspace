@@ -43,8 +43,8 @@ export function ProcurementRequestRegister({ rows }: { rows: ProcurementRequestR
 
   if (!rows.length) return <div className="empty-state">No purchase requests are available.</div>;
 
-  return <div className="procurement-request-register">
-    <div className="table-wrap procurement-request-table">
+  return <div className="procurement-request-register facility-register-layout">
+    <div className="table-wrap procurement-request-table facility-register-table">
       <table className="data-table">
         <thead><tr><th>Request</th><th>Department / Project</th><th>Category</th><th>Amount</th><th>Status</th><th>Payment</th><th>Updated</th><th></th></tr></thead>
         <tbody>{rows.map((row) => <tr
@@ -66,7 +66,7 @@ export function ProcurementRequestRegister({ rows }: { rows: ProcurementRequestR
       </table>
     </div>
 
-    {selectedId ? <section className="procurement-request-detail">
+    {selectedId ? <section className="facility-request-detail procurement-request-detail">
       <div className="facility-detail-head">
         <div><span>PURCHASE REQUEST</span><h3>{detail?.request?.request_no || (loading ? "Loading request…" : "Request")}</h3><p>Complete procurement view of the selected request and its workflow evidence.</p></div>
         <button type="button" className="facility-detail-close" aria-label="Close request detail" onClick={() => { setSelectedId(null); setDetail(null); setMessage(null); }}><X size={18}/></button>
