@@ -22,6 +22,7 @@ type RequestInterventionAction =
   | "Release Stuck Approval"
   | "Reopen Completed / Closed / Archived"
   | "Cancel Duplicate Request"
+  | "Rescind Granted Approval"
   | "Emergency Approve Request"
   | "Emergency Reject Request";
 
@@ -177,6 +178,7 @@ const interventionDescriptions: Record<RequestInterventionAction, string> = {
   "Release Stuck Approval": "Recompute and restore the approval queue for a request already awaiting approval.",
   "Reopen Completed / Closed / Archived": "Reopen a closed-stage procurement at Receipt Uploaded for controlled operational follow-up.",
   "Cancel Duplicate Request": "Cancel a duplicate only when no approved/paid payment evidence blocks cancellation.",
+  "Rescind Granted Approval": "Withdraw the latest granted request approval only before any payment has been recorded, then return it to the approval queue with immutable rescission evidence.",
   "Emergency Approve Request": "Exceptional Admin approval of a request already awaiting final approval. Self-approval is blocked.",
   "Emergency Reject Request": "Exceptional Admin rejection of a request already awaiting final approval. Self-rejection is blocked.",
 };
@@ -200,7 +202,8 @@ export function AdminWorkflowInterventionControls({
   const [feedback, setFeedback] = useState<Feedback>(null);
   const selected = requests.find((row) => row.id === requestId) || null;
   const ready = securityStatus.activeAuditKeyVerified;
-  const isEmergency = action.startsWith("Emergency") || action.startsWith("Cancel") || action.startsWith("Reopen");
+  const isRescission = action === "Rescind Granted Approval";
+  const isEmergency = isRescission || action.startsWith("Emergency") || action.startsWith("Cancel") || action.startsWith("Reopen");
   const confirmed = Boolean(selected && confirmation.trim() === selected.requestNo);
   const pmRequired = action === "Reassign Procurement Manager";
 
@@ -209,13 +212,15 @@ export function AdminWorkflowInterventionControls({
     setBusy(true);
     setFeedback(null);
     try {
-      const result = await postAdminAction({
-        action: "request-intervention",
-        requestId: selected.id,
-        interventionAction: action,
-        reason,
-        targetProcurementManagerId: pmRequired ? targetProcurementManagerId : undefined,
-      });
+      const result = isRescission
+        ? await postAdminAction({ action: "rescind-approval", requestId: selected.id, reason })
+        : await postAdminAction({
+            action: "request-intervention",
+            requestId: selected.id,
+            interventionAction: action,
+            reason,
+            targetProcurementManagerId: pmRequired ? targetProcurementManagerId : undefined,
+          });
       setFeedback({ kind: "success", text: `${action} completed for ${selected.requestNo}. New status: ${result?.status || selected.status || "unchanged"}. Intervention ${result?.interventionNo || "recorded"}.` });
       setReason("");
       setConfirmation("");
@@ -234,14 +239,14 @@ export function AdminWorkflowInterventionControls({
         <div className="admin-control-title"><AlertTriangle size={17}/><div><strong>Workflow intervention</strong><span>These controls are exceptional Admin powers, not ordinary Procurement, Approver, Finance or Logistics work.</span></div></div>
         <div className="admin-form-grid">
           <label><span>Purchase request</span><select value={requestId} onChange={(e) => { setRequestId(Number(e.target.value)); setConfirmation(""); setFeedback(null); }}>{requests.map((row) => <option key={row.id} value={row.id}>{row.requestNo} — {row.status || "Unknown"}</option>)}</select></label>
-          <label><span>Intervention</span><select value={action} onChange={(e) => { setAction(e.target.value as RequestInterventionAction); setFeedback(null); }}><option>Correct Request Routing</option><option>Reassign Procurement Manager</option><option>Return for Correction</option><option>Return to Procurement Review</option><option>Release Stuck Approval</option><option>Reopen Completed / Closed / Archived</option><option>Cancel Duplicate Request</option><option>Emergency Approve Request</option><option>Emergency Reject Request</option></select></label>
+          <label><span>Intervention</span><select value={action} onChange={(e) => { setAction(e.target.value as RequestInterventionAction); setFeedback(null); }}><option>Correct Request Routing</option><option>Reassign Procurement Manager</option><option>Return for Correction</option><option>Return to Procurement Review</option><option>Release Stuck Approval</option><option>Reopen Completed / Closed / Archived</option><option>Cancel Duplicate Request</option><option>Rescind Granted Approval</option><option>Emergency Approve Request</option><option>Emergency Reject Request</option></select></label>
         </div>
         {selected && <div className="admin-selected-record"><div><span>Request</span><strong>{selected.requestNo}</strong><small>{selected.departmentProject || "No department / project"}</small></div><div><span>Current state</span><strong>{selected.status || "Unknown"}</strong><small>Next role: {selected.nextRole || "—"}</small></div><div><span>Value / PM</span><strong>{new Intl.NumberFormat("en-NG", { style: "currency", currency: "NGN", maximumFractionDigits: 2 }).format(selected.amount)}</strong><small>{selected.procurementManager || "No Procurement Manager assigned"}</small></div></div>}
         <div className={`admin-intervention-description ${isEmergency ? "danger" : ""}`}><AlertTriangle size={15}/><span>{interventionDescriptions[action]}</span></div>
         {pmRequired && <label className="admin-field-wide"><span>New Procurement Manager</span><select value={targetProcurementManagerId} onChange={(e) => setTargetProcurementManagerId(Number(e.target.value))}><option value={0}>Choose an active Procurement Manager</option>{procurementManagers.map((row) => <option key={row.id} value={row.id}>{row.fullName} ({row.username})</option>)}</select></label>}
         <label className="admin-field-wide"><span>Mandatory intervention reason</span><textarea rows={3} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Explain the exception, authority and intended outcome." /></label>
         <label className="admin-field-wide"><span>Confirm by typing the request number: <b>{selected?.requestNo || "—"}</b></span><input value={confirmation} onChange={(e) => setConfirmation(e.target.value)} placeholder={selected?.requestNo || "Select a request"} /></label>
-        <div className="admin-submit-row"><button type="button" className={isEmergency ? "admin-danger-action" : "admin-primary-action"} disabled={!ready || !selected || !confirmed || reason.trim().length < 5 || (pmRequired && !targetProcurementManagerId) || busy} onClick={submit}>{busy ? "Applying intervention…" : action}</button><small>Server-side status, ownership, payment-state, duplicate-payment and self-approval guards remain authoritative even after confirmation.</small></div>
+        <div className="admin-submit-row"><button type="button" className={isEmergency ? "admin-danger-action" : "admin-primary-action"} disabled={!ready || !selected || !confirmed || reason.trim().length < 5 || (pmRequired && !targetProcurementManagerId) || busy} onClick={submit}>{busy ? "Applying intervention…" : action}</button><small>Server-side status, ownership, payment-state, duplicate-payment, rescission and self-approval guards remain authoritative even after confirmation.</small></div>
         <FeedbackBox feedback={feedback} />
       </section>
     </div>
