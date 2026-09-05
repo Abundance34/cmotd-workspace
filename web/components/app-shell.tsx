@@ -10,6 +10,7 @@ import type { ProcurementDashboardData, ProcurementRequestRow } from "@/lib/proc
 import type { SecurityMigrationStatus } from "@/lib/procureflow/security-check";
 import { FacilityDraftForm } from "@/components/facility-draft-form";
 import { ProcurementInbox } from "@/components/procurement-inbox";
+import { ProcurementSourcing } from "@/components/procurement-sourcing";
 
 export type ShellUser = { id?: number; fullName: string; username?: string; role: ProcureFlowRole };
 
@@ -195,7 +196,7 @@ function ProcurementSection({ section, data }: { section: string; data: Procurem
   if (section === "Utility Head / Facility Head Inbox") {
     return (
       <article className="panel live-section-panel">
-        <div className="panel-heading"><div><h2>Utility Head / Facility Head Inbox</h2><p>Requests routed from Utility / Facility Heads. Review, return for correction, or submit valid requests to Approver / MD.</p></div><span className="status-pill">{data.inbox.length} awaiting review</span></div>
+        <div className="panel-heading"><div><h2>Utility Head / Facility Head Inbox</h2><p>Requests routed from Utility / Facility Heads. Review, return for correction, start sourcing, or submit valid requests to Approver / MD.</p></div><span className="status-pill">{data.inbox.length} awaiting review</span></div>
         <ProcurementInbox rows={data.inbox} />
       </article>
     );
@@ -213,8 +214,8 @@ function ProcurementSection({ section, data }: { section: string; data: Procurem
   if (section === "Sourcing") {
     return (
       <article className="panel live-section-panel">
-        <div className="panel-heading"><div><h2>Sourcing Queue</h2><p>Requests currently requiring supplier sourcing or quote collection.</p></div><span className="status-pill">{data.sourcing.length} active</span></div>
-        <ProcurementTable rows={data.sourcing} emptyText="No requests currently require sourcing." />
+        <div className="panel-heading"><div><h2>Sourcing & Vendor Quote Collection</h2><p>Create and compare vendor quotes against live Neon sourcing tasks. Each vendor retains its own quoted price and commercial terms.</p></div><span className="status-pill">{data.sourcingTasks.length} active task{data.sourcingTasks.length === 1 ? "" : "s"}</span></div>
+        <ProcurementSourcing tasks={data.sourcingTasks} vendors={data.vendors} />
       </article>
     );
   }
@@ -355,7 +356,7 @@ export function AppShell({
           {isDashboard(activeSection) ? (
             <>
               <div className="metric-grid">{cards.map(([title, value, caption]) => <article className="metric-card" key={title}><span>{title}</span><strong>{value}</strong><small>{caption}</small></article>)}</div>
-              <div className="dashboard-grid"><article className="panel panel-large"><div className="panel-heading"><div><h2>Command chain</h2><p>Workflow preserved from the production Streamlit application.</p></div><span className="status-pill">Ported foundation</span></div><div className="chain"><span>Utility / Facility</span><ChevronRight /><span>Procurement</span><ChevronRight /><span>Approval</span><ChevronRight /><span>Finance</span><ChevronRight /><span>Closure</span><ChevronRight /><span>Audit</span></div>{liveSummary ? <div className="live-summary"><strong>Live data connected</strong><span>{liveSummary}</span></div> : null}</article><article className="panel"><div className="panel-heading"><div><h2>Migration status</h2><p>Next.js + Vercel + Neon</p></div></div><ul className="status-list"><li><span>UI shell & branding</span><b>Ready</b></li><li><span>Role navigation</span><b>Ready</b></li><li><span>Workflow policy port</span><b>Ready</b></li><li><span>PostgreSQL auth adapter</span><b>Connected</b></li><li><span>Facility read layer</span><b>{role === "Facility Manager" && facilityData ? "Live" : "Ported"}</b></li><li><span>Procurement read layer</span><b>{role === "Procurement Manager" && procurementData ? "Live" : "Ported"}</b></li><li><span>Audit signing key</span><b>{securityStatus?.auditKeyVerified ? "Verified" : securityStatus?.auditKeyConfigured ? "Check failed" : "Missing"}</b></li><li><span>Payee encryption key</span><b>{securityStatus?.payeeKeyVerified ? "Verified" : securityStatus?.payeeKeyConfigured ? "Check failed" : "Missing"}</b></li><li><span>Facility draft creation</span><b>Ported</b></li><li><span>Facility submit workflow</span><b>Ported</b></li><li><span>Procurement review workflow</span><b>Ported</b></li></ul></article></div>
+              <div className="dashboard-grid"><article className="panel panel-large"><div className="panel-heading"><div><h2>Command chain</h2><p>Workflow preserved from the production Streamlit application.</p></div><span className="status-pill">Ported foundation</span></div><div className="chain"><span>Utility / Facility</span><ChevronRight /><span>Procurement</span><ChevronRight /><span>Approval</span><ChevronRight /><span>Finance</span><ChevronRight /><span>Closure</span><ChevronRight /><span>Audit</span></div>{liveSummary ? <div className="live-summary"><strong>Live data connected</strong><span>{liveSummary}</span></div> : null}</article><article className="panel"><div className="panel-heading"><div><h2>Migration status</h2><p>Next.js + Vercel + Neon</p></div></div><ul className="status-list"><li><span>UI shell & branding</span><b>Ready</b></li><li><span>Role navigation</span><b>Ready</b></li><li><span>Workflow policy port</span><b>Ready</b></li><li><span>PostgreSQL auth adapter</span><b>Connected</b></li><li><span>Facility read layer</span><b>{role === "Facility Manager" && facilityData ? "Live" : "Ported"}</b></li><li><span>Procurement read layer</span><b>{role === "Procurement Manager" && procurementData ? "Live" : "Ported"}</b></li><li><span>Audit signing key</span><b>{securityStatus?.auditKeyVerified ? "Verified" : securityStatus?.auditKeyConfigured ? "Check failed" : "Missing"}</b></li><li><span>Payee encryption key</span><b>{securityStatus?.payeeKeyVerified ? "Verified" : securityStatus?.payeeKeyConfigured ? "Check failed" : "Missing"}</b></li><li><span>Facility draft creation</span><b>Ported</b></li><li><span>Facility submit workflow</span><b>Ported</b></li><li><span>Procurement review workflow</span><b>Ported</b></li><li><span>Sourcing & vendor quotes</span><b>Ported</b></li></ul></article></div>
             </>
           ) : facilitySection || procurementSection || (
             <article className="panel section-panel"><div className="section-icon"><ShieldCheck size={22} /></div><div><h2>{activeSection}</h2><p>The navigation, role boundary and page shell for this production section are represented in Next.js. This section is next in the migration queue for forms, tables, actions and Neon-backed queries.</p><div className="section-tags"><span>Role: {ROLE_LABELS[role]}</span><span>Production section preserved</span><span>Neon migration active</span></div></div></article>
