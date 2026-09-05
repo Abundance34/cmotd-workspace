@@ -3,12 +3,13 @@ import fs from "node:fs";
 function read(path) { return fs.readFileSync(path, "utf8"); }
 function write(path, value) { fs.writeFileSync(path, value, "utf8"); }
 function replaceRequired(source, search, replacement, label) {
-  if (!source.includes(search)) throw new Error(`Procurement notification parity patch could not find ${label}.`);
+  if (!source.includes(search)) throw new Error(`Notification standardization patch could not find ${label}.`);
   return source.replace(search, replacement);
 }
 
-// Route future Facility submissions to the actual Procurement Manager inbox and
-// target the assigned Procurement Manager rather than every user with that role.
+// Keep the Facility -> Procurement handoff assigned to the actual Procurement Manager
+// and point it at a real sidebar section. Other notifications are normalized at render
+// time so stale/legacy section names cannot break indicators or navigation.
 {
   const path = "/app/lib/procureflow/facility-actions.ts";
   let source = read(path);
@@ -27,34 +28,63 @@ function replaceRequired(source, search, replacement, label) {
   write(path, source);
 }
 
-// Restore visible Procurement Manager cues: sidebar count + on-login dashboard alert.
+// Apply one notification experience to Facility, Procurement, Approver, Finance,
+// Logistics, Admin and Auditor: bell count, sidebar badge, dashboard alert and
+// role-valid navigation target all use the same standardized notification list.
 {
   const path = "/app/components/complete-role-shell.tsx";
   let source = read(path);
 
-  if (!source.includes("const procurementReviewAlerts=")) {
+  if (!source.includes('import { StandardNotificationBanner, standardizeNotifications } from "@/components/standard-notifications";')) {
+    const importMarker = 'import { GlobalTools } from "@/components/global-tools";';
+    if (source.includes(importMarker)) {
+      source = source.replace(
+        importMarker,
+        `${importMarker}\nimport { StandardNotificationBanner, standardizeNotifications } from "@/components/standard-notifications";`,
+      );
+    } else {
+      // GlobalTools can be grouped differently in future source; insert before the first local component import we know exists.
+      source = replaceRequired(
+        source,
+        'import { FacilityDraftForm } from "@/components/facility-draft-form";',
+        'import { StandardNotificationBanner, standardizeNotifications } from "@/components/standard-notifications";\nimport { FacilityDraftForm } from "@/components/facility-draft-form";',
+        "notification component import anchor",
+      );
+    }
+  }
+
+  if (!source.includes("const standardNotifications=")) {
     source = replaceRequired(
       source,
-      "const [section,setSection]=useState(nav.sections[0]);",
-      "const [section,setSection]=useState(nav.sections[0]);const procurementReviewAlerts=user.role===\"Procurement Manager\"?parityData.notifications.filter((n:any)=>!n.is_read&&(String(n.title||\"\")===\"Request pending procurement review\"||String(n.section_target||\"\")===\"Utility Head / Facility Head Inbox\"||String(n.section_target||\"\")===\"Procurement Review\")):[];const procurementReviewAlert=procurementReviewAlerts[0]||null;",
-      "Procurement Manager shell state",
+      'const [section,setSection]=useState(nav.sections[0]);',
+      'const [section,setSection]=useState(nav.sections[0]);const standardNotifications=standardizeNotifications(user.role,parityData.notifications);',
+      "role shell notification state",
     );
   }
 
-  const oldUnread = 'parityData.notifications.filter((n:any)=>!n.is_read&&String(n.section_target||"")===item).length';
-  const newUnread = 'parityData.notifications.filter((n:any)=>!n.is_read&&(String(n.section_target||"")===item||(item==="Utility Head / Facility Head Inbox"&&String(n.section_target||"")==="Procurement Review"))).length';
-  if (source.includes(oldUnread)) source = source.replace(oldUnread, newUnread);
+  // Facility register unread dots should use the same resolved targets as the rest of the shell.
+  source = source.replaceAll('notifications={parityData.notifications}', 'notifications={standardNotifications}');
 
-  if (!source.includes('className="procurement-login-alert"')) {
+  // Standard sidebar unread badge for every role.
+  const rawUnread = 'parityData.notifications.filter((n:any)=>!n.is_read&&String(n.section_target||"")===item).length';
+  const procurementUnread = 'parityData.notifications.filter((n:any)=>!n.is_read&&(String(n.section_target||"")===item||(item==="Utility Head / Facility Head Inbox"&&String(n.section_target||"")==="Procurement Review"))).length';
+  if (source.includes(procurementUnread)) source = source.replaceAll(procurementUnread, 'standardNotifications.filter((n:any)=>!n.is_read&&String(n.section_target||"")===item).length');
+  if (source.includes(rawUnread)) source = source.replaceAll(rawUnread, 'standardNotifications.filter((n:any)=>!n.is_read&&String(n.section_target||"")===item).length');
+
+  // The bell / popover must navigate using the same standardized targets.
+  source = source.replaceAll('GlobalTools notifications={parityData.notifications}', 'GlobalTools notifications={standardNotifications}');
+
+  // One visible on-login/dashboard alert style for every role.
+  if (!source.includes('<StandardNotificationBanner role={user.role}')) {
     source = replaceRequired(
       source,
       '</div>{isDashboard?<Dashboard',
-      '</div>{isDashboard&&procurementReviewAlert?<div className="procurement-login-alert"><div><span>NEW PROCUREMENT REQUEST</span><strong>{procurementReviewAlert.title}</strong><p>{procurementReviewAlert.message}</p></div><button type="button" onClick={()=>setSection("Utility Head / Facility Head Inbox")}>Open Facility / Utility Inbox</button></div>:null}{isDashboard?<Dashboard',
-      "Procurement dashboard content marker",
+      '</div>{isDashboard?<StandardNotificationBanner role={user.role} notifications={standardNotifications} onNavigate={navigate}/>:null}{isDashboard?<Dashboard',
+      "dashboard notification banner anchor",
     );
   }
 
-  // Local preview must describe the local Docker/PostgreSQL runtime accurately.
+  // Local preview must describe its real runtime, not production Neon/Vercel.
   source = source.replaceAll("Complete Vercel + Neon operational workflow.", "Complete ProcureFlow operational workflow.");
   source = source.replaceAll("Feature-parity build", "Local parity preview");
   source = source.replaceAll("<li><span>Database</span><b>Neon</b></li>", "<li><span>Database</span><b>Local PostgreSQL</b></li>");
@@ -64,4 +94,4 @@ function replaceRequired(source, search, replacement, label) {
   write(path, source);
 }
 
-console.log("Local Procurement notification parity applied: assigned-PM routing, inbox badge and dashboard alert enabled.");
+console.log("Local notification standardization applied: all seven roles now share bell counts, sidebar indicators, dashboard alerts and valid role-specific navigation targets.");
