@@ -1,0 +1,79 @@
+services:
+  secrets:
+    image: alpine:3.20
+    restart: "no"
+    volumes:
+      - procureflow_local_secrets:/secrets
+    command: >-
+      sh -ec '
+        apk add --no-cache openssl >/dev/null;
+        umask 077;
+        if [ ! -s /secrets/audit_key ]; then openssl rand -hex 48 > /secrets/audit_key; fi;
+        if [ ! -s /secrets/payee_key ]; then openssl rand -base64 32 | tr "+/" "-_" | tr -d "=\n" > /secrets/payee_key; fi;
+        if [ ! -s /secrets/local_user_password ]; then printf "LocalPF-%s!Aa1\n" "$(openssl rand -hex 8)" > /secrets/local_user_password; fi;
+        chmod 600 /secrets/*;
+        echo "Local ProcureFlow secrets initialized.";
+      '
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: procureflow
+      POSTGRES_PASSWORD: procureflow_local_only
+      POSTGRES_DB: procureflow
+      TZ: UTC
+    ports:
+      - "54329:5432"
+    volumes:
+      - procureflow_local_db:/var/lib/postgresql/data
+      - ../migrations/postgresql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U procureflow -d procureflow"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 5s
+
+  bootstrap:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://procureflow:procureflow_local_only@db:5432/procureflow
+    volumes:
+      - procureflow_local_secrets:/run/procureflow-secrets:ro
+    depends_on:
+      secrets:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+    command: ["node", "scripts/local-bootstrap.mjs"]
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://procureflow:procureflow_local_only@db:5432/procureflow
+      PROCUREFLOW_SESSION_TIMEOUT_MINUTES: "43200"
+      PROCUREFLOW_REMEMBER_ME_SESSION_DAYS: "90"
+      PROCUREFLOW_LOGIN_LOCKOUT_ATTEMPTS: "5"
+      PROCUREFLOW_PASSWORD_HISTORY_COUNT: "5"
+      PROCUREFLOW_PRODUCTION: "0"
+      MIGRATION_PREVIEW: "0"
+      TZ: UTC
+    volumes:
+      - procureflow_local_secrets:/run/procureflow-secrets:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    command: ["/app/scripts/local-entrypoint.sh"]
+
+volumes:
+  procureflow_local_db:
+  procureflow_local_secrets:
