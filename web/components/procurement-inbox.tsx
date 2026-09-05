@@ -2,10 +2,10 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, CornerUpLeft, Send, ShieldCheck } from "lucide-react";
+import { CheckCircle2, CornerUpLeft, SearchCheck, Send, ShieldCheck } from "lucide-react";
 import type { ProcurementRequestRow } from "@/lib/procureflow/procurement-data";
 
-type ActionName = "review" | "return" | "submit_approval";
+type ActionName = "review" | "sourcing" | "return" | "submit_approval";
 
 function money(value: number) {
   return new Intl.NumberFormat("en-NG", { style: "currency", currency: "NGN", maximumFractionDigits: 0 }).format(value || 0);
@@ -36,24 +36,42 @@ export function ProcurementInbox({ rows }: { rows: ProcurementRequestRow[] }) {
       setMessage({ type: "error", text: "Enter a correction reason before returning the request." });
       return;
     }
+
     const confirmation = action === "submit_approval"
       ? `Submit ${selected.requestNo} to Approver / MD for final approval?`
-      : action === "return"
-        ? `Return ${selected.requestNo} to the Utility / Facility Head for correction?`
-        : `Mark ${selected.requestNo} as reviewed by Procurement?`;
+      : action === "sourcing"
+        ? `Open vendor quote collection for ${selected.requestNo}?`
+        : action === "return"
+          ? `Return ${selected.requestNo} to the Utility / Facility Head for correction?`
+          : `Mark ${selected.requestNo} as reviewed by Procurement?`;
     if (!window.confirm(confirmation)) return;
 
     setBusyAction(action);
     setMessage(null);
     try {
-      const response = await fetch("/api/procurement/requests/review", {
+      const endpoint = action === "sourcing"
+        ? "/api/procurement/requests/sourcing"
+        : "/api/procurement/requests/review";
+      const body = action === "sourcing"
+        ? { requestId: selected.id, note }
+        : { requestId: selected.id, action, note };
+
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ requestId: selected.id, action, note }),
+        body: JSON.stringify(body),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload?.error || "Unable to update request.");
-      setMessage({ type: "success", text: `${selected.requestNo} moved to ${payload?.result?.status || "the next workflow stage"}.` });
+
+      if (action === "sourcing") {
+        setMessage({
+          type: "success",
+          text: `${selected.requestNo} is now in Vendor Quote Collection. Sourcing task ${payload?.result?.sourcingNo || "created"} is available under Sourcing.`,
+        });
+      } else {
+        setMessage({ type: "success", text: `${selected.requestNo} moved to ${payload?.result?.status || "the next workflow stage"}.` });
+      }
       setNote("");
       router.refresh();
     } catch (error) {
@@ -102,6 +120,7 @@ export function ProcurementInbox({ rows }: { rows: ProcurementRequestRow[] }) {
           {message ? <div className={`action-message ${message.type}`}>{message.text}</div> : null}
           <div className="procurement-review-actions">
             <button type="button" className="review-action reviewed" disabled={Boolean(busyAction)} onClick={() => runAction("review")}><CheckCircle2 size={16} />{busyAction === "review" ? "Updating…" : "Mark Reviewed"}</button>
+            <button type="button" className="review-action sourcing" disabled={Boolean(busyAction)} onClick={() => runAction("sourcing")}><SearchCheck size={16} />{busyAction === "sourcing" ? "Opening…" : "Requires Sourcing"}</button>
             <button type="button" className="review-action return" disabled={Boolean(busyAction)} onClick={() => runAction("return")}><CornerUpLeft size={16} />{busyAction === "return" ? "Returning…" : "Return for Correction"}</button>
             <button type="button" className="review-action approval" disabled={Boolean(busyAction)} onClick={() => runAction("submit_approval")}><Send size={16} />{busyAction === "submit_approval" ? "Submitting…" : "Submit to Approver / MD"}</button>
           </div>
