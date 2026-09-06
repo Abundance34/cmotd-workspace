@@ -9,8 +9,7 @@ RUN npm install
 
 COPY . .
 
-# Apply local-only UI/workflow parity corrections inside the preview image.
-# Production main remains untouched until these changes are validated locally.
+# Apply the same validated UI/workflow corrections used by the production build.
 RUN node /app/scripts/apply-local-parity-overlay.mjs
 RUN node /app/scripts/apply-local-procurement-notification-parity.mjs
 RUN node /app/scripts/apply-local-procurement-request-register.mjs
@@ -18,6 +17,7 @@ RUN node /app/scripts/apply-local-request-authoring-parity.mjs
 RUN node /app/scripts/apply-local-in-app-confirmations.mjs
 RUN node /app/scripts/apply-local-theme-branding.mjs
 RUN node /app/scripts/apply-local-final-ui-polish.mjs
+RUN node /app/scripts/apply-production-usability-fixes.mjs
 RUN npm run typecheck
 
 # Windows Git checkouts can convert shell scripts to CRLF. Normalize them inside

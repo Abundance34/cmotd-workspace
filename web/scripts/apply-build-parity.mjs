@@ -14,6 +14,7 @@ const scripts = [
   "apply-local-in-app-confirmations.mjs",
   "apply-local-theme-branding.mjs",
   "apply-local-final-ui-polish.mjs",
+  "apply-production-usability-fixes.mjs",
 ];
 
 function alreadyMaterialized() {
@@ -25,6 +26,7 @@ function alreadyMaterialized() {
   return shell.includes("function SidebarNavIcon")
     && shell.includes("sidebarCollapsed")
     && shell.includes("sidebar-brand-assets")
+    && shell.includes("estimated_amount??r.amount")
     && layout.includes('import "./local-preview-parity.css";')
     && layout.includes('import "./local-standard-notifications.css";');
 }
