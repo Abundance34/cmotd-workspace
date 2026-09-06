@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Plus_Jakarta_Sans } from "next/font/google";
 import "./globals.css";
 import "./live-data.css";
 import "./facility.css";
@@ -14,7 +15,14 @@ import "./minia-theme.css";
 import "./minia-theme-polish.css";
 import "./minia-theme-controls.css";
 import "./local-request-authoring.css";
+import "./local-final-ui-polish.css";
 import { ConfirmationCenter } from "@/components/in-app-confirmation";
+
+const plusJakarta = Plus_Jakarta_Sans({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-plus-jakarta",
+});
 
 export const metadata: Metadata = {
   title: "ProcureFlow",
@@ -31,5 +39,5 @@ const themeBoot = `
 })();`;
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en" suppressHydrationWarning><head><script dangerouslySetInnerHTML={{__html:themeBoot}} /></head><body>{children}<ConfirmationCenter /></body></html>;
+  return <html lang="en" suppressHydrationWarning><head><script dangerouslySetInnerHTML={{__html:themeBoot}} /></head><body className={plusJakarta.variable}>{children}<ConfirmationCenter /></body></html>;
 }
