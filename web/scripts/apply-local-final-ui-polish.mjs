@@ -94,6 +94,34 @@ const replacements = [
   ["GCP-free runtime", "Operational safeguards"],
   ["Local parity preview", "Operational workflow"],
   ["Feature-parity build", "Operational workflow"],
+  ["Live draft requests loaded from the migrated Neon database.", "Draft requests available to this workspace."],
+  ["Live procurement request register from Neon.", "Current procurement request register."],
+  ["Create and compare vendor quotes against live Neon sourcing tasks.", "Create and compare vendor quotes for active sourcing tasks."],
+  ["Existing receipt and evidence metadata migrated to Neon. Sensitive raw bank-account fields are excluded from this table.", "Receipt and evidence records. Sensitive bank-account fields are excluded from this table."],
+  ["Live Neon data", "Current records"],
+  ["Next.js migration preview", "ProcureFlow preview"],
+  ["This branch is isolated from production. Live business data is deliberately not connected yet.", "Preview workspace for validating ProcureFlow changes before release."],
+  ["Workflow preserved from the production Streamlit application.", "ProcureFlow workflow from request creation through closure and audit."],
+  ["Ported foundation", "Operational workflow"],
+  ["Migration status", "Operational readiness"],
+  ["Next.js + Vercel + Neon", "Core services"],
+  ["PostgreSQL auth adapter", "Access controls"],
+  ["The navigation, role boundary and page shell for this production section are represented in Next.js. This section is next in the migration queue for forms, tables, actions and Neon-backed queries.", "This workspace is available for the selected role and follows ProcureFlow access controls."],
+  ["Production section preserved", "Role access enabled"],
+  ["Neon migration active", "Workflow available"],
+  ["Neon schema tables", "Application tables"],
+  ["Historical evidence preserved in Neon", "Historical evidence preserved"],
+  ["The verified Cloud SQL migration dump remains the external recovery baseline while the application moves to Neon. A server-side Vercel/Neon export workflow will be added separately; this page does not expose database credentials or downloadable raw secrets.", "Recovery and export controls are managed through protected administrative workflows. This page does not expose database credentials or raw secrets."],
+  ["Current attention signals from the migrated Neon production dataset.", "Current attention signals across ProcureFlow."],
+  ["Migration security", "Security controls"],
+  ["GCP exit controls", "Operational safeguards"],
+  ["Neon live", "Available"],
+  ["Live Neon-backed Admin oversight. Authority-changing controls require an authenticated Admin, a meaningful reason, explicit confirmation and a verified signed audit chain.", "Administrative oversight. Authority-changing controls require authentication, a meaningful reason, explicit confirmation and a verified audit trail."],
+  ["No gateway passes are currently stored in the migrated database.", "No gateway passes are currently available."],
+  ["Approved, purchase-order, paid and completed requests from your migrated history.", "Approved, purchase-order, paid and completed requests from your request history."],
+  ["Live Finance payment ledger, including migrated payment history and newly recorded transactions.", "Finance payment ledger, including payment history and newly recorded transactions."],
+  ["Configured monthly budget controls migrated from the production database.", "Configured monthly budget controls."],
+  ["Ported", "Ready"],
 ];
 
 function walk(directory) {
@@ -114,7 +142,7 @@ for (const fullPath of pageFiles) {
   fs.writeFileSync(fullPath, source, "utf8");
 }
 
-// 3) Guard against the implementation-specific labels returning to the visible UI.
+// 3) Guard against implementation/vendor/runtime names returning to visible React pages.
 const banned = [
   "PostgreSQL-backed",
   "Neon-backed",
@@ -126,6 +154,12 @@ const banned = [
   "Next.js / Docker",
   "Local PostgreSQL",
   "Neon portable",
+  "Neon",
+  "PostgreSQL",
+  "Vercel",
+  "Next.js",
+  "Streamlit",
+  "GCP",
 ];
 const offenders = [];
 for (const fullPath of pageFiles) {
