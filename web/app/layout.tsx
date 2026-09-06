@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Geist } from "next/font/google";
 import "./globals.css";
 import "./live-data.css";
 import "./facility.css";
@@ -13,6 +14,16 @@ import "./parity.css";
 import "./minia-theme.css";
 import "./minia-theme-polish.css";
 import "./minia-theme-controls.css";
+import "./local-request-authoring.css";
+import "./local-final-ui-polish.css";
+import "./local-legibility.css";
+import { ConfirmationCenter } from "@/components/in-app-confirmation";
+
+const geist = Geist({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-geist",
+});
 
 export const metadata: Metadata = {
   title: "ProcureFlow",
@@ -29,5 +40,5 @@ const themeBoot = `
 })();`;
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en" suppressHydrationWarning><head><script dangerouslySetInnerHTML={{__html:themeBoot}} /></head><body>{children}</body></html>;
+  return <html lang="en" suppressHydrationWarning><head><script dangerouslySetInnerHTML={{__html:themeBoot}} /></head><body className={geist.variable}>{children}<ConfirmationCenter /></body></html>;
 }
