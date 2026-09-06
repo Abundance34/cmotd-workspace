@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Plus_Jakarta_Sans } from "next/font/google";
+import { Geist } from "next/font/google";
 import "./globals.css";
 import "./live-data.css";
 import "./facility.css";
@@ -18,10 +18,10 @@ import "./local-request-authoring.css";
 import "./local-final-ui-polish.css";
 import { ConfirmationCenter } from "@/components/in-app-confirmation";
 
-const plusJakarta = Plus_Jakarta_Sans({
+const geist = Geist({
   subsets: ["latin"],
   display: "swap",
-  variable: "--font-plus-jakarta",
+  variable: "--font-geist",
 });
 
 export const metadata: Metadata = {
@@ -39,5 +39,5 @@ const themeBoot = `
 })();`;
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en" suppressHydrationWarning><head><script dangerouslySetInnerHTML={{__html:themeBoot}} /></head><body className={plusJakarta.variable}>{children}<ConfirmationCenter /></body></html>;
+  return <html lang="en" suppressHydrationWarning><head><script dangerouslySetInnerHTML={{__html:themeBoot}} /></head><body className={geist.variable}>{children}<ConfirmationCenter /></body></html>;
 }
