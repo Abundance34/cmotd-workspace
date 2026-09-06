@@ -34,6 +34,17 @@ for (const [name, [content, expectedHash]] of Object.entries(assets)) {
   fs.writeFileSync(path.join(brandingDir, name), content, "utf8");
 }
 
+// Next.js App Router automatically uses app/icon.svg as the site favicon.
+// Reuse the user's compact CMOTD mark and place it on a neutral light tile so
+// it remains recognizable in both light and dark browser chrome.
+{
+  const favicon = compactDark.replace(
+    /(<svg\b[^>]*>)/,
+    '$1\n  <rect width="100%" height="100%" rx="18%" fill="#ffffff"/>',
+  );
+  fs.writeFileSync(path.join(root, "app", "icon.svg"), favicon, "utf8");
+}
+
 function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), "utf8").replace(/\r\n?/g, "\n");
 }
@@ -59,14 +70,28 @@ function write(relativePath, value) {
   write(relativePath, source);
 }
 
+// Make the login-page CMOTD wordmark theme-aware too. The previous static PNG
+// stayed dark in dark mode, which made the branding look washed out.
+{
+  const relativePath = "components/login-screen.tsx";
+  let source = read(relativePath);
+  const oldLoginWordmark = '<Image className="company-wordmark" src="/branding/cmotd_company_wordmark.png" alt="Center for Marine and Offshore Technology Development" width={360} height={88} priority />';
+  const newLoginWordmark = '<div className="login-wordmark-theme" aria-label="Center for Marine and Offshore Technology Development"><Image className="company-wordmark login-wordmark-on-light" src="/branding/cmotd_logo_full_dark.svg" alt="Center for Marine and Offshore Technology Development" width={360} height={88} priority/><Image className="company-wordmark login-wordmark-on-dark" src="/branding/cmotd_logo_full_light.svg" alt="" aria-hidden="true" width={360} height={88} priority/></div>';
+  if (source.includes(oldLoginWordmark)) source = source.replace(oldLoginWordmark, newLoginWordmark);
+  else if (!source.includes("login-wordmark-theme")) throw new Error("Local branding patch could not find the login wordmark.");
+  write(relativePath, source);
+}
+
 {
   const relativePath = "app/local-preview-parity.css";
   let source = read(relativePath);
   const marker = "/* CMOTD theme-aware branding */";
   if (!source.includes(marker)) {
-    source += `\n\n${marker}\n.sidebar-brand-cmotd{min-height:76px!important;padding:10px 18px 12px!important;justify-content:flex-start!important;gap:0!important;overflow:hidden}\n.sidebar-brand-wordmark{display:block;width:min(100%,205px)!important;max-width:205px!important;height:auto!important;object-fit:contain!important;object-position:left center!important;flex:0 1 auto}\n.sidebar-brand-wordmark-dark,.header-wordmark-dark{display:none!important}\nhtml[data-theme="dark"] .sidebar-brand-wordmark-light,html[data-theme="dark"] .header-wordmark-light{display:none!important}\nhtml[data-theme="dark"] .sidebar-brand-wordmark-dark,html[data-theme="dark"] .header-wordmark-dark{display:block!important}\n.header-wordmark-theme{width:190px;min-width:190px;display:flex;align-items:center;justify-content:flex-end}\n.header-wordmark-theme .header-wordmark{display:block;width:190px!important;max-width:190px!important;height:auto!important;object-fit:contain!important;opacity:.94}\n@media(max-width:1050px){.header-wordmark-theme{display:none!important}}\n@media(max-width:800px){.sidebar-brand-cmotd{min-height:70px!important}.sidebar-brand-wordmark{max-width:190px!important}}\n`;
+    source += `\n\n${marker}\n.sidebar-brand-cmotd{min-height:76px!important;padding:10px 18px 12px!important;justify-content:flex-start!important;gap:0!important;overflow:hidden}\n.sidebar-brand-wordmark{display:block;width:min(100%,205px)!important;max-width:205px!important;height:auto!important;object-fit:contain!important;object-position:left center!important;flex:0 1 auto}\n.sidebar-brand-wordmark-dark,.header-wordmark-dark,.login-wordmark-on-dark{display:none!important}\nhtml[data-theme="dark"] .sidebar-brand-wordmark-light,html[data-theme="dark"] .header-wordmark-light,html[data-theme="dark"] .login-wordmark-on-light{display:none!important}\nhtml[data-theme="dark"] .sidebar-brand-wordmark-dark,html[data-theme="dark"] .header-wordmark-dark,html[data-theme="dark"] .login-wordmark-on-dark{display:block!important}\n.header-wordmark-theme{width:190px;min-width:190px;display:flex;align-items:center;justify-content:flex-end}\n.header-wordmark-theme .header-wordmark{display:block;width:190px!important;max-width:190px!important;height:auto!important;object-fit:contain!important;opacity:.94}\n.login-wordmark-theme{display:grid;width:min(100%,360px);align-items:center}\n.login-wordmark-theme .company-wordmark{grid-area:1/1;display:block;width:100%!important;max-width:360px!important;height:auto!important;object-fit:contain!important;object-position:left center!important}\n@media(max-width:1050px){.header-wordmark-theme{display:none!important}}\n@media(max-width:800px){.sidebar-brand-cmotd{min-height:70px!important}.sidebar-brand-wordmark{max-width:190px!important}}\n`;
+  } else if (!source.includes("login-wordmark-on-dark")) {
+    source += `\n.login-wordmark-on-dark{display:none!important}\nhtml[data-theme="dark"] .login-wordmark-on-light{display:none!important}\nhtml[data-theme="dark"] .login-wordmark-on-dark{display:block!important}\n.login-wordmark-theme{display:grid;width:min(100%,360px);align-items:center}\n.login-wordmark-theme .company-wordmark{grid-area:1/1;display:block;width:100%!important;max-width:360px!important;height:auto!important;object-fit:contain!important;object-position:left center!important}\n`;
   }
   write(relativePath, source);
 }
 
-console.log("Local CMOTD branding applied: black full logo on light mode, white full logo on dark mode, with all four supplied SVG variants installed.");
+console.log("Local CMOTD branding applied: theme-aware logos now cover sidebar, page header and login; CMOTD favicon generated from the compact mark.");
