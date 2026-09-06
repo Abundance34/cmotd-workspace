@@ -1,4 +1,4 @@
-name: ProcureFlow Web Typecheck
+name: ProcureFlow Web Build & Typecheck
 
 on:
   push:
@@ -28,7 +28,9 @@ jobs:
           cache-dependency-path: web/package.json
       - name: Install dependencies
         run: npm install --ignore-scripts
-      - name: Typecheck
+      - name: Build production UI
+        run: npm run build
+      - name: Typecheck materialized UI
         run: npm run typecheck
       - name: Feature parity guard
         run: node scripts/verify-feature-parity.mjs
