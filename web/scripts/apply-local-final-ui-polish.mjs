@@ -124,6 +124,15 @@ const replacements = [
   ["Ported", "Ready"],
 ];
 
+const fallbackNames = [
+  ["Neon", "ProcureFlow"],
+  ["PostgreSQL", "ProcureFlow data"],
+  ["Vercel", "application"],
+  ["Next.js", "application"],
+  ["Streamlit", "previous system"],
+  ["GCP", "legacy platform"],
+];
+
 function walk(directory) {
   const files = [];
   if (!fs.existsSync(directory)) return files;
@@ -139,28 +148,12 @@ const pageFiles = [...walk(path.join(root, "components")), ...walk(path.join(roo
 for (const fullPath of pageFiles) {
   let source = fs.readFileSync(fullPath, "utf8").replace(/\r\n?/g, "\n");
   for (const [from, to] of replacements) source = source.replaceAll(from, to);
+  for (const [from, to] of fallbackNames) source = source.replaceAll(from, to);
   fs.writeFileSync(fullPath, source, "utf8");
 }
 
 // 3) Guard against implementation/vendor/runtime names returning to visible React pages.
-const banned = [
-  "PostgreSQL-backed",
-  "Neon-backed",
-  "GCP-free runtime dependencies",
-  "PostgreSQL write workflow",
-  "Neon write workflow",
-  "Local parity preview",
-  "Feature-parity build",
-  "Next.js / Docker",
-  "Local PostgreSQL",
-  "Neon portable",
-  "Neon",
-  "PostgreSQL",
-  "Vercel",
-  "Next.js",
-  "Streamlit",
-  "GCP",
-];
+const banned = ["Neon", "PostgreSQL", "Vercel", "Next.js", "Streamlit", "GCP"];
 const offenders = [];
 for (const fullPath of pageFiles) {
   const source = fs.readFileSync(fullPath, "utf8");
