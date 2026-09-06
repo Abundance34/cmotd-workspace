@@ -16,6 +16,7 @@ import "./minia-theme-polish.css";
 import "./minia-theme-controls.css";
 import "./local-request-authoring.css";
 import "./local-final-ui-polish.css";
+import "./local-legibility.css";
 import { ConfirmationCenter } from "@/components/in-app-confirmation";
 
 const geist = Geist({
