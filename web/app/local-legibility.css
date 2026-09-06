@@ -1,0 +1,107 @@
+/* Final legibility pass for ProcureFlow. Keep the dense enterprise layout, but make every interactive surface comfortable to read. */
+:root{--pf-sidebar-width:282px}
+html,body,button,input,select,textarea{font-family:var(--font-geist),Geist,"Segoe UI",sans-serif!important}
+body{font-size:15px!important;line-height:1.55!important;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+
+/* Sidebar: larger labels, icons and click targets. */
+.sidebar-context{padding:22px 20px 10px!important;gap:5px!important}
+.sidebar-context>span{font-size:11.5px!important;line-height:1.35!important;letter-spacing:.07em!important}
+.sidebar-context strong,.sidebar-context select{font-size:14px!important;line-height:1.4!important}
+.sidebar-nav{padding:8px 12px 22px!important}
+.sidebar-nav:before{font-size:10.5px!important;padding:5px 10px 10px!important}
+.sidebar-nav button{min-height:49px!important;padding:11px 13px!important;margin:2px 0!important;gap:13px!important;font-size:14px!important;line-height:1.35!important;border-radius:8px!important}
+.sidebar-item-icon{width:22px!important;height:22px!important;flex-basis:22px!important}
+.sidebar-item-icon svg{width:20px!important;height:20px!important;stroke-width:1.9!important;opacity:.92!important}
+.sidebar-item-label{font-size:14px!important;line-height:1.35!important}
+.sidebar-nav-badge{min-width:21px!important;height:21px!important;padding:0 6px!important;font-size:10.5px!important;line-height:21px!important}
+.sidebar-footer{padding:14px!important}
+.sidebar-footer button{min-height:45px!important;padding:11px 12px!important;font-size:13.5px!important;gap:10px!important}
+.sidebar-footer button svg{width:19px!important;height:19px!important}
+
+/* Branding and collapse control. */
+.sidebar-brand-cmotd{min-height:82px!important;padding:12px 18px 13px!important}
+.sidebar-brand-full{max-width:220px!important;width:min(100%,220px)!important}
+.sidebar-brand-compact{width:46px!important;max-width:46px!important;height:46px!important}
+.sidebar-collapse-toggle{right:-15px!important;top:26px!important;width:31px!important;height:31px!important}
+.sidebar-collapse-toggle svg{width:17px!important;height:17px!important}
+
+/* Collapsed rail should still be comfortably usable. */
+.app-frame.sidebar-collapsed{grid-template-columns:94px minmax(0,1fr)!important}
+.sidebar.collapsed .sidebar-brand-cmotd{min-height:82px!important;padding:12px!important}
+.sidebar.collapsed .sidebar-nav{padding:16px 13px 20px!important}
+.sidebar.collapsed .sidebar-nav button{min-height:52px!important;padding:13px!important;border-radius:9px!important}
+.sidebar.collapsed .sidebar-item-icon{width:24px!important;height:24px!important;flex-basis:24px!important}
+.sidebar.collapsed .sidebar-item-icon svg{width:22px!important;height:22px!important}
+.sidebar.collapsed .sidebar-nav-badge{top:4px!important;right:4px!important;min-width:19px!important;height:19px!important;font-size:9.5px!important;line-height:19px!important;padding:0 5px!important}
+.sidebar.collapsed .sidebar-footer{padding:13px!important}
+.sidebar.collapsed .sidebar-footer button{min-height:48px!important;padding:12px!important}
+.sidebar.collapsed .sidebar-footer button svg{width:21px!important;height:21px!important}
+
+/* Top bar and page headings. */
+.topbar{height:70px!important;min-height:70px!important;padding:0 26px!important}
+.breadcrumb{font-size:14px!important;line-height:1.4!important}
+.topbar p{font-size:12px!important;line-height:1.4!important}
+.global-search-shell{height:42px!important}
+.global-search-shell input{font-size:13.5px!important}
+.global-tools>.tool-icon-button,.topbar-actions .global-tools>button{width:42px!important;height:42px!important}
+.user-chip strong{font-size:13.5px!important}.user-chip small{font-size:11.5px!important}.avatar{width:38px!important;height:38px!important;font-size:12px!important}
+.content-wrap{padding:28px 28px 62px!important}
+.page-heading{margin-bottom:23px!important}
+.eyebrow{font-size:11px!important;line-height:1.35!important}
+.page-heading h1{font-size:25px!important;line-height:1.2!important;font-weight:680!important}
+.page-heading p{font-size:13.5px!important;line-height:1.5!important;max-width:780px}
+
+/* Panels, cards and dashboard metrics. */
+.panel,.live-section-panel{padding:23px!important}
+.panel-heading{padding-bottom:16px!important;margin-bottom:7px!important;gap:14px!important}
+.panel h2,.panel-heading h2{font-size:16.5px!important;line-height:1.3!important}
+.panel p,.panel-heading p{font-size:13px!important;line-height:1.5!important}
+.metric-card{padding:21px!important;min-height:126px!important}
+.metric-card span{font-size:13px!important}.metric-card strong{font-size:29px!important}.metric-card small{font-size:11.5px!important;line-height:1.4!important}
+.status-pill,.status-chip,.section-tags span{font-size:11.5px!important;line-height:1.25!important;padding:6px 10px!important}
+.empty-state{font-size:13px!important;line-height:1.5!important;padding:22px!important}
+
+/* Tables should read like data, not micro-print. */
+.data-table thead th{font-size:12px!important;line-height:1.35!important;padding:13px 14px!important}
+.data-table tbody td{font-size:13px!important;line-height:1.45!important;padding:14px!important}
+.data-table td strong{font-size:13.2px!important}.data-table td small{font-size:11px!important;line-height:1.35!important;margin-top:3px!important}
+.table-actions button,.table-actions a,.row-action-button,.table-action-link,.parity-export-row a,.parity-export-row button{font-size:12px!important;min-height:38px!important;padding:8px 11px!important}
+
+/* Forms: stronger labels, larger controls and helper copy. */
+.form-section,.authoring-card{padding:20px!important}
+.form-section-title strong,.authoring-title strong{font-size:13.5px!important;line-height:1.4!important}
+.form-section-title small,.authoring-title span{font-size:11.5px!important;line-height:1.45!important}
+.facility-draft-form label>span:first-child,.facility-draft-form .form-block>span:first-child,.authoring-grid label>span,.parity-form-grid label>span,label>span{font-size:12px!important;line-height:1.4!important}
+input,select,textarea,.facility-draft-form input,.facility-draft-form select,.facility-draft-form textarea,.quote-entry-form input,.quote-entry-form select{font-size:13.5px!important;line-height:1.45!important}
+input,select,.facility-draft-form input,.facility-draft-form select,.quote-entry-form input,.quote-entry-form select{min-height:44px!important;padding:10px 11px!important}
+textarea,.facility-draft-form textarea{padding:10px 11px!important}
+.primary-form-button,.secondary-form-button,.review-action,.authoring-primary,.authoring-secondary{font-size:12.5px!important;min-height:40px!important;padding:9px 13px!important}
+.action-message{font-size:12.5px!important;line-height:1.5!important;padding:12px 14px!important}
+.security-write-note,.review-security-note,.authoring-submit>div,.recommendation-submit-row>div{font-size:11.5px!important;line-height:1.45!important}
+
+/* Recipient choice cards were still visually too quiet in dark mode. */
+.recipient-choice{gap:14px!important}
+.recipient-choice label{min-height:68px!important;padding:14px!important;gap:12px!important}
+.recipient-choice input[type="radio"]{width:17px!important;height:17px!important;flex:0 0 17px!important}
+.recipient-choice strong{font-size:13.5px!important;line-height:1.35!important}
+.recipient-choice small{font-size:12px!important;line-height:1.45!important}
+html[data-theme="dark"] .recipient-choice strong{color:#f8f9fc!important}
+html[data-theme="dark"] .recipient-choice small{color:#c9d1e5!important}
+
+/* Request review, sourcing, recommendation and workflow detail typography. */
+.review-card-heading>div>span,.review-facts span,.review-justification>span,.review-note>span,.comparison-metric-grid span,.recommended-vendor-hero span{font-size:10px!important}
+.review-card-heading h3{font-size:19px!important}.review-card-heading p{font-size:12px!important}
+.review-facts strong,.comparison-metric-grid strong{font-size:12.5px!important}.review-justification p{font-size:13px!important}.review-note textarea{font-size:13px!important}
+.sourcing-task-card strong,.recommendation-list-card strong,.recommendation-list-card b{font-size:12.5px!important}.sourcing-task-card span,.sourcing-task-card small,.recommendation-list-card span,.recommendation-list-card small{font-size:11px!important}
+.sourcing-section-heading h3{font-size:15px!important}.sourcing-section-heading p{font-size:12.5px!important}
+.quote-card-head strong{font-size:13px!important}.quote-card-head span{font-size:11px!important}.quote-price{font-size:19px!important}.quote-card dd,.quote-notes{font-size:11.5px!important}
+
+@media(max-width:1100px){:root{--pf-sidebar-width:264px}.sidebar-nav button,.sidebar-item-label{font-size:13.5px!important}}
+@media(max-width:800px){
+  :root{--pf-sidebar-width:100%}
+  .app-frame.sidebar-collapsed{grid-template-columns:1fr!important}
+  .sidebar-collapse-toggle{right:14px!important;top:25px!important}
+  .sidebar.collapsed .sidebar-nav button{min-height:49px!important;padding:11px 13px!important}
+  .content-wrap{padding:22px 18px 50px!important}
+  .page-heading h1{font-size:22px!important}
+}
