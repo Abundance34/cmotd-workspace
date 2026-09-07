@@ -17,6 +17,7 @@ const scripts = [
   "apply-production-usability-fixes.mjs",
   "apply-facility-request-history-context.mjs",
   "apply-reimbursement-draft-delete.mjs",
+  "apply-reimbursement-all-role-shell.mjs",
 ];
 
 function alreadyMaterialized() {
@@ -30,6 +31,7 @@ function alreadyMaterialized() {
     && shell.includes("sidebar-brand-assets")
     && shell.includes("estimated_amount??r.amount")
     && shell.includes("ReimbursementWorkspace")
+    && shell.includes('section==="Reimbursement Request"')
     && layout.includes('import "./local-preview-parity.css";')
     && layout.includes('import "./local-standard-notifications.css";');
 }

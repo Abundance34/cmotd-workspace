@@ -27,7 +27,7 @@ export async function GET(request: Request) {
     `;
     const row = rows[0];
     if (!row || row.document_kind !== "Reimbursement") return NextResponse.json({ error: "Reimbursement proof not found." }, { status: 404 });
-    const canRead = Number(row.requested_by || 0) === user.id || ["Finance", "Admin", "Auditor"].includes(user.role);
+    const canRead = Number(row.requested_by || 0) === user.id || ["Procurement Manager", "Finance", "Admin", "Auditor"].includes(user.role);
     if (!canRead) return NextResponse.json({ error: "You do not have access to this reimbursement proof." }, { status: 403 });
 
     const locator = String(row.receipt_path || "");

@@ -34,7 +34,7 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
   Admin: {
     title: "Admin Navigation",
     sections: [
-      "Admin Dashboard", "Action & Exception Centre", "Workflow Intervention Centre", "User Management",
+      "Admin Dashboard", "Reimbursement Request", "Action & Exception Centre", "Workflow Intervention Centre", "User Management",
       "Roles & Permissions", "Security & Access Management", "Budget Tracker", "Income",
       "Approval Configuration", "Import Center", "All Procurement Records", "Notifications Monitor",
       "Availability & Delegation Requests", "Gateway Pass Management", "Activity & History Logs",
@@ -44,7 +44,7 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
   "Procurement Manager": {
     title: "Procurement Navigation",
     sections: [
-      "Operations Dashboard", "Create Request Draft", "My Draft Requests", "Purchase Requests", "Reimbursement", "Low-Value Approvals",
+      "Operations Dashboard", "Create Request Draft", "My Draft Requests", "Purchase Requests", "Reimbursement Request", "Low-Value Approvals",
       "Utility Head / Facility Head Inbox", "Import Center", "Sourcing", "Vendor Quotes", "Vendor Recommendation",
       "Commercial PO Management", "Vendors", "Gateway Pass Review", "Post-Payment Closure", "Availability / Away Notice",
       "Procurement Documents", "Procurement Reports", "Income", "My Activity History", "Settings",
@@ -53,7 +53,7 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
   "Facility Manager": {
     title: "Utility / Facility Navigation",
     sections: [
-      "Utility / Facility Dashboard", "Create Request Draft", "My Draft Requests", "Submit to Procurement Manager", "Reimbursement",
+      "Utility / Facility Dashboard", "Create Request Draft", "My Draft Requests", "Submit to Procurement Manager", "Reimbursement Request",
       "Import Documents", "Gateway Pass", "Shared Thread with Procurement Manager", "Returned Requests",
       "Approved / Accepted Requests", "Income", "My Activity History", "Settings",
     ],
@@ -61,7 +61,7 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
   "Logistics Officer": {
     title: "Logistics Navigation",
     sections: [
-      "Logistics Dashboard", "PO Delivery Handover", "Delivery Tracking", "Receiving Slips",
+      "Logistics Dashboard", "Reimbursement Request", "PO Delivery Handover", "Delivery Tracking", "Receiving Slips",
       "Delivery Exceptions & Returns", "Gateway Pass Coordination", "Logistics Documents",
       "My Activity History", "Settings",
     ],
@@ -69,7 +69,7 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
   Finance: {
     title: "Finance Navigation",
     sections: [
-      "Financial Dashboard", "Approved for Payment", "Receipts", "Invoices", "Expenses", "Payments",
+      "Financial Dashboard", "Reimbursement Request", "Approved for Payment", "Receipts", "Invoices", "Expenses", "Payments",
       "Cash Advances", "Budgets", "Income", "Vendor Payment Records", "Reconciliation",
       "Financial Reports", "Settings",
     ],
@@ -77,14 +77,14 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
   Approver: {
     title: "Executive Navigation",
     sections: [
-      "Approval Dashboard", "Pending Approvals", "Quote Comparison", "PO Approval", "Payment Approval",
+      "Approval Dashboard", "Reimbursement Request", "Pending Approvals", "Quote Comparison", "PO Approval", "Payment Approval",
       "Gateway Pass Approval", "Availability / Away Notice", "My Approval History", "Income", "Settings",
     ],
   },
   Auditor: {
     title: "Audit Navigation",
     sections: [
-      "Audit Dashboard", "Role Activity Mirrors", "Transaction 360", "User 360", "Exception Centre",
+      "Audit Dashboard", "Reimbursement Request", "Role Activity Mirrors", "Transaction 360", "User 360", "Exception Centre",
       "All Activity & Evidence Ledger", "Procurement Records", "Sourcing & Vendor Quote Audit",
       "Purchase Order & Logistics Evidence", "Receiving Slips, Proof of Delivery & Returns",
       "Finance, Invoice & Payment Audit", "Approval Trails", "Delegated Approval Review",
