@@ -15,6 +15,7 @@ const scripts = [
   "apply-local-theme-branding.mjs",
   "apply-local-final-ui-polish.mjs",
   "apply-production-usability-fixes.mjs",
+  "apply-facility-request-history-context.mjs",
 ];
 
 function alreadyMaterialized() {
