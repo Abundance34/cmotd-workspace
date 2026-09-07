@@ -16,6 +16,7 @@ const scripts = [
   "apply-local-final-ui-polish.mjs",
   "apply-production-usability-fixes.mjs",
   "apply-facility-request-history-context.mjs",
+  "apply-reimbursement-draft-delete.mjs",
 ];
 
 function alreadyMaterialized() {
@@ -28,6 +29,7 @@ function alreadyMaterialized() {
     && shell.includes("sidebarCollapsed")
     && shell.includes("sidebar-brand-assets")
     && shell.includes("estimated_amount??r.amount")
+    && shell.includes("ReimbursementWorkspace")
     && layout.includes('import "./local-preview-parity.css";')
     && layout.includes('import "./local-standard-notifications.css";');
 }

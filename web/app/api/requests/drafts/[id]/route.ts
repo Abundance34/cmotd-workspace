@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { updateOwnedDraft, type DraftRequestInput } from "@/lib/procureflow/request-draft-actions";
+import { archiveOwnedDraft } from "@/lib/procureflow/draft-delete";
 import { verifyActiveAuditSigningKey } from "@/lib/procureflow/security-check";
 import { verifyPayeeEncryptionKeyV2 } from "@/lib/procureflow/payee-crypto";
 
@@ -33,6 +34,31 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to update request draft.";
     const status = /only drafts that you created|cannot edit request drafts|Authentication/i.test(message) ? 403 : 400;
+    return NextResponse.json({ error: message }, { status });
+  }
+}
+
+export async function DELETE(_request: Request, context: { params: Promise<{ id: string }> }) {
+  try {
+    const user = await getCurrentUser();
+    if (!user) return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+    if (!["Facility Manager", "Procurement Manager", "Admin"].includes(user.role)) {
+      return NextResponse.json({ error: "This role cannot delete request drafts." }, { status: 403 });
+    }
+    const auditReady = await verifyActiveAuditSigningKey().catch(() => false);
+    if (!auditReady) {
+      return NextResponse.json({ error: "ProcureFlow write security is not ready for an audited draft deletion." }, { status: 503 });
+    }
+    const { id } = await context.params;
+    const requestId = Number(id);
+    if (!Number.isInteger(requestId) || requestId <= 0) {
+      return NextResponse.json({ error: "A valid request id is required." }, { status: 400 });
+    }
+    const result = await archiveOwnedDraft(user, requestId);
+    return NextResponse.json({ ok: true, result });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to delete request draft.";
+    const status = /only a draft that you created|role cannot|Authentication/i.test(message) ? 403 : 400;
     return NextResponse.json({ error: message }, { status });
   }
 }

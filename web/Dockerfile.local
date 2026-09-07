@@ -19,6 +19,7 @@ RUN node /app/scripts/apply-local-in-app-confirmations.mjs
 RUN node /app/scripts/apply-local-theme-branding.mjs
 RUN node /app/scripts/apply-local-final-ui-polish.mjs
 RUN node /app/scripts/apply-facility-request-history-context.mjs
+RUN node /app/scripts/apply-reimbursement-draft-delete.mjs
 RUN npm run typecheck
 
 # Windows Git checkouts can convert shell scripts to CRLF. Normalize them inside
