@@ -166,7 +166,7 @@ function replaceRequired(source, search, replacement, label) {
       const threadId=Number(threadRows[0].id);
       const row=await tx<any[]>\`INSERT INTO collaboration_messages (thread_id,sender_user_id,message_text,is_private,created_at) VALUES (\${threadId},\${user.id},\${message},1,NOW()) RETURNING id\`;
       const draftOnly=["FM Draft","Draft"].includes(String(request.status||""));
-      if(!draftOnly)await notifyUser(tx,procurementId,"New request context message",\`${request.request_no}: \${message.slice(0,160)}\`,"Purchase Request",requestId,"Utility Head / Facility Head Inbox","Normal");
+      if(!draftOnly)await notifyUser(tx,procurementId,"New request context message",String(request.request_no||"Request")+": "+message.slice(0,160),"Purchase Request",requestId,"Utility Head / Facility Head Inbox","Normal");
       await evidence(tx,user,{action:"Request Context Message",entityType:"Purchase Request",entityId:requestId,entityReference:request.request_no,after:{thread_id:threadId,message_id:Number(row[0].id),message_length:message.length},note:"Facility request context message recorded",relatedUserId:procurementId});
       return {threadId,messageId:Number(row[0].id)};
     });
