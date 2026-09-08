@@ -47,7 +47,16 @@ function requiredRegex(source, pattern, replacement, label) {
   write(relativePath, source);
 }
 
-// Replace the build-time API implementations with the v3 evidence-aware routes.
+// Repair the staged route template before TypeScript/Next.js sees it, then materialize the API files.
+{
+  const relativePath = "app/api/reimbursements/route.v3.ts";
+  let source = read(relativePath);
+  source = source.replace(
+    'const methods = Array.from(new Set(items.map((item) => item.paymentMethod));',
+    'const methods = Array.from(new Set(items.map((item) => item.paymentMethod)));',
+  );
+  write(relativePath, source);
+}
 copy("app/api/reimbursements/route.v3.ts", "app/api/reimbursements/route.ts");
 copy("app/api/reimbursements/proof/route.v3.ts", "app/api/reimbursements/proof/route.ts");
 
