@@ -10,13 +10,29 @@ function extensionFor(mime: string) {
   return "bin";
 }
 
+function safeName(value: string) {
+  return value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 180);
+}
+
+function parseBatch(locator: string) {
+  if (!locator.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(locator);
+    return parsed?.kind === "reimbursement-batch-v2" && Array.isArray(parsed.items) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function GET(request: Request) {
   try {
     const user = await getCurrentUser();
     if (!user) return NextResponse.json({ error: "Authentication required." }, { status: 401 });
     const url = new URL(request.url);
     const id = Number(url.searchParams.get("id") || 0);
+    const itemIndex = Number(url.searchParams.get("item") || 0);
     if (!Number.isInteger(id) || id <= 0) return NextResponse.json({ error: "A valid reimbursement id is required." }, { status: 400 });
+    if (!Number.isInteger(itemIndex) || itemIndex < 0) return NextResponse.json({ error: "A valid reimbursement item is required." }, { status: 400 });
 
     const sql = db();
     const rows = await sql<any[]>`
@@ -27,19 +43,43 @@ export async function GET(request: Request) {
     `;
     const row = rows[0];
     if (!row || row.document_kind !== "Reimbursement") return NextResponse.json({ error: "Reimbursement proof not found." }, { status: 404 });
-    const canRead = Number(row.requested_by || 0) === user.id || ["Procurement Manager", "Finance", "Admin", "Auditor"].includes(user.role);
+
+    let canRead = Number(row.requested_by || 0) === user.id || ["Finance", "Admin", "Auditor"].includes(user.role);
+    if (!canRead && user.role === "Procurement Manager") {
+      const access = await sql<any[]>`
+        SELECT 1
+        FROM purchase_requests pr
+        WHERE pr.linked_expense_id=${id}
+          AND (pr.assigned_procurement_manager_id=${user.id} OR pr.assigned_procurement_manager_id IS NULL)
+        LIMIT 1
+      `;
+      canRead = Boolean(access[0]);
+    }
     if (!canRead) return NextResponse.json({ error: "You do not have access to this reimbursement proof." }, { status: 403 });
 
     const locator = String(row.receipt_path || "");
-    const match = locator.match(/^data:([^;]+);base64,([\s\S]+)$/);
-    if (!match) return NextResponse.json({ error: "No portable proof file is available for this reimbursement." }, { status: 404 });
+    const batch = parseBatch(locator);
+    let proofLocator = locator;
+    let originalName = "";
+    if (batch) {
+      const item = batch.items[itemIndex];
+      if (!item) return NextResponse.json({ error: "Reimbursement proof item not found." }, { status: 404 });
+      proofLocator = String(item.locator || "");
+      originalName = String(item.fileName || "");
+    } else if (itemIndex !== 0) {
+      return NextResponse.json({ error: "This legacy reimbursement has only one supporting proof." }, { status: 404 });
+    }
+
+    const match = proofLocator.match(/^data:([^;]+);base64,([\s\S]+)$/);
+    if (!match) return NextResponse.json({ error: "No portable proof file is available for this reimbursement item." }, { status: 404 });
     const mime = match[1] || "application/octet-stream";
     const bytes = Buffer.from(match[2], "base64");
-    const fileName = `${row.expense_no || `reimbursement-${id}`}-proof.${extensionFor(mime)}`;
+    const fallback = `${row.expense_no || `reimbursement-${id}`}-item-${itemIndex + 1}-proof.${extensionFor(mime)}`;
+    const fileName = originalName ? `${row.expense_no}-${originalName}` : fallback;
     return new NextResponse(new Uint8Array(bytes), {
       headers: {
         "Content-Type": mime,
-        "Content-Disposition": `attachment; filename="${fileName.replace(/[^A-Za-z0-9._-]/g, "_")}"`,
+        "Content-Disposition": `attachment; filename="${safeName(fileName)}"`,
         "Cache-Control": "private, no-store",
       },
     });
