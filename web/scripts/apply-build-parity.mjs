@@ -18,6 +18,7 @@ const scripts = [
   "apply-facility-request-history-context.mjs",
   "apply-reimbursement-draft-delete.mjs",
   "apply-reimbursement-all-role-shell.mjs",
+  "apply-ict-inbox-batch.mjs",
 ];
 
 function alreadyMaterialized() {
@@ -30,8 +31,10 @@ function alreadyMaterialized() {
     && shell.includes("sidebarCollapsed")
     && shell.includes("sidebar-brand-assets")
     && shell.includes("estimated_amount??r.amount")
-    && shell.includes("ReimbursementWorkspace")
+    && shell.includes("ReimbursementWorkspaceV2")
+    && shell.includes("ProcurementInboxV2")
     && shell.includes('section==="Reimbursement Request"')
+    && shell.includes('section==="Inbox"')
     && layout.includes('import "./local-preview-parity.css";')
     && layout.includes('import "./local-standard-notifications.css";');
 }
