@@ -21,6 +21,7 @@ const scripts = [
   "apply-ict-inbox-batch.mjs",
   "apply-production-runtime-hotfix.mjs",
   "apply-reimbursement-evidence-lowvalue.mjs",
+  "apply-ict-facility-parity.mjs",
 ];
 
 function alreadyMaterialized() {
@@ -35,6 +36,7 @@ function alreadyMaterialized() {
     && shell.includes("estimated_amount??r.amount")
     && shell.includes("ReimbursementWorkspaceV3")
     && shell.includes("ProcurementInboxV3")
+    && shell.includes("ICT_FACILITY_PARITY_V1")
     && layout.includes('import "./local-preview-parity.css";')
     && layout.includes('import "./local-standard-notifications.css";');
 }
