@@ -19,6 +19,7 @@ const scripts = [
   "apply-reimbursement-draft-delete.mjs",
   "apply-reimbursement-all-role-shell.mjs",
   "apply-ict-inbox-batch.mjs",
+  "apply-production-runtime-hotfix.mjs",
   "apply-reimbursement-evidence-lowvalue.mjs",
 ];
 
