@@ -19,6 +19,7 @@ const scripts = [
   "apply-reimbursement-draft-delete.mjs",
   "apply-reimbursement-all-role-shell.mjs",
   "apply-ict-inbox-batch.mjs",
+  "apply-reimbursement-evidence-lowvalue.mjs",
 ];
 
 function alreadyMaterialized() {
@@ -31,10 +32,8 @@ function alreadyMaterialized() {
     && shell.includes("sidebarCollapsed")
     && shell.includes("sidebar-brand-assets")
     && shell.includes("estimated_amount??r.amount")
-    && shell.includes("ReimbursementWorkspaceV2")
-    && shell.includes("ProcurementInboxV2")
-    && shell.includes('section==="Reimbursement Request"')
-    && shell.includes('section==="Inbox"')
+    && shell.includes("ReimbursementWorkspaceV3")
+    && shell.includes("ProcurementInboxV3")
     && layout.includes('import "./local-preview-parity.css";')
     && layout.includes('import "./local-standard-notifications.css";');
 }
@@ -59,9 +58,7 @@ if (alreadyMaterialized()) {
 
 for (const scriptName of scripts) {
   const sourcePath = path.join(root, "scripts", scriptName);
-  if (!fs.existsSync(sourcePath)) {
-    throw new Error(`Missing ProcureFlow parity script: ${scriptName}`);
-  }
+  if (!fs.existsSync(sourcePath)) throw new Error(`Missing ProcureFlow parity script: ${scriptName}`);
 
   const portableSource = makePortable(fs.readFileSync(sourcePath, "utf8"));
   const tempPath = path.join(os.tmpdir(), `procureflow-build-${process.pid}-${scriptName}`);
@@ -74,16 +71,12 @@ for (const scriptName of scripts) {
       stdio: "inherit",
     });
     if (result.error) throw result.error;
-    if (result.status !== 0) {
-      throw new Error(`${scriptName} failed with exit code ${result.status ?? "unknown"}.`);
-    }
+    if (result.status !== 0) throw new Error(`${scriptName} failed with exit code ${result.status ?? "unknown"}.`);
   } finally {
     try { fs.unlinkSync(tempPath); } catch {}
   }
 }
 
-if (!alreadyMaterialized()) {
-  throw new Error("ProcureFlow parity scripts completed but the final UI markers were not materialized.");
-}
+if (!alreadyMaterialized()) throw new Error("ProcureFlow parity scripts completed but the final UI markers were not materialized.");
 
 console.log("ProcureFlow production build parity materialized successfully.");
