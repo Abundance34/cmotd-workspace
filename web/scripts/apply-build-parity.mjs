@@ -22,14 +22,19 @@ const scripts = [
   "apply-production-runtime-hotfix.mjs",
   "apply-reimbursement-evidence-lowvalue.mjs",
   "apply-ict-facility-parity.mjs",
+  "apply-reimbursement-approval-routing.mjs",
 ];
 
 function alreadyMaterialized() {
   const shellPath = path.join(root, "components", "complete-role-shell.tsx");
   const layoutPath = path.join(root, "app", "layout.tsx");
-  if (!fs.existsSync(shellPath) || !fs.existsSync(layoutPath)) return false;
+  const reimbursementPath = path.join(root, "components", "reimbursement-workspace-v3.tsx");
+  const adminDirectoryPath = path.join(root, "components", "admin-directory-controls.tsx");
+  if (![shellPath, layoutPath, reimbursementPath, adminDirectoryPath].every((item) => fs.existsSync(item))) return false;
   const shell = fs.readFileSync(shellPath, "utf8");
   const layout = fs.readFileSync(layoutPath, "utf8");
+  const reimbursement = fs.readFileSync(reimbursementPath, "utf8");
+  const adminDirectory = fs.readFileSync(adminDirectoryPath, "utf8");
   return shell.includes("function SidebarNavIcon")
     && shell.includes("sidebarCollapsed")
     && shell.includes("sidebar-brand-assets")
@@ -37,6 +42,10 @@ function alreadyMaterialized() {
     && shell.includes("ReimbursementWorkspaceV3")
     && shell.includes("ProcurementInboxV3")
     && shell.includes("ICT_FACILITY_PARITY_V1")
+    && reimbursement.includes("REIMBURSEMENT_APPROVAL_ROUTING_V1")
+    && reimbursement.includes("Finance Payout Queue")
+    && adminDirectory.includes("REIMBURSEMENT_APPROVAL_ROUTING_V1")
+    && adminDirectory.includes("ICT account setup")
     && layout.includes('import "./local-preview-parity.css";')
     && layout.includes('import "./local-standard-notifications.css";');
 }
