@@ -25,6 +25,7 @@ RUN node /app/scripts/apply-ict-inbox-batch.mjs
 RUN node /app/scripts/apply-reimbursement-evidence-lowvalue.mjs
 RUN node /app/scripts/apply-ict-facility-parity.mjs
 RUN node /app/scripts/apply-reimbursement-approval-routing.mjs
+RUN node /app/scripts/apply-dark-payee-inbox-fixes.mjs
 RUN npm run typecheck
 
 # Windows Git checkouts can convert shell scripts to CRLF. Normalize them inside

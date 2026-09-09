@@ -23,6 +23,7 @@ const scripts = [
   "apply-reimbursement-evidence-lowvalue.mjs",
   "apply-ict-facility-parity.mjs",
   "apply-reimbursement-approval-routing.mjs",
+  "apply-dark-payee-inbox-fixes.mjs",
 ];
 
 function alreadyMaterialized() {
@@ -30,11 +31,17 @@ function alreadyMaterialized() {
   const layoutPath = path.join(root, "app", "layout.tsx");
   const reimbursementPath = path.join(root, "components", "reimbursement-workspace-v3.tsx");
   const adminDirectoryPath = path.join(root, "components", "admin-directory-controls.tsx");
-  if (![shellPath, layoutPath, reimbursementPath, adminDirectoryPath].every((item) => fs.existsSync(item))) return false;
+  const facilityRequestPath = path.join(root, "components", "facility-request-register.tsx");
+  const cssPath = path.join(root, "app", "local-preview-parity.css");
+  const procurementActionsPath = path.join(root, "lib", "procureflow", "procurement-actions.ts");
+  if (![shellPath, layoutPath, reimbursementPath, adminDirectoryPath, facilityRequestPath, cssPath, procurementActionsPath].every((item) => fs.existsSync(item))) return false;
   const shell = fs.readFileSync(shellPath, "utf8");
   const layout = fs.readFileSync(layoutPath, "utf8");
   const reimbursement = fs.readFileSync(reimbursementPath, "utf8");
   const adminDirectory = fs.readFileSync(adminDirectoryPath, "utf8");
+  const facilityRequest = fs.readFileSync(facilityRequestPath, "utf8");
+  const css = fs.readFileSync(cssPath, "utf8");
+  const procurementActions = fs.readFileSync(procurementActionsPath, "utf8");
   return shell.includes("function SidebarNavIcon")
     && shell.includes("sidebarCollapsed")
     && shell.includes("sidebar-brand-assets")
@@ -46,6 +53,9 @@ function alreadyMaterialized() {
     && reimbursement.includes("Finance Payout Queue")
     && adminDirectory.includes("REIMBURSEMENT_APPROVAL_ROUTING_V1")
     && adminDirectory.includes("ICT account setup")
+    && facilityRequest.includes("PayeeDetailsReveal")
+    && css.includes("DARK_PICKER_HOVER_PAYEE_FIX_V1")
+    && procurementActions.includes("FOR UPDATE OF pr")
     && layout.includes('import "./local-preview-parity.css";')
     && layout.includes('import "./local-standard-notifications.css";');
 }
