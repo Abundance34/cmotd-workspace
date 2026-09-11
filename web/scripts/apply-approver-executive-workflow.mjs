@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-const root="/app";\nconst MARKER="APPROVER_EXECUTIVE_WORKFLOW_V1";
+const root="/app";
+const MARKER="APPROVER_EXECUTIVE_WORKFLOW_V1";
 const read=p=>fs.readFileSync(path.join(root,p),"utf8").replace(/\r\n?/g,"\n");
 const write=(p,v)=>fs.writeFileSync(path.join(root,p),v,"utf8");
 const need=(s,m,l)=>{if(!s.includes(m))throw new Error(`Approver executive patch could not find ${l}.`);};
