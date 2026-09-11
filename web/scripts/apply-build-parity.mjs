@@ -24,6 +24,7 @@ const scripts = [
   "apply-ict-facility-parity.mjs",
   "apply-reimbursement-approval-routing.mjs",
   "apply-dark-payee-inbox-fixes.mjs",
+  "apply-approver-executive-workflow.mjs",
 ];
 
 function alreadyMaterialized() {
@@ -32,14 +33,16 @@ function alreadyMaterialized() {
   const reimbursementPath = path.join(root, "components", "reimbursement-workspace-v3.tsx");
   const adminDirectoryPath = path.join(root, "components", "admin-directory-controls.tsx");
   const facilityRequestPath = path.join(root, "components", "facility-request-register.tsx");
+  const approverWorkspacePath = path.join(root, "components", "approver-executive-workspace.tsx");
   const cssPath = path.join(root, "app", "local-preview-parity.css");
   const procurementActionsPath = path.join(root, "lib", "procureflow", "procurement-actions.ts");
-  if (![shellPath, layoutPath, reimbursementPath, adminDirectoryPath, facilityRequestPath, cssPath, procurementActionsPath].every((item) => fs.existsSync(item))) return false;
+  if (![shellPath, layoutPath, reimbursementPath, adminDirectoryPath, facilityRequestPath, approverWorkspacePath, cssPath, procurementActionsPath].every((item) => fs.existsSync(item))) return false;
   const shell = fs.readFileSync(shellPath, "utf8");
   const layout = fs.readFileSync(layoutPath, "utf8");
   const reimbursement = fs.readFileSync(reimbursementPath, "utf8");
   const adminDirectory = fs.readFileSync(adminDirectoryPath, "utf8");
   const facilityRequest = fs.readFileSync(facilityRequestPath, "utf8");
+  const approverWorkspace = fs.readFileSync(approverWorkspacePath, "utf8");
   const css = fs.readFileSync(cssPath, "utf8");
   const procurementActions = fs.readFileSync(procurementActionsPath, "utf8");
   return shell.includes("function SidebarNavIcon")
@@ -49,12 +52,17 @@ function alreadyMaterialized() {
     && shell.includes("ReimbursementWorkspaceV3")
     && shell.includes("ProcurementInboxV3")
     && shell.includes("ICT_FACILITY_PARITY_V1")
+    && shell.includes("ApproverPendingRequests")
+    && shell.includes("ApproverApprovedRequests")
+    && shell.includes("ApproverPendingPayments")
     && reimbursement.includes("REIMBURSEMENT_APPROVAL_ROUTING_V1")
     && reimbursement.includes("Finance Payout Queue")
     && adminDirectory.includes("REIMBURSEMENT_APPROVAL_ROUTING_V1")
     && adminDirectory.includes("ICT account setup")
     && facilityRequest.includes("PayeeDetailsReveal")
+    && approverWorkspace.includes("ApproverApprovalHistory")
     && css.includes("DARK_PICKER_HOVER_PAYEE_FIX_V1")
+    && css.includes("APPROVER_EXECUTIVE_WORKFLOW_V1")
     && procurementActions.includes("FOR UPDATE OF pr")
     && layout.includes('import "./local-preview-parity.css";')
     && layout.includes('import "./local-standard-notifications.css";');
