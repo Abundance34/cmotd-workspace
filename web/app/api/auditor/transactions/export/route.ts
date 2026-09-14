@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import * as XLSX from "xlsx";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { csvText, simplePdf } from "@/lib/procureflow/simple-pdf";
+import { csvText } from "@/lib/procureflow/simple-pdf";
+import { buildAuditorTransactionPdf } from "@/lib/procureflow/auditor-transaction-pdf";
 
 export const runtime="nodejs";
 export const dynamic="force-dynamic";
@@ -23,12 +24,14 @@ async function loadPackage(requestId:number|null){
     LEFT JOIN users fm ON fm.id=pr.facility_manager_user_id
     LEFT JOIN users pm ON pm.id=pr.assigned_procurement_manager_id
     WHERE (${all} OR pr.id=${requestId})
-    ORDER BY COALESCE(pr.updated_at,pr.created_at) DESC,pr.id DESC LIMIT 1200`;
+    ORDER BY COALESCE(pr.request_date,pr.updated_at,pr.created_at) DESC,pr.id DESC LIMIT 1200`;
   if(requestId&&!requests.length)throw new Error("Transaction not found.");
   const ids=requests.map(r=>Number(r.id));
-  if(!ids.length)return {requests:[],items:[],workflow:[],approvals:[],quotes:[],purchaseOrders:[],poItems:[],payments:[],receipts:[],messages:[],documents:[]};
-  const [items,workflow,approvals,quotes,pos,poItems,payments,receipts,messages,documents]=await Promise.all([
+  if(!ids.length)return {requests:[],items:[],payees:[],sourcing:[],workflow:[],approvals:[],quotes:[],purchaseOrders:[],poItems:[],payments:[],receipts:[],messages:[],documents:[]};
+  const [items,payees,sourcing,workflow,approvals,quotes,pos,poItems,payments,receipts,messages,documents]=await Promise.all([
     sql<any[]>`SELECT pri.request_id,pr.request_no,pri.id,pri.item_name,pri.description,pri.quantity,pri.unit_price,pri.total,pri.category,pri.suggested_vendor,pri.created_at FROM purchase_request_items pri JOIN purchase_requests pr ON pr.id=pri.request_id WHERE pri.request_id IN ${sql(ids)} ORDER BY pri.request_id,pri.id`,
+    sql<any[]>`SELECT DISTINCT ON (ppd.purchase_request_id) ppd.purchase_request_id request_id,pr.request_no,ppd.id,ppd.payee_type,ppd.payee_name_masked,ppd.account_name_masked,ppd.bank_name_masked,ppd.account_number_last4,ppd.currency,ppd.recipient_known,ppd.payment_readiness_status,ppd.verification_status,ppd.confirmed_at,ppd.verified_at,ppd.updated_at FROM payment_payee_details ppd JOIN purchase_requests pr ON pr.id=ppd.purchase_request_id WHERE ppd.purchase_request_id IN ${sql(ids)} ORDER BY ppd.purchase_request_id,COALESCE(ppd.is_current,FALSE) DESC,ppd.updated_at DESC,ppd.id DESC`,
+    sql<any[]>`SELECT st.request_id,pr.request_no,st.id,st.sourcing_no,st.status,st.reason_for_recommendation,st.created_at,st.updated_at,v.name recommended_vendor_name FROM sourcing_tasks st JOIN purchase_requests pr ON pr.id=st.request_id LEFT JOIN vendors v ON v.id=st.recommended_vendor_id WHERE st.request_id IN ${sql(ids)} ORDER BY st.request_id,COALESCE(st.updated_at,st.created_at) DESC,st.id DESC`,
     sql<any[]>`SELECT we.entity_id request_id,pr.request_no,we.id,we.created_at,we.event,we.status,we.note,u.full_name user_name,u.role user_role FROM workflow_events we JOIN purchase_requests pr ON pr.id=we.entity_id LEFT JOIN users u ON u.id=we.user_id WHERE we.entity_type='Purchase Request' AND we.entity_id IN ${sql(ids)} ORDER BY we.entity_id,we.created_at,we.id`,
     sql<any[]>`SELECT ah.entity_id request_id,pr.request_no,ah.id,ah.created_at,ah.action,ah.status_before,ah.status_after,COALESCE(u.full_name,ah.approved_by_role) approved_by,ah.approved_by_role,ah.approval_mode,COALESCE(ah.note,ah.reason) note FROM approval_history ah JOIN purchase_requests pr ON pr.id=ah.entity_id LEFT JOIN users u ON u.id=COALESCE(ah.approved_by_user_id,ah.user_id) WHERE ah.entity_type='Purchase Request' AND ah.entity_id IN ${sql(ids)} ORDER BY ah.entity_id,ah.created_at,ah.id`,
     sql<any[]>`SELECT st.request_id,pr.request_no,vq.id,COALESCE(vq.vendor_name,v.name) vendor_name,COALESCE(vq.quotation_total,vq.quoted_amount,0) quoted_amount,vq.currency,vq.delivery_time_days,vq.payment_terms,vq.score,vq.is_recommended,vq.is_selected,vq.created_at FROM vendor_quotes vq JOIN sourcing_tasks st ON st.id=vq.sourcing_task_id JOIN purchase_requests pr ON pr.id=st.request_id LEFT JOIN vendors v ON v.id=vq.vendor_id WHERE st.request_id IN ${sql(ids)} ORDER BY st.request_id,vq.created_at,vq.id`,
@@ -39,34 +42,16 @@ async function loadPackage(requestId:number|null){
     sql<any[]>`SELECT ct.entity_id request_id,pr.request_no,cm.id,cm.created_at,u.full_name sender_name,u.role sender_role,cm.message_text FROM collaboration_threads ct JOIN purchase_requests pr ON pr.id=ct.entity_id JOIN collaboration_messages cm ON cm.thread_id=ct.id LEFT JOIN users u ON u.id=cm.sender_user_id WHERE ct.entity_type='Purchase Request' AND ct.entity_id IN ${sql(ids)} ORDER BY ct.entity_id,cm.created_at,cm.id`,
     sql<any[]>`SELECT ild.linked_request_id request_id,pr.request_no,ild.id,ild.file_name,ild.document_type,ild.title,ild.import_status status,ild.file_hash,ild.created_at FROM imported_legacy_documents ild JOIN purchase_requests pr ON pr.id=ild.linked_request_id WHERE ild.linked_request_id IN ${sql(ids)} ORDER BY ild.linked_request_id,ild.created_at,ild.id`
   ]);
-  return {requests:normalize(requests),items:normalize(items),workflow:normalize(workflow),approvals:normalize(approvals),quotes:normalize(quotes),purchaseOrders:normalize(pos),poItems:normalize(poItems),payments:normalize(payments),receipts:normalize(receipts),messages:normalize(messages),documents:normalize(documents)};
+  return {requests:normalize(requests),items:normalize(items),payees:normalize(payees),sourcing:normalize(sourcing),workflow:normalize(workflow),approvals:normalize(approvals),quotes:normalize(quotes),purchaseOrders:normalize(pos),poItems:normalize(poItems),payments:normalize(payments),receipts:normalize(receipts),messages:normalize(messages),documents:normalize(documents)};
 }
 
 function flattened(pkg:any){
-  const children=["items","workflow","approvals","quotes","purchaseOrders","poItems","payments","receipts","messages","documents"];
+  const children=["items","payees","sourcing","workflow","approvals","quotes","purchaseOrders","poItems","payments","receipts","messages","documents"];
   return pkg.requests.map((r:any)=>{
     const id=Number(r.id),out:any={...r};
     for(const key of children)out[key]=JSON.stringify((pkg[key]||[]).filter((x:any)=>Number(x.request_id)===id));
     return out;
   });
-}
-
-function pdfLines(pkg:any){
-  const lines:string[]=[];
-  for(const r of pkg.requests){
-    const id=Number(r.id);
-    lines.push(`${r.request_no} | ${r.department_project||"—"} | ${r.category||"—"} | NGN ${Number(r.estimated_amount||0).toLocaleString("en-NG")} | ${r.status||"—"}`);
-    lines.push(`Requester: ${r.requester||"—"} (${r.requester_role||"—"}) | Procurement: ${r.procurement_manager||"—"} | Payment: ${r.payment_status||"—"}`);
-    lines.push(`Justification: ${r.justification||"—"}`);
-    const groups:[string,string][]=[["Items","items"],["Workflow","workflow"],["Approvals","approvals"],["Quotes","quotes"],["Purchase Orders","purchaseOrders"],["Payments","payments"],["Receipts","receipts"],["Messages","messages"],["Documents","documents"]];
-    for(const [label,key] of groups){
-      const rows=(pkg[key]||[]).filter((x:any)=>Number(x.request_id)===id);
-      lines.push(`${label}: ${rows.length}`);
-      for(const x of rows.slice(0,80))lines.push("  - "+Object.entries(x).filter(([k])=>!["request_id","request_no","id"].includes(k)).map(([k,v])=>`${k}: ${v??""}`).join(" | "));
-    }
-    lines.push(" ");
-  }
-  return lines.slice(0,5000);
 }
 
 export async function GET(request:Request){
@@ -83,7 +68,7 @@ export async function GET(request:Request){
     if(format==="json")return new NextResponse(JSON.stringify(pkg,null,2),{headers:{"Content-Type":"application/json; charset=utf-8","Content-Disposition":`attachment; filename="${filename}.json"`}});
     if(format==="xlsx"||format==="excel"){
       const wb=XLSX.utils.book_new(),sheets:[string,any[]][]=[
-        ["Requests",pkg.requests],["Line Items",pkg.items],["Workflow",pkg.workflow],["Approvals",pkg.approvals],["Vendor Quotes",pkg.quotes],
+        ["Requests",pkg.requests],["Line Items",pkg.items],["Payee Details",pkg.payees],["Sourcing",pkg.sourcing],["Workflow",pkg.workflow],["Approvals",pkg.approvals],["Vendor Quotes",pkg.quotes],
         ["Purchase Orders",pkg.purchaseOrders],["PO Items",pkg.poItems],["Payments",pkg.payments],["Receipts",pkg.receipts],["Messages",pkg.messages],["Documents",pkg.documents]
       ];
       for(const [name,rows] of sheets)XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows.length?rows:[{message:"No records"}]),name.slice(0,31));
@@ -91,8 +76,8 @@ export async function GET(request:Request){
       return new NextResponse(new Uint8Array(output),{headers:{"Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","Content-Disposition":`attachment; filename="${filename}.xlsx"`}});
     }
     if(format==="pdf"){
-      const pdf=simplePdf(id?`ProcureFlow Transaction 360 — ${ref}`:"ProcureFlow Transaction 360 — Complete Register",pdfLines(pkg),"CMOTD ProcureFlow Audit");
-      return new NextResponse(pdf,{headers:{"Content-Type":"application/pdf","Content-Disposition":`attachment; filename="${filename}.pdf"`}});
+      const pdf=await buildAuditorTransactionPdf(pkg,{requestSpecific:Boolean(id)});
+      return new NextResponse(new Uint8Array(pdf),{headers:{"Content-Type":"application/pdf","Content-Disposition":`attachment; filename="${filename}.pdf"`}});
     }
     return new NextResponse(csvText(flattened(pkg)),{headers:{"Content-Type":"text/csv; charset=utf-8","Content-Disposition":`attachment; filename="${filename}.csv"`}});
   }catch(error){return NextResponse.json({error:error instanceof Error?error.message:"Unable to generate audit transaction export."},{status:400});}
