@@ -8,7 +8,7 @@ import { getApproverDashboardData } from "@/lib/procureflow/approver-data";
 import { getFinanceDashboardData } from "@/lib/procureflow/finance-data";
 import { getLogisticsDashboardData } from "@/lib/procureflow/logistics-data";
 import { getLogisticsPOItems } from "@/lib/procureflow/logistics-items";
-import { getAuditorDashboardData } from "@/lib/procureflow/auditor-data";
+import { getAuditorReviewDashboardData } from "@/lib/procureflow/auditor-review-data";
 import { getAdminDashboardData } from "@/lib/procureflow/admin-data";
 import { getSecurityMigrationStatus } from "@/lib/procureflow/security-check";
 import { getParityData } from "@/lib/procureflow/parity-data";
@@ -29,7 +29,7 @@ export default async function ProcureFlowApp() {
     user.role === "Logistics Officer" ? getLogisticsDashboardData() : Promise.resolve(undefined),
     user.role === "Logistics Officer" ? getLogisticsPOItems() : Promise.resolve([]),
     user.role === "Admin" ? getAdminDashboardData() : Promise.resolve(undefined),
-    user.role === "Auditor" ? getAuditorDashboardData() : Promise.resolve(undefined),
+    user.role === "Auditor" ? getAuditorReviewDashboardData() : Promise.resolve(undefined),
     getSecurityMigrationStatus(),
     getParityData(user),
   ]);

@@ -34,12 +34,11 @@ const ROLE_SECTIONS: Record<string, string[]> = {
     "Activity Logs", "Audit Logs", "Database Console", "Backup / Export", "Settings",
   ],
   Auditor: [
-    "Audit Dashboard", "Audit Log", "Activities Review", "Facility Head Handoff Trails", "Workflow Status History",
-    "Approval Trails", "Sourcing & Vendor Quote Audit", "Purchase Order & Logistics Evidence",
-    "Receiving Slips, Proof of Delivery & Returns", "Finance & Payment Audit", "Expense Review",
-    "Payee / Payment Detail Audit", "Gateway Pass Audit", "Vendor Performance & Compliance", "Notification Audit",
-    "User & Access Audit", "Delegated Approval Audit", "Budget & Income Audit", "Income", "Document Archive",
-    "Compliance Reports", "Role Activity Mirrors", "Transaction 360 View", "Settings",
+    "Audit Dashboard", "Transaction 360", "Procurement Records", "Facility / Utility Handoff Trail", "Sourcing & Vendor Quote Audit",
+    "Approval Trails", "Delegated Approval Review", "Purchase Order & Logistics Evidence", "Receiving Slips, Proof of Delivery & Returns",
+    "Vendor History", "Gateway Pass Audit", "Document Archive & Download Audit", "Finance, Invoice & Payment Audit", "Expense Review",
+    "Payment Payee / Bank Detail Access Audit", "Budget Audit", "Income", "Reimbursement Request", "Role Activity Mirrors", "User 360",
+    "Exception Centre", "Notification Delivery Audit", "All Activity & Evidence Ledger", "Compliance Reports", "Settings",
   ],
 };
 
@@ -128,18 +127,19 @@ function inferTarget(role: string, notification: any) {
 
   if (role === "Auditor") {
     if (/gateway/.test(text)) return "Gateway Pass Audit";
-    if (/payment|finance|invoice|receipt/.test(text)) return "Finance & Payment Audit";
-    if (/expense/.test(text)) return "Expense Review";
-    if (/payee|account detail/.test(text)) return "Payee / Payment Detail Audit";
+    if (/payment|finance|invoice|receipt/.test(text)) return "Finance, Invoice & Payment Audit";
+    if (/expense|reimbursement/.test(text)) return "Expense Review";
+    if (/payee|account detail|bank detail/.test(text)) return "Payment Payee / Bank Detail Access Audit";
     if (/vendor|quote|sourc/.test(text)) return "Sourcing & Vendor Quote Audit";
     if (/purchase order|\bpo\b|logistics/.test(text)) return "Purchase Order & Logistics Evidence";
     if (/receiv|delivery|return/.test(text)) return "Receiving Slips, Proof of Delivery & Returns";
     if (/approval|approved|rejected/.test(text)) return "Approval Trails";
-    if (/notification/.test(text)) return "Notification Audit";
-    if (/user|access|session|security/.test(text)) return "User & Access Audit";
-    if (/budget|income/.test(text)) return "Budget & Income Audit";
-    if (/workflow|status|handoff/.test(text)) return "Workflow Status History";
-    if (/activity/.test(text)) return "Activities Review";
+    if (/notification/.test(text)) return "Notification Delivery Audit";
+    if (/user|access|session|security|password/.test(text)) return "User 360";
+    if (/exception|denied|failure|warning/.test(text)) return "Exception Centre";
+    if (/budget|income/.test(text)) return "Budget Audit";
+    if (/workflow|status|handoff|request|procurement/.test(text)) return "Transaction 360";
+    if (/activity/.test(text)) return "Role Activity Mirrors";
     return "Audit Dashboard";
   }
 

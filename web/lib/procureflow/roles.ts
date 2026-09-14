@@ -84,13 +84,13 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
   Auditor: {
     title: "Audit Navigation",
     sections: [
-      "Audit Dashboard", "Reimbursement Request", "Role Activity Mirrors", "Transaction 360", "User 360", "Exception Centre",
-      "All Activity & Evidence Ledger", "Procurement Records", "Sourcing & Vendor Quote Audit",
-      "Purchase Order & Logistics Evidence", "Receiving Slips, Proof of Delivery & Returns",
-      "Finance, Invoice & Payment Audit", "Approval Trails", "Delegated Approval Review",
-      "Payment Payee / Bank Detail Access Audit", "Gateway Pass Audit", "Document Archive & Download Audit",
-      "Notification Delivery Audit", "User & Security Audit", "Vendor History", "Budget Audit",
-      "Facility / Utility Handoff Trail", "Expense Review", "Compliance Reports", "Income", "Settings",
+      "Audit Dashboard",
+      "Transaction 360", "Procurement Records", "Facility / Utility Handoff Trail", "Sourcing & Vendor Quote Audit",
+      "Approval Trails", "Delegated Approval Review", "Purchase Order & Logistics Evidence",
+      "Receiving Slips, Proof of Delivery & Returns", "Vendor History", "Gateway Pass Audit", "Document Archive & Download Audit",
+      "Finance, Invoice & Payment Audit", "Expense Review", "Payment Payee / Bank Detail Access Audit", "Budget Audit", "Income", "Reimbursement Request",
+      "Role Activity Mirrors", "User 360", "Exception Centre", "Notification Delivery Audit",
+      "All Activity & Evidence Ledger", "Compliance Reports", "Settings",
     ],
   },
 };
