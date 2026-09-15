@@ -13,7 +13,8 @@ import { ProcurementSourcing } from "@/components/procurement-sourcing";
 import { ProcurementRecommendations } from "@/components/procurement-recommendations";
 import { ApproverRequests } from "@/components/approver-requests";
 import { ApproverGatewayApprovals, ApproverPaymentApprovals, ApproverPOApprovals } from "@/components/approver-operational-approvals";
-import { FinanceApprovedForPayment, FinanceBudgets, FinancePayments, FinanceReceipts } from "@/components/finance-workspace";
+import { FinanceApprovedForPayment, FinanceBudgets, FinancePayments } from "@/components/finance-workspace";
+import { FinanceReceiptWorkspaceV2 } from "@/components/finance-receipt-workspace-v2";
 import { IncomeWorkspace } from "@/components/income-workspace";
 import { SettingsWorkspace } from "@/components/settings-workspace";
 import { AdminApprovalConfigurationControls, AdminUserManagementControls, AdminWorkflowInterventionControls } from "@/components/admin-controls";
@@ -89,7 +90,7 @@ function ApproverSection({section,data,parityData}:{section:string;data:any;pari
 function FinanceSection({section,data,parityData}:{section:string;data:any;parityData:ParityData}){
   if(section==="Approved for Payment")return <FinanceApprovedForPayment rows={data?.readyForPayment||[]}/>;
   if(section==="Payments")return <FinancePayments rows={data?.payments||[]}/>;
-  if(section==="Receipts")return <Stack><ParityWorkspace section="Receipts" role="Finance" data={parityData}/><h3>Receipt metadata register</h3><FinanceReceipts rows={data?.receipts||[]}/></Stack>;
+  if(section==="Receipts")return <FinanceReceiptWorkspaceV2 data={parityData} receiptRows={data?.receipts||[]}/>;
   if(section==="Budgets")return <FinanceBudgets rows={data?.budgets||[]}/>;
   if(["Invoices","Expenses","Cash Advances","Vendor Payment Records","Reconciliation","Financial Reports"].includes(section))return <ParityWorkspace section={section} role="Finance" data={parityData}/>;
   return null;
