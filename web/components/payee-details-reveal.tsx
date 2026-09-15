@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Eye, EyeOff, ShieldCheck } from "lucide-react";
 
 type RevealedPayeeDetails = {
@@ -18,9 +18,17 @@ type RevealedPayeeDetails = {
 export function PayeeDetailsReveal({
   requestId,
   available = true,
+  autoReveal = false,
+  allowHide = true,
+  heading = "Full account details",
+  description = "Hidden by default. Every reveal is recorded in the audit trail.",
 }: {
   requestId: number | null | undefined;
   available?: boolean;
+  autoReveal?: boolean;
+  allowHide?: boolean;
+  heading?: string;
+  description?: string;
 }) {
   const [details, setDetails] = useState<RevealedPayeeDetails | null>(null);
   const [busy, setBusy] = useState(false);
@@ -48,6 +56,14 @@ export function PayeeDetailsReveal({
     }
   }
 
+  useEffect(() => {
+    setDetails(null);
+    setError("");
+    if (autoReveal && available && requestId) void reveal();
+    // requestId is the intended reveal boundary. Avoid re-revealing solely because busy state changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestId, autoReveal, available]);
+
   function hide() {
     setDetails(null);
     setError("");
@@ -61,15 +77,16 @@ export function PayeeDetailsReveal({
     <div className="payee-reveal-shell">
       <div className="payee-reveal-head">
         <div>
-          <strong>Full account details</strong>
-          <span><ShieldCheck size={13} /> Hidden by default. Every reveal is recorded in the audit trail.</span>
+          <strong>{heading}</strong>
+          <span><ShieldCheck size={13} /> {autoReveal ? "Authorized full-detail view. Every access is recorded in the audit trail." : description}</span>
         </div>
-        {details ? (
+        {details && allowHide ? (
           <button type="button" className="payee-reveal-button secondary" onClick={hide}><EyeOff size={15} /> Hide account details</button>
-        ) : (
+        ) : !details && !autoReveal ? (
           <button type="button" className="payee-reveal-button" disabled={busy || !requestId} onClick={() => void reveal()}><Eye size={15} /> {busy ? "Opening…" : "View account details"}</button>
-        )}
+        ) : null}
       </div>
+      {busy && autoReveal ? <div className="payee-reveal-disabled">Opening authorized payee and bank details…</div> : null}
       {error ? <div className="action-message error payee-reveal-error">{error}</div> : null}
       {details ? (
         <div className="payee-reveal-grid">
