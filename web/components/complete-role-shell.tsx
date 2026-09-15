@@ -23,6 +23,7 @@ import { ParityWorkspace } from "@/components/parity-workspace";
 import { CompleteLogisticsWorkspace } from "@/components/complete-logistics-workspace";
 import { GlobalTools } from "@/components/global-tools";
 import { AuditorReviewWorkspace } from "@/components/auditor-review-workspace";
+import { AuditorPayeeDetails } from "@/components/auditor-payee-details";
 
 export type CompleteShellUser = { id: number; fullName: string; username: string; role: ProcureFlowRole };
 
@@ -124,7 +125,7 @@ function AuditorSection({section,data,parityData}:{section:string;data:any;parit
   if(section==="Purchase Order & Logistics Evidence")return <Stack><POTable rows={data?.purchaseOrders||[]}/><ExceptionTable rows={data?.exceptions||[]}/></Stack>;
   if(section==="Receiving Slips, Proof of Delivery & Returns")return <div className="table-wrap"><table className="data-table"><thead><tr><th>Slip</th><th>PO</th><th>Request</th><th>Vendor</th><th>Date</th><th>Status</th><th>Discrepancy</th></tr></thead><tbody>{(data?.receiving||[]).map((r:any)=><tr key={r.id}><td>{r.slipNo}</td><td>{r.poNo||"—"}</td><td>{r.requestNo||"—"}</td><td>{r.vendorName||"—"}</td><td>{dateText(r.dateReceived)}</td><td>{r.status||"—"}</td><td>{r.discrepancyNotes||"—"}</td></tr>)}</tbody></table></div>;
   if(section==="Finance, Invoice & Payment Audit")return <ParityWorkspace section="Vendor Payment Records" role="Auditor" data={parityData}/>;
-  if(section==="Payment Payee / Bank Detail Access Audit")return <AuditEvents rows={(data?.payeeAudit||[]).map((r:any)=>({...r,occurredAt:r.occurredAt,actorUsername:r.actorUsername,actorRole:r.actorRole,entityReference:r.entityReference,entityId:r.entityId,source:"audit",signatureKeyVersion:"—"}))}/>;
+  if(section==="Payment Payee / Bank Detail Access Audit")return <Stack><AuditorPayeeDetails requests={data?.requests||[]}/><h3>Payee detail access audit trail</h3><AuditEvents rows={(data?.payeeAudit||[]).map((r:any)=>({...r,occurredAt:r.occurredAt,actorUsername:r.actorUsername,actorRole:r.actorRole,entityReference:r.entityReference,entityId:r.entityId,source:"audit",signatureKeyVersion:"—"}))}/></Stack>;
   if(section==="Gateway Pass Audit")return <ParityWorkspace section={section} role="Auditor" data={parityData}/>;
   if(section==="Budget Audit")return <div className="table-wrap"><table className="data-table"><thead><tr><th>Month</th><th>Department</th><th>Category</th><th>Limit</th><th>Override</th></tr></thead><tbody>{(data?.budgets||[]).map((r:any)=><tr key={r.id}><td>{r.month}</td><td>{r.departmentProject||"—"}</td><td>{r.category||"—"}</td><td>{money(r.limitAmount)}</td><td>{r.overrideRequired?"Required":"No"}</td></tr>)}</tbody></table></div>;
   return <ParityWorkspace section={section} role="Auditor" data={parityData}/>;
