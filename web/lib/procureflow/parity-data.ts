@@ -115,7 +115,7 @@ export async function getParityData(user: CurrentUser): Promise<ParityData> {
     ORDER BY ca.created_at DESC LIMIT 300` : [];
   const advanceExpenses = ["Finance","Admin","Auditor"].includes(user.role) ? await sql<any[]>`SELECT * FROM advance_expenses ORDER BY created_at DESC LIMIT 500` : [];
 
-  const importedDocs = ["Facility Manager","Procurement Manager","Admin","Auditor"].includes(user.role)
+  const importedDocs = ["Facility Manager","Procurement Manager","Finance","Admin","Auditor"].includes(user.role)
     ? await sql<any[]>`SELECT id,'Imported Document' source_type,file_name,document_type,title,file_path,file_hash,department_project,linked_request_id entity_id,created_at,import_status status,original_path notes FROM imported_legacy_documents ORDER BY created_at DESC LIMIT 300` : [];
   const logisticsDocs = ["Logistics Officer","Procurement Manager","Admin","Auditor"].includes(user.role)
     ? await sql<any[]>`SELECT id,'Logistics Document' source_type,file_name,document_type,document_type title,file_path,NULL::text file_hash,NULL::text department_project,COALESCE(po_id,gateway_pass_id,related_entity_id) entity_id,created_at,NULL::text status,notes FROM logistics_documents ORDER BY created_at DESC LIMIT 300` : [];
@@ -143,10 +143,13 @@ export async function getParityData(user: CurrentUser): Promise<ParityData> {
 
   const reconciliation = ["Finance","Admin","Auditor","Procurement Manager"].includes(user.role) ? await sql<any[]>`
     SELECT p.id,p.payment_no,p.request_id,p.po_id,p.invoice_id,p.amount,p.currency,p.status payment_status,p.verification_status,p.payment_date,p.payment_reference,p.transfer_type,
-           pr.request_no,pr.status request_status,po.po_no,po.status po_status,i.invoice_no,i.total_amount invoice_total,rr.receipt_no,rr.status receipt_status,v.name vendor_name
+           pr.request_no,pr.status request_status,po.po_no,po.status po_status,i.invoice_no,i.total_amount invoice_total,rr.receipt_no,rr.status receipt_status,v.name vendor_name,
+           COALESCE(ppd.payee_type,CASE WHEN p.vendor_id IS NOT NULL THEN 'Vendor' ELSE 'Other' END) recipient_type,
+           COALESCE(ppd.payee_name_masked,v.name) recipient_name
     FROM payments p LEFT JOIN purchase_requests pr ON pr.id=p.request_id LEFT JOIN purchase_orders po ON po.id=p.po_id
     LEFT JOIN invoices i ON i.id=p.invoice_id LEFT JOIN receipt_records rr ON rr.id=COALESCE(p.proof_of_payment_receipt_id,p.vendor_receipt_id,p.receipt_id)
-    LEFT JOIN vendors v ON v.id=p.vendor_id ORDER BY COALESCE(p.updated_at,p.created_at) DESC LIMIT 500` : [];
+    LEFT JOIN vendors v ON v.id=p.vendor_id LEFT JOIN payment_payee_details ppd ON ppd.id=p.payee_detail_id
+    ORDER BY COALESCE(p.updated_at,p.created_at) DESC LIMIT 500` : [];
 
   const receipts = ["Finance","Admin","Auditor","Procurement Manager"].includes(user.role) ? await sql<any[]>`
     SELECT rr.id,rr.receipt_no,rr.receipt_type,rr.payment_method,rr.payment_date,rr.vendor_id,rr.payee_name,rr.amount,rr.currency,rr.purpose,rr.department_project,
