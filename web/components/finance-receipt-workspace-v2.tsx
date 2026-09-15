@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { FilePlus2, Paperclip, ReceiptText, Upload } from "lucide-react";
 
@@ -55,6 +55,10 @@ export function FinanceReceiptWorkspaceV2({ data, receiptRows = [] }: { data: an
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const payments = data?.reconciliation || [];
+  const paidPayments = useMemo(
+    () => payments.filter((row: any) => String(row.payment_status || row.status || "").toLowerCase() === "paid"),
+    [payments],
+  );
   const requests = data?.requests || [];
   const purchaseOrders = data?.purchaseOrders || [];
   const vendors = data?.vendors || [];
@@ -66,6 +70,27 @@ export function FinanceReceiptWorkspaceV2({ data, receiptRows = [] }: { data: an
   function setField(key: keyof typeof initial, value: string) {
     setForm((current) => ({ ...current, [key]: value }));
   }
+
+  useEffect(() => {
+    let preferredPaymentId = "";
+    let preferredRequestId = "";
+    try {
+      preferredPaymentId = sessionStorage.getItem("procureflow:receipt-payment-id") || "";
+      preferredRequestId = sessionStorage.getItem("procureflow:receipt-request-id") || "";
+    } catch {}
+
+    const preferred = paidPayments.find((row: any) =>
+      (preferredPaymentId && String(row.id) === preferredPaymentId)
+      || (preferredRequestId && String(row.request_id || "") === preferredRequestId),
+    );
+    if (preferred) {
+      choosePayment(String(preferred.id));
+      try {
+        sessionStorage.removeItem("procureflow:receipt-payment-id");
+        sessionStorage.removeItem("procureflow:receipt-request-id");
+      } catch {}
+    }
+  }, [paidPayments]);
 
   function choosePayment(value: string) {
     const payment = payments.find((row: any) => String(row.id) === value);
@@ -89,6 +114,10 @@ export function FinanceReceiptWorkspaceV2({ data, receiptRows = [] }: { data: an
   }
 
   async function submit() {
+    if (!form.paymentId) {
+      setMessage({ type: "error", text: "Choose the paid request this receipt belongs to." });
+      return;
+    }
     if (mode === "attachment" && !receiptFile) {
       setMessage({ type: "error", text: "Choose the receipt file you want to attach." });
       return;
@@ -127,7 +156,7 @@ export function FinanceReceiptWorkspaceV2({ data, receiptRows = [] }: { data: an
     <div className="parity-stack finance-receipt-v2">
       <div className="panel">
         <div className="panel-heading">
-          <div><h2>Record receipt / proof of payment</h2><p>Enter receipt information manually, attach the receipt itself, or use both. Supporting documents are optional.</p></div>
+          <div><h2>Record receipt / proof of payment</h2><p>Select a paid request first. You can enter the receipt manually, attach the receipt/proof, or use both. Supporting documents remain optional.</p></div>
           <span className="status-pill">Finance evidence</span>
         </div>
 
@@ -137,8 +166,8 @@ export function FinanceReceiptWorkspaceV2({ data, receiptRows = [] }: { data: an
         </div>
 
         <div className="review-form receipt-link-grid">
-          <label><span>Link payment (optional)</span><select value={form.paymentId} onChange={(event) => choosePayment(event.target.value)}><option value="">No payment selected</option>{payments.map((row: any) => <option key={row.id} value={row.id}>{row.payment_no} — {row.request_no || "No request"} — {money(row.amount, row.currency || "NGN")}</option>)}</select></label>
-          <label><span>Link purchase request (optional)</span><select value={form.requestId} onChange={(event) => setField("requestId", event.target.value)}><option value="">No request selected</option>{requests.map((row: any) => <option key={row.id} value={row.id}>{row.request_no} — {row.department_project || "No department"}</option>)}</select></label>
+          <label className="paid-request-picker"><span>Paid request</span><select value={form.paymentId} onChange={(event) => choosePayment(event.target.value)}><option value="">Select paid request…</option>{paidPayments.map((row: any) => <option key={row.id} value={row.id}>{row.request_no || row.payment_no} — {money(row.amount, row.currency || "NGN")} — {row.payment_no}</option>)}</select><small>{paidPayments.length} paid request(s) available for receipt entry.</small></label>
+          <label><span>Purchase request</span><select value={form.requestId} onChange={(event) => setField("requestId", event.target.value)}><option value="">Select request…</option>{requests.map((row: any) => <option key={row.id} value={row.id}>{row.request_no} — {row.department_project || "No department"}</option>)}</select></label>
           <label><span>Link PO (optional)</span><select value={form.poId} onChange={(event) => setField("poId", event.target.value)}><option value="">No PO selected</option>{purchaseOrders.map((row: any) => <option key={row.id} value={row.id}>{row.po_no} — {row.vendor_name || "Vendor pending"}</option>)}</select></label>
           <label><span>Vendor (optional)</span><select value={form.vendorId} onChange={(event) => setField("vendorId", event.target.value)}><option value="">No vendor selected</option>{vendors.map((row: any) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>
         </div>
