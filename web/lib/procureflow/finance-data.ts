@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { decryptPayeeValueV2 } from "./payee-crypto";
+import { decryptPayeeValueCompatible } from "./payee-crypto";
 
 export type FinanceReadyRow = {
   id: number;
@@ -144,7 +144,7 @@ function v2PayeeReadable(row: RawReady) {
   ];
   if (values.some((value) => !value)) return false;
   try {
-    for (const value of values) decryptPayeeValueV2(String(value));
+    for (const value of values) decryptPayeeValueCompatible(String(value));
     return true;
   } catch {
     return false;
