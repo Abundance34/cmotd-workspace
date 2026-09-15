@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { PayeeDetailsReveal } from "@/components/payee-details-reveal";
+import { requestConfirmation } from "@/components/in-app-confirmation";
 import {
   AlertTriangle,
   BadgeCheck,
@@ -85,7 +86,17 @@ export function FinanceApprovedForPayment({ rows }: { rows: FinanceReadyRow[] })
       setMessage({ type: "error", text: "Enter the payment / reconciliation reference." });
       return;
     }
-    if (!window.confirm(`Record payment for ${selected.requestNo}? This will move the request to Paid.`)) return;
+    const approved = await requestConfirmation({
+      eyebrow: "FINANCE PAYMENT",
+      title: "Mark this approved request as paid?",
+      description: "Confirm only after the bank transfer or other approved payment has actually been completed. ProcureFlow will record the payment and move the request to Paid.",
+      reference: selected.requestNo,
+      detail: `${money(selected.amount, selected.currency)} · ${transferType} · Ref: ${paymentReference.trim()}`,
+      confirmLabel: "Mark as Paid",
+      cancelLabel: "Cancel",
+      tone: "success",
+    });
+    if (!approved) return;
     setBusy("pay");
     setMessage(null);
     try {
@@ -120,16 +131,30 @@ export function FinanceApprovedForPayment({ rows }: { rows: FinanceReadyRow[] })
     <div className="finance-payment-workspace">
       <div className="finance-ready-list">
         {rows.map((row) => (
-          <button type="button" key={row.id} className={selected?.id === row.id ? "finance-ready-card active" : "finance-ready-card"} onClick={() => { setSelectedId(row.id); setMessage(null); setConfirmed(false); }}>
-            <span className="finance-ready-icon"><Banknote size={16} /></span>
-            <div><strong>{row.requestNo}</strong><span>{row.departmentProject || "—"} · {row.category || "—"}</span></div>
-            <div><b>{money(row.amount, row.currency)}</b><small>{row.paymentReadinessStatus || row.paymentStatus || "Awaiting Finance"}</small></div>
-          </button>
+          <div key={row.id} className="finance-ready-row">
+            <button type="button" className={selected?.id === row.id ? "finance-ready-card active" : "finance-ready-card"} onClick={() => { setSelectedId(row.id); setMessage(null); setConfirmed(false); }}>
+              <span className="finance-ready-icon"><Banknote size={16} /></span>
+              <div><strong>{row.requestNo}</strong><span>{row.departmentProject || "—"} · {row.category || "—"}</span></div>
+              <div><b>{money(row.amount, row.currency)}</b><small>{row.paymentReadinessStatus || row.paymentStatus || "Awaiting Finance"}</small></div>
+            </button>
+            <button
+              type="button"
+              className="finance-pay-row-button"
+              onClick={() => {
+                setSelectedId(row.id);
+                setMessage(null);
+                setConfirmed(false);
+                window.setTimeout(() => document.getElementById("finance-payment-action")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+              }}
+            >
+              <Banknote size={15} /> Pay
+            </button>
+          </div>
         ))}
       </div>
 
       {selected ? (
-        <section className="finance-payment-card">
+        <section className="finance-payment-card" id="finance-payment-action">
           <div className="review-card-heading">
             <div><span>Approved for payment</span><h3>{selected.requestNo}</h3><p>{selected.departmentProject || "—"} · {selected.category || "—"}</p></div>
             <span className="status-pill">{selected.paymentStatus || selected.status || "Approved"}</span>
@@ -188,7 +213,7 @@ export function FinanceApprovedForPayment({ rows }: { rows: FinanceReadyRow[] })
                 <label className="wide"><span>Finance note</span><textarea rows={3} value={financeNote} onChange={(event) => setFinanceNote(event.target.value)} /></label>
               </div>
               <label className="finance-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>I confirm the approved payee details, amount and transfer type.</span></label>
-              <button type="button" className="finance-primary-button pay" disabled={Boolean(busy) || !confirmed} onClick={recordPayment}><Banknote size={16} />{busy === "pay" ? "Recording…" : "Record Payment for This Request"}</button>
+              <button type="button" className="finance-primary-button pay" disabled={Boolean(busy) || !confirmed} onClick={recordPayment}><Banknote size={16} />{busy === "pay" ? "Recording…" : "Mark This Request as Paid"}</button>
             </div>
           ) : null}
 
