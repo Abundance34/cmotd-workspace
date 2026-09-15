@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import {
   recordFinancePayment,
+  verifyFinancePayee,
   type FinanceTransferType,
 } from "@/lib/procureflow/finance-actions";
 import { verifyActiveAuditSigningKey } from "@/lib/procureflow/security-check";
@@ -29,20 +30,29 @@ export async function POST(request: Request) {
       paymentReference?: string;
       paymentDate?: string;
       financeNote?: string;
+      quickPay?: boolean;
     } | null;
     const requestId = Number(body?.requestId);
     if (!Number.isInteger(requestId) || requestId <= 0) {
       return NextResponse.json({ error: "A valid purchase request is required." }, { status: 400 });
     }
-    if (!["Internet Bank Transfer", "Physical Bank Transfer"].includes(String(body?.transferType || ""))) {
+    const quickPay = Boolean(body?.quickPay);
+    if (!quickPay && !["Internet Bank Transfer", "Physical Bank Transfer"].includes(String(body?.transferType || ""))) {
       return NextResponse.json({ error: "Choose a valid transfer type." }, { status: 400 });
     }
 
+    if (quickPay) {
+      await verifyFinancePayee(user, requestId, "Verified automatically when Finance marked the approved request as Paid.");
+    }
+
     const result = await recordFinancePayment(user, requestId, {
-      transferType: String(body?.transferType) as FinanceTransferType,
-      paymentReference: String(body?.paymentReference || ""),
-      paymentDate: String(body?.paymentDate || ""),
-      financeNote: String(body?.financeNote || ""),
+      transferType: quickPay ? undefined : String(body?.transferType) as FinanceTransferType,
+      paymentReference: quickPay ? undefined : String(body?.paymentReference || ""),
+      paymentDate: quickPay ? undefined : String(body?.paymentDate || ""),
+      financeNote: quickPay
+        ? "Marked Paid directly from Finance Approved for Payment. Receipt/proof is pending under Receipts."
+        : String(body?.financeNote || ""),
+      quickPay,
     });
     return NextResponse.json({ ok: true, result });
   } catch (error) {
