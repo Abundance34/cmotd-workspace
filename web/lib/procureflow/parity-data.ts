@@ -142,7 +142,7 @@ export async function getParityData(user: CurrentUser): Promise<ParityData> {
     : await sql<any[]>`SELECT ua.*,u.full_name user_name,du.full_name delegate_name FROM user_availability ua LEFT JOIN users u ON u.id=ua.user_id LEFT JOIN users du ON du.id=ua.recommended_delegate_user_id WHERE ua.user_id=${user.id} ORDER BY ua.created_at DESC LIMIT 100`;
 
   const reconciliation = ["Finance","Admin","Auditor","Procurement Manager"].includes(user.role) ? await sql<any[]>`
-    SELECT p.id,p.payment_no,p.request_id,p.po_id,p.invoice_id,p.amount,p.currency,p.status payment_status,p.verification_status,p.payment_date,p.payment_reference,p.transfer_type,
+    SELECT p.id,p.payment_no,p.request_id,p.po_id,p.invoice_id,p.vendor_id,p.amount,p.currency,p.status payment_status,p.verification_status,p.payment_date,p.payment_reference,p.transfer_type,
            pr.request_no,pr.status request_status,po.po_no,po.status po_status,i.invoice_no,i.total_amount invoice_total,rr.receipt_no,rr.status receipt_status,v.name vendor_name,
            COALESCE(ppd.payee_type,CASE WHEN p.vendor_id IS NOT NULL THEN 'Vendor' ELSE 'Other' END) recipient_type,
            COALESCE(ppd.payee_name_masked,v.name) recipient_name
