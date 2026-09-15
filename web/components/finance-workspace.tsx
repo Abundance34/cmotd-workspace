@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { PayeeDetailsReveal } from "@/components/payee-details-reveal";
 import {
   AlertTriangle,
   BadgeCheck,
@@ -144,23 +145,29 @@ export function FinanceApprovedForPayment({ rows }: { rows: FinanceReadyRow[] })
           </div>
 
           <div className="finance-payee-panel">
-            <div className="finance-panel-title"><Landmark size={17} /><div><strong>Payee & bank details</strong><span>Masked by default. Finance verifies the encrypted source record before payment.</span></div></div>
+            <div className="finance-panel-title"><Landmark size={17} /><div><strong>Payee & bank details</strong><span>Finance receives the authorized full account details required to process payment. Every access is recorded in the audit trail.</span></div></div>
             {selected.payeeId ? (
-              <div className="review-facts finance-payee-facts">
-                <div><span>Payee type</span><strong>{selected.payeeType || "—"}</strong></div>
-                <div><span>Payee / vendor</span><strong>{selected.payeeNameMasked || "—"}</strong></div>
-                <div><span>Account name</span><strong>{selected.accountNameMasked || "—"}</strong></div>
-                <div><span>Bank</span><strong>{selected.bankNameMasked || "—"}</strong></div>
-                <div><span>Account number</span><strong>{selected.accountNumberLast4 ? `******${selected.accountNumberLast4}` : "—"}</strong></div>
-                <div><span>Verification</span><strong>{selected.verificationStatus || "Pending"}</strong></div>
-              </div>
+              <>
+                <div className="review-facts finance-payee-facts">
+                  <div><span>Payee type</span><strong>{selected.payeeType || "—"}</strong></div>
+                  <div><span>Verification</span><strong>{selected.verificationStatus || "Pending"}</strong></div>
+                  <div><span>Payment readiness</span><strong>{selected.paymentReadinessStatus || "Pending"}</strong></div>
+                </div>
+                <PayeeDetailsReveal
+                  requestId={selected.id}
+                  available={Boolean(selected.payeeId)}
+                  autoReveal
+                  allowHide={false}
+                  heading="Full payee and bank details"
+                />
+              </>
             ) : <div className="finance-blocker"><AlertTriangle size={17} /><div><strong>No payee record is linked</strong><span>Payment remains blocked until authorized payee details are supplied.</span></div></div>}
 
             {selected.payeeMigrationState === "legacy-reentry-required" ? (
-              <div className="finance-legacy-warning"><LockKeyhole size={17} /><div><strong>Legacy encrypted payee — secure re-entry required</strong><span>The historical encrypted values were preserved during the GCP exit, but the retired key is unavailable. Finance can see only the masked snapshot and cannot verify or pay this record until the payee is re-entered under the active v2 encryption key. The legacy ciphertext remains untouched for audit evidence.</span></div></div>
+              <div className="finance-legacy-warning"><LockKeyhole size={17} /><div><strong>Encrypted payee record needs its previous key</strong><span>ProcureFlow preserved this record, but none of the payee encryption keys currently configured for the deployment can open it. Restore the previous/legacy payee key or securely re-enter the account details before payment.</span></div></div>
             ) : null}
             {selected.payeeMigrationState === "v2-ready" ? (
-              <div className="finance-v2-ready"><ShieldCheck size={17} /><div><strong>Active v2 encryption verified</strong><span>The backend can securely validate this payee record without exposing unmasked account details in the page source.</span></div></div>
+              <div className="finance-v2-ready"><ShieldCheck size={17} /><div><strong>Encrypted payee record is readable</strong><span>The backend can securely validate this payee record for Finance payment processing.</span></div></div>
             ) : null}
           </div>
 
@@ -181,7 +188,7 @@ export function FinanceApprovedForPayment({ rows }: { rows: FinanceReadyRow[] })
                 <label className="wide"><span>Finance note</span><textarea rows={3} value={financeNote} onChange={(event) => setFinanceNote(event.target.value)} /></label>
               </div>
               <label className="finance-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>I confirm the approved payee details, amount and transfer type.</span></label>
-              <button type="button" className="finance-primary-button pay" disabled={Boolean(busy) || !confirmed} onClick={recordPayment}><Banknote size={16} />{busy === "pay" ? "Recording…" : "Record Payment"}</button>
+              <button type="button" className="finance-primary-button pay" disabled={Boolean(busy) || !confirmed} onClick={recordPayment}><Banknote size={16} />{busy === "pay" ? "Recording…" : "Record Payment for This Request"}</button>
             </div>
           ) : null}
 
