@@ -242,7 +242,7 @@ export async function recordFinancePayment(
   assertFinance(user);
   if (!Number.isInteger(requestId) || requestId <= 0) throw new Error("A valid purchase request is required.");
   const quickPay = Boolean(input.quickPay);
-  const transferType = quickPay ? null : input.transferType;
+  const transferType: FinanceTransferType | null = quickPay ? null : (input.transferType || null);
   if (!quickPay && !["Internet Bank Transfer", "Physical Bank Transfer"].includes(String(transferType || ""))) {
     throw new Error("Transfer type must be Internet Bank Transfer or Physical Bank Transfer.");
   }
