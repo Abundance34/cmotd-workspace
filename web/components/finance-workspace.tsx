@@ -6,9 +6,7 @@ import { PayeeDetailsReveal } from "@/components/payee-details-reveal";
 import { requestConfirmation } from "@/components/in-app-confirmation";
 import {
   AlertTriangle,
-  BadgeCheck,
   Banknote,
-  FileCheck2,
   Landmark,
   LockKeyhole,
   ReceiptText,
@@ -45,83 +43,50 @@ function today() {
 export function FinanceApprovedForPayment({ rows }: { rows: FinanceReadyRow[] }) {
   const router = useRouter();
   const [selectedId, setSelectedId] = useState<number | null>(rows[0]?.id ?? null);
-  const [verifyReason, setVerifyReason] = useState("Verified during authorized Finance payment processing.");
-  const [transferType, setTransferType] = useState<"Internet Bank Transfer" | "Physical Bank Transfer">("Internet Bank Transfer");
-  const [paymentReference, setPaymentReference] = useState("");
-  const [paymentDate, setPaymentDate] = useState(today());
-  const [financeNote, setFinanceNote] = useState("");
-  const [confirmed, setConfirmed] = useState(false);
-  const [busy, setBusy] = useState<"verify" | "pay" | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
   const [message, setMessage] = useState<Message>(null);
   const selected = useMemo(() => rows.find((row) => row.id === selectedId) || rows[0] || null, [rows, selectedId]);
 
-  async function verifyPayee() {
-    if (!selected) return;
-    setBusy("verify");
-    setMessage(null);
-    try {
-      const response = await fetch("/api/finance/payee/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ requestId: selected.id, reason: verifyReason }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload?.error || "Unable to verify payee details.");
-      setMessage({ type: "success", text: `${selected.requestNo} payee details are Finance verified and payment-ready.` });
-      router.refresh();
-    } catch (error) {
-      setMessage({ type: "error", text: error instanceof Error ? error.message : "Unable to verify payee details." });
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function recordPayment() {
-    if (!selected) return;
-    if (!confirmed) {
-      setMessage({ type: "error", text: "Confirm the approved payee, amount and transfer type before recording payment." });
-      return;
-    }
-    if (!paymentReference.trim()) {
-      setMessage({ type: "error", text: "Enter the payment / reconciliation reference." });
-      return;
-    }
+  async function payRequest(row: FinanceReadyRow) {
     const approved = await requestConfirmation({
       eyebrow: "FINANCE PAYMENT",
       title: "Mark this approved request as paid?",
-      description: "Confirm only after the bank transfer or other approved payment has actually been completed. ProcureFlow will record the payment and move the request to Paid.",
-      reference: selected.requestNo,
-      detail: `${money(selected.amount, selected.currency)} · ${transferType} · Ref: ${paymentReference.trim()}`,
-      confirmLabel: "Mark as Paid",
+      description: "Finance will mark the request Paid immediately. The payment record is created automatically, and you will be taken to Receipts to enter or attach the receipt/proof of payment.",
+      reference: row.requestNo,
+      detail: `${money(row.amount, row.currency)} · ${row.vendorName || row.payeeType || "Approved payee"}`,
+      confirmLabel: "Pay & Mark Paid",
       cancelLabel: "Cancel",
       tone: "success",
     });
     if (!approved) return;
-    setBusy("pay");
+
+    setBusyId(row.id);
+    setSelectedId(row.id);
     setMessage(null);
     try {
       const response = await fetch("/api/finance/payments/record", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          requestId: selected.id,
-          transferType,
-          paymentReference,
-          paymentDate,
-          financeNote,
-        }),
+        body: JSON.stringify({ requestId: row.id, quickPay: true }),
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload?.error || "Unable to record payment.");
-      setMessage({ type: "success", text: `${selected.requestNo} was recorded as Paid. Payment ${payload?.result?.paymentNo || "record"} is now in the Finance ledger.` });
-      setPaymentReference("");
-      setFinanceNote("");
-      setConfirmed(false);
+      if (!response.ok) throw new Error(payload?.error || "Unable to mark request as paid.");
+
+      const paymentId = Number(payload?.result?.paymentId || 0);
+      try {
+        sessionStorage.setItem("procureflow:receipt-request-id", String(row.id));
+        if (paymentId > 0) sessionStorage.setItem("procureflow:receipt-payment-id", String(paymentId));
+      } catch {}
+
+      setMessage({ type: "success", text: `${row.requestNo} is now Paid. Opening Receipts for this payment…` });
       router.refresh();
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent("procureflow:navigate", { detail: { section: "Receipts" } }));
+      }, 50);
     } catch (error) {
-      setMessage({ type: "error", text: error instanceof Error ? error.message : "Unable to record payment." });
+      setMessage({ type: "error", text: error instanceof Error ? error.message : "Unable to mark request as paid." });
     } finally {
-      setBusy(null);
+      setBusyId(null);
     }
   }
 
@@ -132,22 +97,22 @@ export function FinanceApprovedForPayment({ rows }: { rows: FinanceReadyRow[] })
       <div className="finance-ready-list">
         {rows.map((row) => (
           <div key={row.id} className="finance-ready-row">
-            <button type="button" className={selected?.id === row.id ? "finance-ready-card active" : "finance-ready-card"} onClick={() => { setSelectedId(row.id); setMessage(null); setConfirmed(false); }}>
+            <button
+              type="button"
+              className={selected?.id === row.id ? "finance-ready-card active" : "finance-ready-card"}
+              onClick={() => { setSelectedId(row.id); setMessage(null); }}
+            >
               <span className="finance-ready-icon"><Banknote size={16} /></span>
               <div><strong>{row.requestNo}</strong><span>{row.departmentProject || "—"} · {row.category || "—"}</span></div>
-              <div><b>{money(row.amount, row.currency)}</b><small>{row.paymentReadinessStatus || row.paymentStatus || "Awaiting Finance"}</small></div>
+              <div><b>{money(row.amount, row.currency)}</b><small>{row.paymentStatus || row.status || "Approved"}</small></div>
             </button>
             <button
               type="button"
               className="finance-pay-row-button"
-              onClick={() => {
-                setSelectedId(row.id);
-                setMessage(null);
-                setConfirmed(false);
-                window.setTimeout(() => document.getElementById("finance-payment-action")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
-              }}
+              disabled={busyId === row.id}
+              onClick={() => void payRequest(row)}
             >
-              <Banknote size={15} /> Pay
+              <Banknote size={15} /> {busyId === row.id ? "Paying…" : "Pay"}
             </button>
           </div>
         ))}
@@ -170,13 +135,13 @@ export function FinanceApprovedForPayment({ rows }: { rows: FinanceReadyRow[] })
           </div>
 
           <div className="finance-payee-panel">
-            <div className="finance-panel-title"><Landmark size={17} /><div><strong>Payee & bank details</strong><span>Finance receives the authorized full account details required to process payment. Every access is recorded in the audit trail.</span></div></div>
+            <div className="finance-panel-title"><Landmark size={17} /><div><strong>Payee & bank details</strong><span>Finance receives the authorized full account details needed before marking the request Paid. Every access is audit-recorded.</span></div></div>
             {selected.payeeId ? (
               <>
                 <div className="review-facts finance-payee-facts">
                   <div><span>Payee type</span><strong>{selected.payeeType || "—"}</strong></div>
-                  <div><span>Verification</span><strong>{selected.verificationStatus || "Pending"}</strong></div>
-                  <div><span>Payment readiness</span><strong>{selected.paymentReadinessStatus || "Pending"}</strong></div>
+                  <div><span>Verification</span><strong>{selected.verificationStatus || "Pending — verified automatically on Pay"}</strong></div>
+                  <div><span>Payment readiness</span><strong>{selected.paymentReadinessStatus || "Approved"}</strong></div>
                 </div>
                 <PayeeDetailsReveal
                   requestId={selected.id}
@@ -186,39 +151,30 @@ export function FinanceApprovedForPayment({ rows }: { rows: FinanceReadyRow[] })
                   heading="Full payee and bank details"
                 />
               </>
-            ) : <div className="finance-blocker"><AlertTriangle size={17} /><div><strong>No payee record is linked</strong><span>Payment remains blocked until authorized payee details are supplied.</span></div></div>}
+            ) : <div className="finance-blocker"><AlertTriangle size={17} /><div><strong>No payee record is linked</strong><span>Payment remains blocked until payee details are supplied.</span></div></div>}
 
             {selected.payeeMigrationState === "legacy-reentry-required" ? (
-              <div className="finance-legacy-warning"><LockKeyhole size={17} /><div><strong>Encrypted payee record needs its previous key</strong><span>ProcureFlow preserved this record, but none of the payee encryption keys currently configured for the deployment can open it. Restore the previous/legacy payee key or securely re-enter the account details before payment.</span></div></div>
+              <div className="finance-legacy-warning"><LockKeyhole size={17} /><div><strong>Encrypted payee record needs its previous key</strong><span>Restore the previous/legacy payee key or securely re-enter the account details before payment.</span></div></div>
             ) : null}
             {selected.payeeMigrationState === "v2-ready" ? (
-              <div className="finance-v2-ready"><ShieldCheck size={17} /><div><strong>Encrypted payee record is readable</strong><span>The backend can securely validate this payee record for Finance payment processing.</span></div></div>
+              <div className="finance-v2-ready"><ShieldCheck size={17} /><div><strong>Encrypted payee record is readable</strong><span>Click Pay to verify the linked payee automatically, mark the request Paid, and continue directly to Receipts.</span></div></div>
             ) : null}
           </div>
 
-          {selected.payeeMigrationState === "v2-ready" && selected.verificationStatus !== "Finance Verified" ? (
-            <div className="finance-verify-box">
-              <label><span>Finance verification reason</span><input value={verifyReason} onChange={(event) => setVerifyReason(event.target.value)} /></label>
-              <button type="button" className="finance-primary-button" disabled={Boolean(busy)} onClick={verifyPayee}><BadgeCheck size={16} />{busy === "verify" ? "Verifying…" : "Verify linked payee details"}</button>
-            </div>
-          ) : null}
-
-          {selected.verificationStatus === "Finance Verified" && selected.payeeMigrationState === "v2-ready" ? (
-            <div className="finance-record-box">
-              <div className="finance-panel-title"><FileCheck2 size={17} /><div><strong>Record payment</strong><span>Payment execution remains a Finance-only action after workflow approval and payee verification.</span></div></div>
-              <div className="finance-form-grid">
-                <label><span>Transfer type</span><select value={transferType} onChange={(event) => setTransferType(event.target.value as typeof transferType)}><option>Internet Bank Transfer</option><option>Physical Bank Transfer</option></select></label>
-                <label><span>Payment date</span><input type="date" value={paymentDate} onChange={(event) => setPaymentDate(event.target.value)} /></label>
-                <label className="wide"><span>Payment / reconciliation reference</span><input value={paymentReference} onChange={(event) => setPaymentReference(event.target.value)} placeholder="Required" /></label>
-                <label className="wide"><span>Finance note</span><textarea rows={3} value={financeNote} onChange={(event) => setFinanceNote(event.target.value)} /></label>
-              </div>
-              <label className="finance-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>I confirm the approved payee details, amount and transfer type.</span></label>
-              <button type="button" className="finance-primary-button pay" disabled={Boolean(busy) || !confirmed} onClick={recordPayment}><Banknote size={16} />{busy === "pay" ? "Recording…" : "Mark This Request as Paid"}</button>
-            </div>
-          ) : null}
+          <div className="finance-record-box finance-quick-pay-box">
+            <div className="finance-panel-title"><Banknote size={17} /><div><strong>Pay approved request</strong><span>No separate verification step is required. Pay verifies the readable payee record, changes the request from Approved to Paid, creates the payment ledger record, and opens Receipts for evidence capture.</span></div></div>
+            <button
+              type="button"
+              className="finance-primary-button pay"
+              disabled={Boolean(busyId) || !selected.payeeId}
+              onClick={() => void payRequest(selected)}
+            >
+              <Banknote size={16} /> {busyId === selected.id ? "Paying…" : "Pay & Mark Paid"}
+            </button>
+          </div>
 
           {message ? <div className={`action-message ${message.type}`}>{message.text}</div> : null}
-          <div className="review-security-note"><ShieldCheck size={15} /><span>Receipt evidence is recorded separately under Finance → Receipts after payment, preserving the original ProcureFlow separation of payment and evidence.</span></div>
+          <div className="review-security-note"><ShieldCheck size={15} /><span>After payment, ProcureFlow opens Finance → Receipts with this paid request selected so you can manually enter a receipt, attach a receipt/proof, and optionally add supporting documents.</span></div>
         </section>
       ) : null}
     </div>
