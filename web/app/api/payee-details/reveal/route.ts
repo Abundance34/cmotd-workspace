@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { appendAuditEvent } from "@/lib/procureflow/audit";
-import { decryptPayeeValueV2, verifyPayeeEncryptionKeyV2 } from "@/lib/procureflow/payee-crypto";
+import { decryptPayeeValueCompatible } from "@/lib/procureflow/payee-crypto";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,20 +12,16 @@ const FINANCE_READY_STATUSES = new Set(["Approved", "PO Created", "Awaiting Paym
 
 function decrypt(value: unknown) {
   const token = String(value || "").trim();
-  return token ? decryptPayeeValueV2(token) : null;
+  return token ? decryptPayeeValueCompatible(token).value : null;
 }
 
 export async function POST(request: Request) {
   try {
     const user = await getCurrentUser();
     if (!user) return NextResponse.json({ error: "Authentication required." }, { status: 401 });
-    if (!["Facility Manager", "ICT", "Procurement Manager", "Finance", "Admin"].includes(user.role)) {
+    if (!["Facility Manager", "ICT", "Procurement Manager", "Approver", "Finance", "Admin", "Auditor"].includes(user.role)) {
       return NextResponse.json({ error: "This role is not permitted to reveal full payment recipient details." }, { status: 403 });
     }
-    if (!verifyPayeeEncryptionKeyV2()) {
-      return NextResponse.json({ error: "Secure payment-detail access is temporarily unavailable because the active encryption key could not be verified." }, { status: 503 });
-    }
-
     const body = await request.json().catch(() => ({}));
     const requestId = Number(body?.requestId);
     if (!Number.isInteger(requestId) || requestId <= 0) {
@@ -48,10 +44,15 @@ export async function POST(request: Request) {
       const assignedProcurement = Number(record.assigned_procurement_manager_id || 0) === user.id;
       const financeReady = FINANCE_READY_STATUSES.has(String(record.status || ""))
         || ["Approved for Payment", "Paid"].includes(String(record.payment_status || ""));
+      const approverVisible = record.next_role === "approver"
+        || ["Submitted for Approval", "Pending Approver/MD Approval", "Pending Approval"].includes(String(record.status || ""))
+        || financeReady;
 
       const allowed = user.role === "Admin"
+        || user.role === "Auditor"
         || (OWNER_ROLES.has(user.role) && owner)
         || (user.role === "Procurement Manager" && assignedProcurement)
+        || (user.role === "Approver" && approverVisible)
         || (user.role === "Finance" && financeReady);
       if (!allowed) throw new Error("You are not authorized to reveal the full account details for this request.");
 
@@ -118,9 +119,9 @@ export async function POST(request: Request) {
     );
   } catch (error) {
     const raw = error instanceof Error ? error.message : "Unable to reveal payment recipient details.";
-    const cryptoFailure = /Fernet|signature mismatch|Invalid token|decrypt/i.test(raw);
+    const cryptoFailure = /Fernet|signature mismatch|Invalid token|decrypt|encryption key|could not be opened/i.test(raw);
     const message = cryptoFailure
-      ? "Stored payment recipient details could not be opened with the active encryption key."
+      ? "This stored payment recipient record was encrypted with a key that is not currently available to ProcureFlow. Restore the previous/legacy payee key or securely re-enter the payee details."
       : raw;
     const status = /not authorized|not permitted|Authentication/i.test(message)
       ? 403
