@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { AlertTriangle, ChevronRight, Circle, Database, FileSearch, LogOut, ShieldCheck } from "lucide-react";
 import { ROLE_LABELS, ROLE_LANDING, ROLE_SECTIONS, type ProcureFlowRole } from "@/lib/procureflow/roles";
@@ -150,6 +150,14 @@ export function CompleteRoleShell(props:Props){
   const {user,facilityData,procurementData,approverData,financeData,logisticsData,logisticsItems=[],adminData,auditorData,parityData,securityStatus}=props;const router=useRouter();const nav=ROLE_SECTIONS[user.role];const [section,setSection]=useState(nav.sections[0]);
   async function logout(){await fetch("/api/auth/logout",{method:"POST"});router.push("/");router.refresh()}
   function navigate(target:string){setSection(nav.sections.includes(target)?target:nav.sections[0])}
+  useEffect(()=>{
+    const handler=(event:Event)=>{
+      const target=String((event as CustomEvent)?.detail?.section||"");
+      if(target) navigate(target);
+    };
+    window.addEventListener("procureflow:navigate",handler);
+    return()=>window.removeEventListener("procureflow:navigate",handler);
+  },[nav.sections]);
   let content:ReactNode=null;
   const isDashboard=section.toLowerCase().includes("dashboard");
   if(!isDashboard){
