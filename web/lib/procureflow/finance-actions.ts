@@ -149,7 +149,7 @@ export async function verifyFinancePayee(user: CurrentUser, requestId: number, r
              account_name_encrypted,bank_name_encrypted,account_number_encrypted
       FROM payment_payee_details
       WHERE id=${request.selected_payee_detail_id}
-         OR (${request.selected_payee_detail_id} IS NULL AND purchase_request_id=${requestId} AND COALESCE(is_current,TRUE)=TRUE)
+         OR (${request.selected_payee_detail_id}::bigint IS NULL AND purchase_request_id=${requestId} AND COALESCE(is_current,TRUE)=TRUE)
       ORDER BY CASE WHEN id=${request.selected_payee_detail_id} THEN 0 ELSE 1 END,id DESC
       LIMIT 1
       FOR UPDATE
@@ -232,21 +232,29 @@ export async function recordFinancePayment(
   user: CurrentUser,
   requestId: number,
   input: {
-    transferType: FinanceTransferType;
-    paymentReference: string;
-    paymentDate: string;
+    transferType?: FinanceTransferType;
+    paymentReference?: string;
+    paymentDate?: string;
     financeNote?: string;
+    quickPay?: boolean;
   },
 ) {
   assertFinance(user);
   if (!Number.isInteger(requestId) || requestId <= 0) throw new Error("A valid purchase request is required.");
-  if (!["Internet Bank Transfer", "Physical Bank Transfer"].includes(input.transferType)) {
+  const quickPay = Boolean(input.quickPay);
+  const transferType = quickPay ? null : input.transferType;
+  if (!quickPay && !["Internet Bank Transfer", "Physical Bank Transfer"].includes(String(transferType || ""))) {
     throw new Error("Transfer type must be Internet Bank Transfer or Physical Bank Transfer.");
   }
-  const paymentReference = String(input.paymentReference || "").trim();
+  const paymentReference = quickPay
+    ? `PF-PAID-${requestId}-${Date.now()}`
+    : String(input.paymentReference || "").trim();
   if (!paymentReference) throw new Error("A payment reference is required for reconciliation.");
-  const paymentDate = String(input.paymentDate || "").trim();
+  const paymentDate = quickPay
+    ? new Date().toISOString().slice(0, 10)
+    : String(input.paymentDate || "").trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(paymentDate)) throw new Error("A valid payment date is required.");
+  const paymentMethod = quickPay ? "Finance Mark Paid" : "Bank Transfer";
 
   const sql = db();
   return sql.begin(async (tx) => {
@@ -291,7 +299,7 @@ export async function recordFinancePayment(
              payee_name_masked,account_name_masked,bank_name_masked,account_number_last4,payee_type
       FROM payment_payee_details
       WHERE id=${request.selected_payee_detail_id}
-         OR (${request.selected_payee_detail_id} IS NULL AND purchase_request_id=${requestId} AND COALESCE(is_current,TRUE)=TRUE)
+         OR (${request.selected_payee_detail_id}::bigint IS NULL AND purchase_request_id=${requestId} AND COALESCE(is_current,TRUE)=TRUE)
       ORDER BY CASE WHEN id=${request.selected_payee_detail_id} THEN 0 ELSE 1 END,id DESC
       LIMIT 1
       FOR UPDATE
@@ -353,8 +361,8 @@ export async function recordFinancePayment(
       paymentNo = existing[0].payment_no;
       await tx`
         UPDATE payments SET vendor_id=${request.selected_vendor_id},payee_detail_id=${payee.id},
-          approval_history_id=${approvalId},amount=${amount},currency=${currency},payment_method='Bank Transfer',
-          transfer_type=${input.transferType},payment_reference=${paymentReference},payment_date=${paymentDate},
+          approval_history_id=${approvalId},amount=${amount},currency=${currency},payment_method=${paymentMethod},
+          transfer_type=${transferType},payment_reference=${paymentReference},payment_date=${paymentDate},
           status='Paid',verification_status='Verified',paid_by=${user.id},finance_note=${input.financeNote?.trim() || null},
           notification_dedupe_key=${dedupeKey},next_role='procurement_manager',updated_at=${now}
         WHERE id=${paymentId}
@@ -369,7 +377,7 @@ export async function recordFinancePayment(
           verification_status,finance_note,paid_by,created_by,notification_dedupe_key,next_role,created_at,updated_at
         ) VALUES (
           ${paymentNo},${requestId},${request.linked_po_id},${request.selected_vendor_id},${payee.id},${approvalId},
-          ${amount},${currency},'Bank Transfer',${input.transferType},${paymentReference},${paymentDate},'Paid',
+          ${amount},${currency},${paymentMethod},${transferType},${paymentReference},${paymentDate},'Paid',
           'Verified',${input.financeNote?.trim() || null},${user.id},${user.id},${dedupeKey},'procurement_manager',${now},${now}
         ) RETURNING id
       `;
@@ -389,7 +397,7 @@ export async function recordFinancePayment(
       `;
     }
 
-    const workflowNote = `Payment reference ${paymentReference}; transfer type ${input.transferType}.`;
+    const workflowNote = quickPay ? `Finance marked ${request.request_no} as Paid from Approved for Payment. Receipt/proof is pending under Finance → Receipts.` : `Payment reference ${paymentReference}; transfer type ${transferType}.`;
     await tx`
       INSERT INTO workflow_events (entity_type,entity_id,event,status,note,user_id,created_at)
       VALUES ('Purchase Request',${requestId},'Payment Recorded','Paid',${workflowNote},${user.id},${now})
@@ -400,7 +408,7 @@ export async function recordFinancePayment(
         visibility_scope,related_user_id,created_at
       ) VALUES (
         ${user.id},${user.role},'Payment Recorded','Purchase Request',${requestId},
-        ${`${request.request_no} was paid.`},${`Amount ${amount.toFixed(2)}; reference ${paymentReference}; transfer type ${input.transferType}`},
+        ${`${request.request_no} was paid.`},${quickPay ? `Amount ${amount.toFixed(2)}; marked Paid by Finance; receipt/proof pending` : `Amount ${amount.toFixed(2)}; reference ${paymentReference}; transfer type ${transferType}`},
         'workflow',${request.requested_by},${now}
       )
     `;
@@ -411,7 +419,7 @@ export async function recordFinancePayment(
       ) VALUES (
         'PAYMENT_RECORDED','Payment',${String(paymentId)},${user.id},${user.role},${workflowNote},
         ${tx.json({request_status:request.status,payment_status:request.payment_status})},
-        ${tx.json({request_status:'Paid',payment_status:'Paid',amount,payment_reference:paymentReference,transfer_type:input.transferType})},
+        ${tx.json({request_status:'Paid',payment_status:'Paid',amount,payment_reference:paymentReference,transfer_type:transferType,quick_pay:quickPay})},
         ${now},${now.slice(0,10)},${now.slice(11,19)},${amount},${input.financeNote?.trim() || null}
       )
     `;
@@ -424,7 +432,7 @@ export async function recordFinancePayment(
       actorUsername: user.username,
       actorRole: user.role,
       beforeValues: { request_status: request.status, payment_status: request.payment_status },
-      afterValues: { request_status: "Paid", payment_status: "Paid", amount, payment_reference: paymentReference, transfer_type: input.transferType },
+      afterValues: { request_status: "Paid", payment_status: "Paid", amount, payment_reference: paymentReference, transfer_type: transferType, quick_pay: quickPay },
       metadata: { parent_entity_type: "Purchase Request", parent_entity_id: requestId, payee_detail_id: Number(payee.id), selected_vendor_id: request.selected_vendor_id },
       reasonOrComment: input.financeNote?.trim() || null,
       severity: "High",
@@ -437,7 +445,7 @@ export async function recordFinancePayment(
       request.assigned_procurement_manager_id,
       request.approved_by_user_id,
     ].filter((value): value is number => Number.isInteger(Number(value)) && Number(value) > 0).map(Number)));
-    const message = `${request.request_no} was paid. Amount: ${amount.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}. Payment date: ${paymentDate}. Reference: ${paymentReference}. Transfer type: ${input.transferType}. Current status: Paid.`;
+    const message = quickPay ? `${request.request_no} was marked Paid by Finance. Amount: ${amount.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}. Payment date: ${paymentDate}. Receipt/proof can now be recorded under Finance → Receipts.` : `${request.request_no} was paid. Amount: ${amount.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}. Payment date: ${paymentDate}. Reference: ${paymentReference}. Transfer type: ${transferType}. Current status: Paid.`;
     for (const uid of participantIds) {
       await notifyUser(tx, uid, "Procurement Payment Recorded", message, "Purchase Request", requestId, "My Activity History", "View Request", "High", `${dedupeKey}:${uid}`);
     }
