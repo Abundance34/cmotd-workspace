@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { db } from "@/lib/db";
 import type { CurrentUser } from "@/lib/auth";
 import { appendAuditEvent } from "./audit";
-import { decryptPayeeValueV2 } from "./payee-crypto";
+import { decryptPayeeValueCompatible } from "./payee-crypto";
 
 export type FinanceTransferType = "Internet Bank Transfer" | "Physical Bank Transfer";
 
@@ -61,10 +61,10 @@ function assertV2PayeeReadable(row: {
     throw new Error("The linked payee record is incomplete and must be securely re-entered before Finance verification.");
   }
   try {
-    for (const value of values) decryptPayeeValueV2(String(value));
+    for (const value of values) decryptPayeeValueCompatible(String(value));
   } catch {
     throw new Error(
-      "This payee record uses the preserved legacy encryption key and cannot be safely revealed after the GCP exit. Re-enter the payee details under the active v2 key before Finance verification or payment.",
+      "The linked payee record cannot be opened with any payee encryption key configured for this deployment. Restore the previous/legacy key or securely re-enter the payee details before Finance verification or payment.",
     );
   }
 }
