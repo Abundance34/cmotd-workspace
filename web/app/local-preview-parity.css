@@ -59,3 +59,11 @@ html[data-theme="dark"] .pf-confirm-dialog{box-shadow:0 24px 72px rgba(0,0,0,.45
 .auditor-timeline{display:grid}.auditor-timeline>div{display:grid;grid-template-columns:14px 1fr;gap:9px;padding-bottom:9px}.auditor-timeline>div>span{width:9px;height:9px;margin-top:5px;border-radius:50%;background:var(--pf-primary)}.auditor-timeline small,.auditor-timeline p,.auditor-timeline em{display:block;color:var(--pf-muted);font-size:12px;margin:2px 0}.auditor-timeline em{font-style:normal}
 .auditor-empty{padding:18px;text-align:center;border:1px dashed var(--pf-border);border-radius:9px;color:var(--pf-muted);background:var(--pf-surface-2)}.auditor-error{padding:12px;border-radius:8px;border:1px solid rgba(239,68,68,.35);background:rgba(239,68,68,.08);color:var(--pf-text)}.auditor-info-card{display:flex;gap:10px;align-items:flex-start}.auditor-info-card strong,.auditor-info-card span{display:block}.auditor-trail-summary>div:first-child>span{display:block;color:var(--pf-muted);font-size:12px}.auditor-trail-summary>.auditor-summary-grid{margin-top:10px}
 html[data-theme="dark"] .auditor-filter-label select option{background:#273047;color:#f5f7fb}@media(max-width:1100px){.auditor-filter-grid,.auditor-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:720px){.auditor-toolbar,.auditor-picker-row,.auditor-user360-head,.auditor-transaction-hero{flex-direction:column}.auditor-filter-grid,.auditor-summary-grid{grid-template-columns:1fr}}
+
+
+/* FINANCE_PAY_ROW_ACTION_V1 */
+.finance-ready-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:stretch}
+.finance-ready-row .finance-ready-card{width:100%}
+.finance-pay-row-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-width:92px;padding:10px 14px;border:1px solid var(--pf-primary);border-radius:8px;background:var(--pf-primary);color:#fff;font:inherit;font-weight:800;cursor:pointer}
+.finance-pay-row-button:hover{filter:brightness(.96)}
+@media(max-width:720px){.finance-ready-row{grid-template-columns:1fr}.finance-pay-row-button{width:100%}}
