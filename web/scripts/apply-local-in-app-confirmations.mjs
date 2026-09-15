@@ -16,8 +16,12 @@ function patchFile(relativePath, replacements, importNames = ["requestConfirmati
   }
 
   for (const [from, to] of replacements) {
-    if (!source.includes(from)) throw new Error(`Expected browser-dialog pattern was not found in ${relativePath}: ${from}`);
-    source = source.replace(from, to);
+    if (source.includes(from)) {
+      source = source.replace(from, to);
+      continue;
+    }
+    if (source.includes(to)) continue;
+    throw new Error(`Expected browser-dialog pattern was not found in ${relativePath}: ${from}`);
   }
 
   if (source !== original) fs.writeFileSync(file, source, "utf8");
