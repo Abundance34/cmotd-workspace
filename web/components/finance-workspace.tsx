@@ -134,6 +134,11 @@ export function FinanceApprovedForPayment({ rows }: { rows: FinanceReadyRow[] })
             <div><span>Payment status</span><strong>{selected.paymentStatus || "—"}</strong></div>
           </div>
 
+          <div className="finance-business-justification">
+            <span>Business justification</span>
+            <p>{selected.businessJustification || "No business justification was recorded for this purchase request."}</p>
+          </div>
+
           <div className="finance-payee-panel">
             <div className="finance-panel-title"><Landmark size={17} /><div><strong>Payee & bank details</strong><span>Finance receives the authorized full account details needed before marking the request Paid. Every access is audit-recorded.</span></div></div>
             {selected.payeeId ? (
