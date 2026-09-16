@@ -47,15 +47,7 @@ EXCEPTION
     WHEN duplicate_object THEN NULL;
 END $$;
 
--- Existing requests with a linked PO were already placed on a PO/logistics path.
-UPDATE purchase_requests pr
-SET requires_logistics = TRUE,
-    logistics_routing_decided_at = COALESCE(pr.logistics_routing_decided_at, pr.approved_at, pr.updated_at, pr.created_at)
-WHERE pr.requires_logistics IS NULL
-  AND pr.linked_po_id IS NOT NULL
-  AND COALESCE(pr.status,'') NOT IN ('Paid','Completed','Closed','Archived','Rejected');
-
--- Preserve any historical Logistics completion evidence.
+-- Preserve completed Logistics evidence first.
 UPDATE purchase_requests pr
 SET requires_logistics = TRUE,
     logistics_routing_decided_at = COALESCE(pr.logistics_routing_decided_at, pr.approved_at, pr.updated_at, pr.created_at),
@@ -68,17 +60,28 @@ WHERE pr.linked_po_id = po.id
       OR COALESCE(po.status,'') = 'Fully Received'
   );
 
--- Existing records already sent to Finance keep their current workflow.
+-- Preserve every historical record that was already handed to Finance.
+-- This includes old PO-created requests because the previous workflow allowed
+-- them to reach Finance before an explicit Logistics-routing decision existed.
 UPDATE purchase_requests
 SET requires_logistics = FALSE,
     logistics_routing_decided_at = COALESCE(logistics_routing_decided_at, approved_at, updated_at, created_at)
-WHERE requires_logistics IS NULL
+WHERE logistics_completed_at IS NULL
+  AND requires_logistics IS NULL
   AND (
       next_role = 'finance'
       OR payment_status = 'Approved for Payment'
       OR status IN ('Awaiting Payment','Approved for Payment','Payment Approved')
-  )
-  AND linked_po_id IS NULL;
+  );
+
+-- Existing linked POs that were not already Finance-ready are treated as
+-- Logistics work, preserving the intent of the commercial-PO workflow.
+UPDATE purchase_requests
+SET requires_logistics = TRUE,
+    logistics_routing_decided_at = COALESCE(logistics_routing_decided_at, approved_at, updated_at, created_at)
+WHERE requires_logistics IS NULL
+  AND linked_po_id IS NOT NULL
+  AND COALESCE(status,'') NOT IN ('Paid','Completed','Closed','Archived','Rejected');
 
 CREATE INDEX IF NOT EXISTS idx_pr_post_approval_routing
 ON purchase_requests (
