@@ -46,7 +46,7 @@ export async function getParityData(user: CurrentUser): Promise<ParityData> {
       FROM purchase_requests pr JOIN users u ON u.id=pr.requested_by
       WHERE COALESCE(pr.estimated_amount,0) <= ${policyLimit}
         AND u.role <> 'Procurement Manager'
-        AND pr.status IN ('Submitted for Approval','Pending Approval','Reviewed by Procurement','Accepted by Procurement Manager')
+        AND pr.status IN ('Submitted for Approval','Pending Approval','Reviewed by Procurement')
         AND (${user.role === "Admin"} OR pr.assigned_procurement_manager_id=${user.id} OR pr.next_role='procurement_manager')
       ORDER BY COALESCE(pr.updated_at,pr.created_at) DESC LIMIT 200`
     : [];
