@@ -89,15 +89,24 @@ export async function POST(request: Request) {
     const result = await sql.begin(async (tx) => {
       const linkedRows = await tx<any[]>`
         SELECT p.id,p.request_id,p.po_id,p.vendor_id,p.amount,p.currency,p.payment_method,p.transfer_type,
-               p.payment_reference,p.payment_date,p.status,pr.justification,pr.department_project
+               p.payment_reference,p.payment_date,p.status,p.receipt_id,p.proof_of_payment_receipt_id,p.vendor_receipt_id,
+               EXISTS (
+                 SELECT 1 FROM receipt_records rr
+                 WHERE rr.linked_payment_id=p.id OR rr.payment_id=p.id
+               ) AS receipt_recorded,
+               pr.justification,pr.department_project
         FROM payments p
         LEFT JOIN purchase_requests pr ON pr.id=p.request_id
         WHERE p.id=${paymentId}
         LIMIT 1
+        FOR UPDATE OF p
       `;
       const linked = linkedRows[0];
       if (!linked) throw new Error("The selected paid request could not be found.");
       if (String(linked.status || "") !== "Paid") throw new Error("Receipts can only be recorded for a Paid request.");
+      if (linked.receipt_id || linked.proof_of_payment_receipt_id || linked.vendor_receipt_id || linked.receipt_recorded) {
+        throw new Error("A receipt has already been recorded for this payment.");
+      }
       if (requestId && linked.request_id && Number(requestId) !== Number(linked.request_id)) {
         throw new Error("The selected payment does not belong to the selected purchase request.");
       }
