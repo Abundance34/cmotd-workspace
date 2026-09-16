@@ -86,3 +86,12 @@ html[data-theme="dark"] .auditor-filter-label select option{background:#273047;c
 .payment-recipient-filter label{display:grid;gap:6px;min-width:230px}.payment-recipient-filter span{font-size:12px;font-weight:750;color:var(--pf-muted)}
 .payment-recipient-filter small{color:var(--pf-muted)}
 @media(max-width:760px){.receipt-link-grid,.receipt-manual-grid,.receipt-file-grid{grid-template-columns:1fr}.receipt-manual-grid .wide{grid-column:auto}}
+
+
+/* FINANCE_RECEIPT_CONTEXT_V1 */
+.finance-business-justification,.receipt-paid-context{margin:14px 0;padding:14px 16px;border:1px solid var(--pf-border);border-radius:10px;background:var(--pf-surface-2)}
+.finance-business-justification>span,.receipt-paid-context span{display:block;margin-bottom:6px;font-size:12px;font-weight:800;color:var(--pf-muted);text-transform:uppercase;letter-spacing:.04em}
+.finance-business-justification p,.receipt-paid-context p{margin:0;line-height:1.6;color:var(--pf-text)}
+.receipt-paid-context{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.receipt-paid-context>div{min-width:0}.receipt-paid-context .wide{grid-column:1/-1}
+@media(max-width:760px){.receipt-paid-context{grid-template-columns:1fr}.receipt-paid-context .wide{grid-column:auto}}
