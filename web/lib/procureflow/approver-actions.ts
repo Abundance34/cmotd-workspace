@@ -84,14 +84,19 @@ export async function decidePurchaseRequest(
     const finalNote = note.trim() || (decision === "approve"
       ? (hasRecommendation ? "Vendor recommendation approved by Approver / MD" : "Approved")
       : decision === "reject" ? "Rejected" : "Returned for correction");
-    const nextRole = decision === "approve" ? "finance" : decision === "return" ? "procurement_manager" : null;
-    const paymentStatus = decision === "approve" ? "Approved for Payment" : request.payment_status;
+    const nextRole = decision === "approve" ? "procurement_manager" : decision === "return" ? "procurement_manager" : null;
+    const paymentStatus = decision === "approve" ? "Routing Required" : request.payment_status;
 
     await tx`
       UPDATE purchase_requests
       SET status=${newStatus},
           next_role=${nextRole},
           payment_status=${paymentStatus},
+          requires_logistics=NULL,
+          logistics_routing_decided_at=NULL,
+          logistics_routing_decided_by=NULL,
+          logistics_completed_at=NULL,
+          logistics_completed_by=NULL,
           approved_at=${decision === "approve" ? now : null},
           approved_by_user_id=${decision === "approve" ? user.id : null},
           approved_by_role=${decision === "approve" ? user.role : null},
@@ -205,9 +210,9 @@ export async function decidePurchaseRequest(
           user_id,role,title,message,entity_type,entity_id,is_read,popup_shown,
           importance,delivery_channel,push_sent,email_sent,action_label,section_target,created_at
         ) VALUES (
-          NULL,'Finance','Request approved for payment',${`${request.request_no} was approved by Approver / MD and is ready for Finance processing.`},
+          NULL,'Procurement Manager','Post-approval routing required',${`${request.request_no} was approved by Approver / MD. Decide whether Logistics is required before Finance can act.`},
           'Purchase Request',${requestId},FALSE,FALSE,'High','in_app',FALSE,FALSE,
-          'Open Approved for Payment','Approved for Payment',${now}
+          'Choose Next Route','Commercial PO Management',${now}
         )
       `;
     }
