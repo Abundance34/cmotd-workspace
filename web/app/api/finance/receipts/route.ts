@@ -66,6 +66,7 @@ export async function POST(request: Request) {
 
     const receiptNo = clean(body?.receiptNo, 120) || receiptReference();
     const receiptType = clean(body?.documentType, 120) || "Payment Receipt";
+    const documentCategory = receiptType === "Vendor Receipt" ? "Vendor Receipt" : "Proof of Payment";
     const paymentMethod = clean(body?.paymentMethod, 80) || "Unspecified";
     const paymentDate = clean(body?.paymentDate, 20) || new Date().toISOString().slice(0, 10);
     const receiptAmount = amount(body?.amount);
@@ -73,6 +74,7 @@ export async function POST(request: Request) {
     const currency = clean(body?.currency, 12).toUpperCase() || "NGN";
     const requestId = idOrNull(body?.requestId);
     const paymentId = idOrNull(body?.paymentId);
+    if (!paymentId) throw new Error("Choose the paid request this receipt belongs to.");
     const poId = idOrNull(body?.poId);
     const vendorId = idOrNull(body?.vendorId);
     const payerName = clean(body?.payerName, 180) || null;
@@ -85,6 +87,37 @@ export async function POST(request: Request) {
 
     const sql = db();
     const result = await sql.begin(async (tx) => {
+      const linkedRows = await tx<any[]>`
+        SELECT p.id,p.request_id,p.po_id,p.vendor_id,p.amount,p.currency,p.payment_method,p.transfer_type,
+               p.payment_reference,p.payment_date,p.status,pr.justification,pr.department_project
+        FROM payments p
+        LEFT JOIN purchase_requests pr ON pr.id=p.request_id
+        WHERE p.id=${paymentId}
+        LIMIT 1
+      `;
+      const linked = linkedRows[0];
+      if (!linked) throw new Error("The selected paid request could not be found.");
+      if (String(linked.status || "") !== "Paid") throw new Error("Receipts can only be recorded for a Paid request.");
+      if (requestId && linked.request_id && Number(requestId) !== Number(linked.request_id)) {
+        throw new Error("The selected payment does not belong to the selected purchase request.");
+      }
+
+      const resolvedRequestId = requestId || (linked.request_id ? Number(linked.request_id) : null);
+      const resolvedPoId = poId || (linked.po_id ? Number(linked.po_id) : null);
+      const resolvedVendorId = vendorId || (linked.vendor_id ? Number(linked.vendor_id) : null);
+      const resolvedAmount = mode === "attachment" && receiptAmount <= 0 ? Number(linked.amount || 0) : receiptAmount;
+      const resolvedCurrency = currency || clean(linked.currency, 12).toUpperCase() || "NGN";
+      const resolvedPaymentMethod = mode === "attachment"
+        ? clean(linked.transfer_type || linked.payment_method, 80) || "Unspecified"
+        : paymentMethod;
+      const resolvedPaymentDate = mode === "attachment" && !clean(body?.paymentDate, 20)
+        ? String(linked.payment_date || new Date().toISOString().slice(0, 10)).slice(0, 10)
+        : paymentDate;
+      const resolvedTransferReference = transferReference || clean(linked.payment_reference, 180) || null;
+      const resolvedPurpose = purpose || clean(linked.justification, 500) || null;
+      const resolvedDepartmentProject = departmentProject || clean(linked.department_project, 180) || null;
+      const ocrStatus = primaryFile ? "Pending" : "Verified";
+
       const duplicate = await tx<any[]>`
         SELECT id FROM receipt_records
         WHERE lower(COALESCE(receipt_no,''))=lower(${receiptNo})
@@ -100,11 +133,11 @@ export async function POST(request: Request) {
           request_id,payment_id,original_file_name,mime_type,file_size_bytes,file_checksum,
           ocr_status,discrepancy_status,transfer_reference,interface_mode
         ) VALUES (
-          ${receiptNo},${receiptType},${paymentMethod},${paymentDate},${vendorId},${payerName},${payeeName},
-          ${receiptAmount},${currency},${purpose},${departmentProject},${paymentId},${poId},'Recorded',
-          ${primaryFile?.locator || null},${primaryFile?.checksum || null},${note},${user.id},${now},${now},${receiptType},
-          ${requestId},${paymentId},${primaryFile?.fileName || null},${primaryFile?.mimeType || null},${primaryFile?.size || null},${primaryFile?.checksum || null},
-          'Not Processed','None',${transferReference},'Next.js'
+          ${receiptNo},${receiptType},${resolvedPaymentMethod},${resolvedPaymentDate},${resolvedVendorId},${payerName},${payeeName},
+          ${resolvedAmount},${resolvedCurrency},${resolvedPurpose},${resolvedDepartmentProject},${paymentId},${resolvedPoId},'Recorded',
+          ${primaryFile?.locator || null},${primaryFile?.checksum || null},${note},${user.id},${now},${now},${documentCategory},
+          ${resolvedRequestId},${paymentId},${primaryFile?.fileName || null},${primaryFile?.mimeType || null},${primaryFile?.size || null},${primaryFile?.checksum || null},
+          ${ocrStatus},'None',${resolvedTransferReference},${mode === "attachment" ? "Next.js Attachment" : "Next.js Manual"}
         ) RETURNING id
       `;
       const receiptId = Number(inserted[0].id);
@@ -112,8 +145,8 @@ export async function POST(request: Request) {
       if (paymentId) {
         await tx`UPDATE payments SET receipt_id=COALESCE(receipt_id,${receiptId}),updated_at=${now} WHERE id=${paymentId}`;
       }
-      if (requestId) {
-        await tx`UPDATE purchase_requests SET receipt_uploaded_at=COALESCE(receipt_uploaded_at,${now}),updated_at=${now} WHERE id=${requestId}`;
+      if (resolvedRequestId) {
+        await tx`UPDATE purchase_requests SET receipt_uploaded_at=COALESCE(receipt_uploaded_at,${now}),updated_at=${now} WHERE id=${resolvedRequestId}`;
       }
 
       const supportDocumentIds: number[] = [];
@@ -126,7 +159,7 @@ export async function POST(request: Request) {
             likely_date,total_amount,import_status,confidence,linked_request_id,duplicate_warning,imported_by,created_at,updated_at
           ) VALUES (
             'Receipt Supporting Document',${originalPath},${file.fileName},${file.locator},${file.checksum},'Receipt Supporting Document',
-            ${departmentProject},${title},${paymentDate},0,'Imported',1,${requestId},FALSE,${user.id},${now},${now}
+            ${resolvedDepartmentProject},${title},${resolvedPaymentDate},0,'Imported',1,${resolvedRequestId},FALSE,${user.id},${now},${now}
           ) RETURNING id
         `;
         supportDocumentIds.push(Number(rows[0].id));
@@ -146,13 +179,13 @@ export async function POST(request: Request) {
         actorRole: user.role,
         afterValues: {
           entry_mode: mode,
-          amount: receiptAmount,
-          currency,
-          payment_method: paymentMethod,
-          request_id: requestId,
+          amount: resolvedAmount,
+          currency: resolvedCurrency,
+          payment_method: resolvedPaymentMethod,
+          request_id: resolvedRequestId,
           payment_id: paymentId,
-          purchase_order_id: poId,
-          vendor_id: vendorId,
+          purchase_order_id: resolvedPoId,
+          vendor_id: resolvedVendorId,
           primary_file_attached: Boolean(primaryFile),
           supporting_document_count: supportingFiles.length,
         },
