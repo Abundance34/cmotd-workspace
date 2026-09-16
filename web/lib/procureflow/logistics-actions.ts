@@ -378,10 +378,19 @@ export async function recordReceivingSlip(
     await tx`
       UPDATE purchase_orders
       SET status=${newStatus},receiving_status=${newStatus},logistics_status=${newStatus},next_role=${nextRole},
+          payment_status=CASE WHEN ${fullyReceived} THEN 'Approved for Payment' ELSE payment_status END,
           actual_delivery_date=COALESCE(actual_delivery_date,${dateReceived}),delivery_updated_by=${user.id},
           delivery_updated_at=${now},updated_at=${now}
       WHERE id=${poId}
     `;
+    if (fullyReceived && po.request_id) {
+      await tx`
+        UPDATE purchase_requests
+        SET status='Approved for Payment',payment_status='Approved for Payment',next_role='finance',
+            logistics_completed_at=${now},logistics_completed_by=${user.id},updated_at=${now}
+        WHERE id=${po.request_id} AND requires_logistics IS TRUE
+      `;
+    }
 
     await evidence(tx, {
       user, entityType: "Receiving Slip", entityId: slipId, entityReference: slipNo,
@@ -395,7 +404,9 @@ export async function recordReceivingSlip(
     });
 
     await notifyRole(tx, "Procurement Manager", "Delivery receipt recorded", `${slipNo} was recorded for ${po.po_no}. Receiving status: ${newStatus}.`, "Receiving Slip", slipId, "Commercial PO Management", "Open Commercial PO");
-    await notifyRole(tx, "Finance", "Goods receipt recorded", `${po.po_no} has a Logistics receiving slip (${slipNo}). Receiving status: ${newStatus}.`, "Receiving Slip", slipId, "Receipts", "Open Receipts", fullyReceived ? "High" : "Normal");
+    if (fullyReceived && po.request_id) {
+      await notifyRole(tx, "Finance", "Logistics complete - approved for payment", `${po.po_no} is fully received. ${po.request_no || "The linked request"} is now ready for Finance payment.`, "Purchase Request", po.request_id, "Approved for Payment", "Open Approved for Payment", "High");
+    }
     await notifyUser(tx, po.facility_manager_user_id || po.requested_by, "Delivery receipt recorded", `${po.po_no} receiving status is now ${newStatus}.`, "Receiving Slip", slipId, "Approved / Accepted Requests", "View Request");
     await notifyRole(tx, "Auditor", "Audit activity: receiving slip", `${user.role} recorded ${slipNo} for ${po.po_no}.`, "Receiving Slip", slipId, "Receiving Slips, Proof of Delivery & Returns", "Open Receiving Evidence");
 
