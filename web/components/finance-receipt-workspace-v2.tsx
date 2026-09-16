@@ -55,9 +55,21 @@ export function FinanceReceiptWorkspaceV2({ data, receiptRows = [] }: { data: an
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const payments = data?.reconciliation || [];
+  const receiptedPaymentIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const row of receiptRows) {
+      const paymentId = row.linkedPaymentId ?? row.linked_payment_id ?? row.paymentId ?? row.payment_id;
+      if (paymentId !== null && paymentId !== undefined && String(paymentId)) ids.add(String(paymentId));
+    }
+    return ids;
+  }, [receiptRows]);
   const paidPayments = useMemo(
-    () => payments.filter((row: any) => String(row.payment_status || row.status || "").toLowerCase() === "paid"),
-    [payments],
+    () => payments.filter((row: any) => {
+      const isPaid = String(row.payment_status || row.status || "").toLowerCase() === "paid";
+      const hasReceipt = Boolean(row.receipt_no || row.receipt_id) || receiptedPaymentIds.has(String(row.id));
+      return isPaid && !hasReceipt;
+    }),
+    [payments, receiptedPaymentIds],
   );
   const requests = data?.requests || [];
   const purchaseOrders = data?.purchaseOrders || [];
@@ -177,7 +189,7 @@ export function FinanceReceiptWorkspaceV2({ data, receiptRows = [] }: { data: an
         </div>
 
         <div className="review-form receipt-link-grid">
-          <label className="paid-request-picker"><span>Paid request</span><select value={form.paymentId} onChange={(event) => choosePayment(event.target.value)}><option value="">Select paid request…</option>{paidPayments.map((row: any) => <option key={row.id} value={row.id}>{row.request_no || row.payment_no} — {money(row.amount, row.currency || "NGN")} — {row.payment_no}</option>)}</select><small>{paidPayments.length} paid request(s) available for receipt entry.</small></label>
+          <label className="paid-request-picker"><span>Paid request</span><select value={form.paymentId} onChange={(event) => choosePayment(event.target.value)}><option value="">Select paid request…</option>{paidPayments.map((row: any) => <option key={row.id} value={row.id}>{row.request_no || row.payment_no} — {money(row.amount, row.currency || "NGN")} — {row.payment_no}</option>)}</select><small>{paidPayments.length} paid request(s) awaiting receipt entry.</small></label>
           <label><span>Purchase request</span><select value={form.requestId} onChange={(event) => setField("requestId", event.target.value)}><option value="">Select request…</option>{requests.map((row: any) => <option key={row.id} value={row.id}>{row.request_no} — {row.department_project || "No department"}</option>)}</select></label>
           <label><span>Link PO (optional)</span><select value={form.poId} onChange={(event) => setField("poId", event.target.value)}><option value="">No PO selected</option>{purchaseOrders.map((row: any) => <option key={row.id} value={row.id}>{row.po_no} — {row.vendor_name || "Vendor pending"}</option>)}</select></label>
           <label><span>Vendor (optional)</span><select value={form.vendorId} onChange={(event) => setField("vendorId", event.target.value)}><option value="">No vendor selected</option>{vendors.map((row: any) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>
