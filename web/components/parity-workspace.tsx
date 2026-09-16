@@ -41,7 +41,109 @@ function Threads({data}:{data:ParityData}){const router=useRouter();const [threa
 
 function LowValue({data}:{data:ParityData}){const router=useRouter();const rows=data.lowValueQueue.filter((r:any)=>["Submitted for Approval","Pending Approval","Reviewed by Procurement"].includes(String(r.status||"")));const [notes,setNotes]=useState<Record<number,string>>({});const [busy,setBusy]=useState<string|null>(null);const [msg,setMsg]=useState<any>(null);async function decide(id:number,decision:string){setBusy(`${decision}-${id}`);try{await post("low-value-decision",{requestId:id,decision,note:notes[id]||"Procurement Manager low-value decision"});setMsg({type:"success",text:decision==="approve"?"Request approved. It has left this approval queue. If delivery/logistics is required, continue in Commercial PO Management and push the approved PO to Logistics.":"Low-value decision recorded with approval history and v2 audit evidence."});router.refresh();}catch(e){setMsg({type:"error",text:e instanceof Error?e.message:"Decision failed."});}finally{setBusy(null)}}return <div className="parity-stack"><div className="parity-info"><ShieldCheck size={17}/><div><strong>Approval limit: {money(data.policyLimit)}</strong><span>Procurement Manager cannot approve a request they originated; those requests remain with Approver / MD.</span></div></div><Message value={msg}/>{rows.length?rows.map((r:any)=><article className="parity-review-card" key={r.id}><div><span>{r.request_no}</span><h3>{money(r.estimated_amount)}</h3><p>{r.department_project||"—"} · {r.category||"—"} · Requested by {r.requester_name||"—"}</p><Status>{r.status}</Status></div><textarea rows={2} value={notes[r.id]||""} onChange={e=>setNotes(n=>({...n,[r.id]:e.target.value}))} placeholder="Decision note / rejection reason"/><div className="parity-row"><button onClick={()=>void decide(r.id,"return")} disabled={busy!==null}>Return</button><button className="parity-danger" onClick={()=>void decide(r.id,"reject")} disabled={busy!==null}>Reject</button><button className="parity-primary" onClick={()=>void decide(r.id,"approve")} disabled={busy!==null}><CheckCircle2 size={14}/>Approve</button></div></article>):<Empty text="No low-value requests are waiting for Procurement Manager approval."/>}</div>}
 
-function POManagement({data}:{data:ParityData}){const router=useRouter();const eligible=data.requests.filter((r:any)=>!r.linked_po_id&&["Approved","Vendor Recommendation Approved","Accepted by Procurement Manager","Payment Approved"].includes(String(r.status||"")));const [requestId,setRequestId]=useState<number|null>(eligible[0]?.id??null);const selected=eligible.find((r:any)=>r.id===requestId);const [vendorId,setVendorId]=useState<number|null>(selected?.selected_vendor_id??data.vendors[0]?.id??null);const [total,setTotal]=useState(String(selected?.estimated_amount||""));const [delivery,setDelivery]=useState("");const [note,setNote]=useState("");const [busy,setBusy]=useState<string|null>(null);const [msg,setMsg]=useState<any>(null);async function create(){if(!requestId||!vendorId)return;setBusy("create");try{const r=await post("create-po",{requestId,vendorId,totalAmount:Number(total||0),expectedDeliveryDate:delivery||null,note});setMsg({type:"success",text:`${r.poNo} created with status ${r.status}.`});router.refresh();}catch(e){setMsg({type:"error",text:e instanceof Error?e.message:"PO creation failed."});}finally{setBusy(null)}}async function release(poId:number){setBusy(`release-${poId}`);try{await post("release-po",{poId,note:"Approved commercial PO released to vendor and Logistics"});setMsg({type:"success",text:"PO pushed to Logistics and released to the vendor."});router.refresh();}catch(e){setMsg({type:"error",text:e instanceof Error?e.message:"PO release failed."});}finally{setBusy(null)}}return <div className="parity-stack"><section className="parity-form-card"><div className="parity-card-title"><FilePlus2 size={18}/><div><strong>Create Commercial Purchase Order</strong><span>For an approved request that requires vendor delivery or Logistics, create its PO here. Requests that do not require a Logistics handoff can continue through Finance.</span></div></div>{eligible.length?<div className="parity-form-grid"><label className="wide"><span>Approved request</span><select value={requestId||""} onChange={e=>{const id=Number(e.target.value);setRequestId(id);const row=eligible.find((x:any)=>x.id===id);setTotal(String(row?.estimated_amount||""));setVendorId(row?.selected_vendor_id??data.vendors[0]?.id??null)}}>{eligible.map((r:any)=><option key={r.id} value={r.id}>{r.request_no} — {money(r.estimated_amount)} — {r.department_project||""}</option>)}</select></label><label><span>Approved vendor</span><select value={vendorId||""} onChange={e=>setVendorId(Number(e.target.value))}>{data.vendors.map((v:any)=><option key={v.id} value={v.id}>{v.name}</option>)}</select></label><label><span>PO total</span><input type="number" min="0" value={total} onChange={e=>setTotal(e.target.value)}/></label><label><span>Expected delivery</span><input type="date" value={delivery} onChange={e=>setDelivery(e.target.value)}/></label><label className="wide"><span>Commercial note</span><textarea rows={2} value={note} onChange={e=>setNote(e.target.value)}/></label></div>:<Empty text="There are no approved requests waiting for PO creation."/>}<button className="parity-primary" disabled={!eligible.length||busy==="create"} onClick={()=>void create()}><FilePlus2 size={14}/>{busy==="create"?"Creating…":"Create Purchase Order"}</button><Message value={msg}/></section><section><div className="parity-section-head"><div><h3>Purchase Order Register</h3><p>When an approved PO requires delivery coordination, push it to Logistics. Once pushed, Logistics owns the handover, tracking and receiving stages.</p></div><ExportButtons kind="purchase-orders"/></div>{data.purchaseOrders.length?<div className="table-wrap"><table className="data-table"><thead><tr><th>PO</th><th>Request</th><th>Vendor</th><th>Total</th><th>Status</th><th>Logistics</th><th>Receiving</th><th>Action</th></tr></thead><tbody>{data.purchaseOrders.map((po:any)=><tr key={po.id}><td><strong>{po.po_no}</strong><small>{dateText(po.po_date)}</small></td><td>{po.request_no||"—"}</td><td>{po.vendor_name||"—"}</td><td>{money(po.total_amount)}</td><td><Status>{po.status}</Status></td><td>{po.logistics_status||"—"}</td><td>{po.receiving_status||"—"}</td><td>{po.status==="Approved"?<button className="table-action-button" onClick={()=>void release(po.id)} disabled={busy!==null}><Send size={13}/>Push to Logistics</button>:"—"}</td></tr>)}</tbody></table></div>:<Empty text="No purchase orders have been created."/>}</section></div>}
+function POManagement({data}:{data:ParityData}){
+  const router=useRouter();
+  const routingRows=data.requests.filter((r:any)=>
+    r.requires_logistics==null
+    && String(r.next_role||"")==="procurement_manager"
+    && ["Approved","Vendor Recommendation Approved","Accepted by Procurement Manager"].includes(String(r.status||""))
+  );
+  const eligible=data.requests.filter((r:any)=>
+    r.requires_logistics===true
+    && !r.linked_po_id
+    && ["Awaiting Logistics Handoff","Approved","Vendor Recommendation Approved","Accepted by Procurement Manager"].includes(String(r.status||""))
+  );
+  const [requestId,setRequestId]=useState<number|null>(eligible[0]?.id??null);
+  const selected=eligible.find((r:any)=>r.id===requestId);
+  const [vendorId,setVendorId]=useState<number|null>(selected?.selected_vendor_id??data.vendors[0]?.id??null);
+  const [total,setTotal]=useState(String(selected?.estimated_amount||""));
+  const [delivery,setDelivery]=useState("");
+  const [note,setNote]=useState("");
+  const [routingNote,setRoutingNote]=useState("");
+  const [busy,setBusy]=useState<string|null>(null);
+  const [msg,setMsg]=useState<any>(null);
+
+  async function route(requestId:number,requiresLogistics:boolean){
+    setBusy(`route-${requestId}`);
+    setMsg(null);
+    try{
+      const result=await post("post-approval-routing",{requestId,requiresLogistics,note:routingNote});
+      setMsg({type:"success",text:requiresLogistics
+        ? `${result.status}. Create/approve the PO, then push it to Logistics.`
+        : "No Logistics handoff required. The request is now available to Finance under Approved for Payment."});
+      setRoutingNote("");
+      router.refresh();
+    }catch(e){
+      setMsg({type:"error",text:e instanceof Error?e.message:"Unable to save the post-approval route."});
+    }finally{setBusy(null)}
+  }
+
+  async function create(){
+    if(!requestId||!vendorId)return;
+    setBusy("create");
+    setMsg(null);
+    try{
+      const r=await post("create-po",{requestId,vendorId,totalAmount:Number(total||0),expectedDeliveryDate:delivery||null,note});
+      setMsg({type:"success",text:`${r.poNo} created with status ${r.status}.`});
+      router.refresh();
+    }catch(e){setMsg({type:"error",text:e instanceof Error?e.message:"PO creation failed."});}
+    finally{setBusy(null)}
+  }
+
+  async function release(poId:number){
+    setBusy(`release-${poId}`);
+    setMsg(null);
+    try{
+      await post("release-po",{poId,note:"Approved commercial PO released to vendor and Logistics"});
+      setMsg({type:"success",text:"PO pushed to Logistics. Finance remains blocked until Logistics completes receiving."});
+      router.refresh();
+    }catch(e){setMsg({type:"error",text:e instanceof Error?e.message:"PO release failed."});}
+    finally{setBusy(null)}
+  }
+
+  return <div className="parity-stack">
+    <section className="parity-form-card">
+      <div className="parity-card-title"><Truck size={18}/><div>
+        <strong>Post-Approval Routing</strong>
+        <span>Every newly approved request must be routed before Finance can act. Choose Logistics Required only when physical delivery/receiving must be completed first.</span>
+      </div></div>
+      {routingRows.length?<>
+        <label className="wide"><span>Routing note (optional)</span><textarea rows={2} value={routingNote} onChange={e=>setRoutingNote(e.target.value)} placeholder="Reason for the selected route"/></label>
+        <div className="parity-stack">{routingRows.map((r:any)=><article className="parity-review-card" key={r.id}>
+          <div><span>{r.request_no}</span><h3>{money(r.estimated_amount)}</h3><p>{r.department_project||"—"} · {r.category||"—"}</p><Status>{r.status}</Status></div>
+          <div className="parity-row">
+            <button className="parity-primary" disabled={busy!==null} onClick={()=>void route(r.id,false)}><CheckCircle2 size={14}/>No Logistics Required → Finance</button>
+            <button disabled={busy!==null} onClick={()=>void route(r.id,true)}><Truck size={14}/>Logistics Required</button>
+          </div>
+        </article>)}</div>
+      </>:<Empty text="No approved requests are waiting for a post-approval routing decision."/>}
+      <Message value={msg}/>
+    </section>
+
+    <section className="parity-form-card">
+      <div className="parity-card-title"><FilePlus2 size={18}/><div>
+        <strong>Create Commercial Purchase Order</strong>
+        <span>Only requests explicitly marked Logistics Required appear here. Finance remains blocked until Logistics completes receiving.</span>
+      </div></div>
+      {eligible.length?<div className="parity-form-grid">
+        <label className="wide"><span>Logistics-required request</span><select value={requestId||""} onChange={e=>{const id=Number(e.target.value);setRequestId(id);const row=eligible.find((x:any)=>x.id===id);setTotal(String(row?.estimated_amount||""));setVendorId(row?.selected_vendor_id??data.vendors[0]?.id??null)}}>{eligible.map((r:any)=><option key={r.id} value={r.id}>{r.request_no} — {money(r.estimated_amount)} — {r.department_project||""}</option>)}</select></label>
+        <label><span>Approved vendor</span><select value={vendorId||""} onChange={e=>setVendorId(Number(e.target.value))}>{data.vendors.map((v:any)=><option key={v.id} value={v.id}>{v.name}</option>)}</select></label>
+        <label><span>PO total</span><input type="number" min="0" value={total} onChange={e=>setTotal(e.target.value)}/></label>
+        <label><span>Expected delivery</span><input type="date" value={delivery} onChange={e=>setDelivery(e.target.value)}/></label>
+        <label className="wide"><span>Commercial note</span><textarea rows={2} value={note} onChange={e=>setNote(e.target.value)}/></label>
+      </div>:<Empty text="There are no Logistics-required requests waiting for PO creation."/>}
+      <button className="parity-primary" disabled={!eligible.length||busy==="create"} onClick={()=>void create()}><FilePlus2 size={14}/>{busy==="create"?"Creating…":"Create Purchase Order"}</button>
+    </section>
+
+    <section>
+      <div className="parity-section-head"><div><h3>Purchase Order Register</h3><p>Push only approved Logistics-required POs to Logistics. Once fully received, the linked purchase request automatically moves to Finance.</p></div><ExportButtons kind="purchase-orders"/></div>
+      {data.purchaseOrders.length?<div className="table-wrap"><table className="data-table"><thead><tr><th>PO</th><th>Request</th><th>Vendor</th><th>Total</th><th>Status</th><th>Logistics</th><th>Receiving</th><th>Action</th></tr></thead><tbody>{data.purchaseOrders.map((po:any)=><tr key={po.id}>
+        <td><strong>{po.po_no}</strong><small>{dateText(po.po_date)}</small></td><td>{po.request_no||"—"}</td><td>{po.vendor_name||"—"}</td><td>{money(po.total_amount)}</td><td><Status>{po.status}</Status></td><td>{po.logistics_status||"—"}</td><td>{po.receiving_status||"—"}</td>
+        <td>{po.status==="Approved"&&po.requires_logistics===true?<button className="table-action-button" onClick={()=>void release(po.id)} disabled={busy!==null}><Send size={13}/>Push to Logistics</button>:"—"}</td>
+      </tr>)}</tbody></table></div>:<Empty text="No purchase orders have been created."/>}
+    </section>
+  </div>
+}
 
 function Vendors({data}:{data:ParityData}){const router=useRouter();const [selectedId,setSelectedId]=useState<number|null>(null);const selected=data.vendors.find((v:any)=>v.id===selectedId);const [form,setForm]=useState<any>({name:"",category:"",phone:"",email:"",address:"",taxId:"",rating:0,status:"Active",note:""});const [busy,setBusy]=useState(false);const [msg,setMsg]=useState<any>(null);function choose(id:number|null){setSelectedId(id);const v=data.vendors.find((x:any)=>x.id===id);setForm(v?{name:v.name||"",category:v.category||"",phone:v.phone||"",email:v.email||"",address:v.address||"",taxId:v.tax_id||"",rating:v.rating||0,status:v.status||"Active",note:""}:{name:"",category:"",phone:"",email:"",address:"",taxId:"",rating:0,status:"Active",note:""});}async function save(){setBusy(true);try{await post("vendor-save",{vendorId:selectedId,...form});setMsg({type:"success",text:selectedId?"Vendor record updated.":"Vendor added to the supplier register."});choose(null);router.refresh();}catch(e){setMsg({type:"error",text:e instanceof Error?e.message:"Unable to save vendor."});}finally{setBusy(false)}}return <div className="parity-stack"><section className="parity-form-card"><div className="parity-card-title"><UserRoundCheck size={18}/><div><strong>{selectedId?`Edit ${selected?.name||"Vendor"}`:"Add Vendor"}</strong><span>Bank-account details are deliberately excluded here; payment recipient details remain in the encrypted payee workflow.</span></div></div><div className="parity-form-grid"><label><span>Name</span><input value={form.name} onChange={e=>setForm((f:any)=>({...f,name:e.target.value}))}/></label><label><span>Category</span><input value={form.category} onChange={e=>setForm((f:any)=>({...f,category:e.target.value}))}/></label><label><span>Phone</span><input value={form.phone} onChange={e=>setForm((f:any)=>({...f,phone:e.target.value}))}/></label><label><span>Email</span><input value={form.email} onChange={e=>setForm((f:any)=>({...f,email:e.target.value}))}/></label><label className="wide"><span>Address</span><input value={form.address} onChange={e=>setForm((f:any)=>({...f,address:e.target.value}))}/></label><label><span>Tax ID</span><input value={form.taxId} onChange={e=>setForm((f:any)=>({...f,taxId:e.target.value}))}/></label><label><span>Rating (0–5)</span><input type="number" min="0" max="5" value={form.rating} onChange={e=>setForm((f:any)=>({...f,rating:Number(e.target.value)}))}/></label><label><span>Status</span><select value={form.status} onChange={e=>setForm((f:any)=>({...f,status:e.target.value}))}><option>Active</option><option>Under Review</option><option>Suspended</option><option>Inactive</option></select></label><label className="wide"><span>Reason / note</span><textarea rows={2} value={form.note} onChange={e=>setForm((f:any)=>({...f,note:e.target.value}))}/></label></div><div className="parity-row"><button onClick={()=>choose(null)}>New vendor</button><button className="parity-primary" disabled={busy} onClick={()=>void save()}>{busy?"Saving…":"Save Vendor"}</button></div><Message value={msg}/></section><section><div className="parity-section-head"><div><h3>Vendor Register</h3><p>Performance history and status.</p></div><ExportButtons kind="vendors"/></div><div className="table-wrap"><table className="data-table"><thead><tr><th>Vendor</th><th>Category</th><th>Status</th><th>Rating</th><th>Orders</th><th>Total spend</th><th>Delivery</th><th>Action</th></tr></thead><tbody>{data.vendors.map((v:any)=><tr key={v.id}><td><strong>{v.name}</strong><small>{v.email||v.phone||""}</small></td><td>{v.category||"—"}</td><td><Status>{v.status}</Status></td><td>{v.rating??"—"}</td><td>{v.completed_orders||0}</td><td>{money(v.total_spend)}</td><td>{v.average_delivery_time?`${v.average_delivery_time} days`:"—"}</td><td><button onClick={()=>choose(v.id)}>Edit</button></td></tr>)}</tbody></table></div></section></div>}
 
