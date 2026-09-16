@@ -159,7 +159,9 @@ export async function getFinanceDashboardData(): Promise<FinanceDashboardData> {
     sql<{ awaiting_payment: number; pending_receipt: number; total_paid: number; completed: number }[]>`
       SELECT
         (SELECT COUNT(*)::int FROM purchase_requests pr
-          WHERE (pr.next_role='finance' OR pr.status IN ('Approved','Awaiting Payment','Approved for Payment') OR pr.payment_status='Approved for Payment')
+          WHERE pr.next_role='finance'
+            AND pr.payment_status='Approved for Payment'
+            AND (pr.requires_logistics IS FALSE OR pr.logistics_completed_at IS NOT NULL)
             AND pr.status NOT IN ('Paid','Completed','Closed','Rejected')) AS awaiting_payment,
         (SELECT COUNT(*)::int FROM payments p WHERE p.status='Paid' AND p.receipt_id IS NULL) AS pending_receipt,
         (SELECT COUNT(*)::int FROM payments p WHERE p.status='Paid') AS total_paid,
@@ -192,7 +194,9 @@ export async function getFinanceDashboardData(): Promise<FinanceDashboardData> {
         ORDER BY CASE WHEN x.id=pr.selected_payee_detail_id THEN 0 ELSE 1 END,x.id DESC
         LIMIT 1
       ) ppd ON TRUE
-      WHERE (pr.next_role='finance' OR pr.status IN ('Approved','Awaiting Payment','Approved for Payment') OR pr.payment_status='Approved for Payment')
+      WHERE pr.next_role='finance'
+        AND pr.payment_status='Approved for Payment'
+        AND (pr.requires_logistics IS FALSE OR pr.logistics_completed_at IS NOT NULL)
         AND pr.status NOT IN ('Paid','Completed','Closed','Rejected')
       ORDER BY COALESCE(pr.approved_at,pr.updated_at,pr.created_at) DESC,pr.id DESC
       LIMIT 200
