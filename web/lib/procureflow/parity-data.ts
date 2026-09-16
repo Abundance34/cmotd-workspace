@@ -64,7 +64,8 @@ export async function getParityData(user: CurrentUser): Promise<ParityData> {
     : [];
 
   const poRows = await sql<any[]>`
-    SELECT po.*, pr.request_no, pr.department_project, v.name vendor_name, v.category vendor_category,
+    SELECT po.*, pr.request_no, pr.department_project, pr.requires_logistics, pr.logistics_completed_at,
+           v.name vendor_name, v.category vendor_category,
            cb.full_name created_by_name, ab.full_name approved_by_name
     FROM purchase_orders po
     LEFT JOIN purchase_requests pr ON pr.id=po.request_id

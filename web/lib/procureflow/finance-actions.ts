@@ -12,9 +12,15 @@ function assertFinance(user: CurrentUser) {
   }
 }
 
-function requestPaymentReady(status: string | null, paymentStatus: string | null) {
-  return ["Approved", "Awaiting Payment", "Approved for Payment", "Payment Approved", "PO Created"].includes(String(status || ""))
-    || String(paymentStatus || "") === "Approved for Payment";
+function requestPaymentReady(
+  paymentStatus: string | null,
+  nextRole: string | null,
+  requiresLogistics: boolean | null,
+  logisticsCompletedAt: Date | string | null,
+) {
+  return String(paymentStatus || "") === "Approved for Payment"
+    && String(nextRole || "") === "finance"
+    && (requiresLogistics === false || Boolean(logisticsCompletedAt));
 }
 
 function maskedAccount(last4: string | null) {
@@ -124,15 +130,16 @@ export async function verifyFinancePayee(user: CurrentUser, requestId: number, r
   return sql.begin(async (tx) => {
     const requests = await tx<{
       id: number; request_no: string; status: string | null; payment_status: string | null;
+      next_role: string | null; requires_logistics: boolean | null; logistics_completed_at: Date | string | null;
       selected_payee_detail_id: number | null; selected_vendor_id: number | null;
     }[]>`
-      SELECT id,request_no,status,payment_status,selected_payee_detail_id,selected_vendor_id
+      SELECT id,request_no,status,payment_status,next_role,requires_logistics,logistics_completed_at,selected_payee_detail_id,selected_vendor_id
       FROM purchase_requests WHERE id=${requestId} FOR UPDATE
     `;
     const request = requests[0];
     if (!request) throw new Error("Purchase request not found.");
-    if (!requestPaymentReady(request.status, request.payment_status)) {
-      throw new Error("Only an approved request can have its payee verified for payment.");
+    if (!requestPaymentReady(request.payment_status, request.next_role, request.requires_logistics, request.logistics_completed_at)) {
+      throw new Error("This approved request has not completed its post-approval routing and cannot be processed by Finance yet.");
     }
 
     const payees = await tx<{
@@ -262,11 +269,12 @@ export async function recordFinancePayment(
       id: number; request_no: string; requested_by: number | null; facility_manager_user_id: number | null;
       assigned_procurement_manager_id: number | null; approved_by_user_id: number | null;
       status: string | null; payment_status: string | null; approval_rescinded_at: Date | string | null;
+      next_role: string | null; requires_logistics: boolean | null; logistics_completed_at: Date | string | null;
       selected_payee_detail_id: number | null; selected_vendor_id: number | null;
       selected_vendor_quote_id: number | null; linked_po_id: number | null; estimated_amount: string | number | null;
     }[]>`
       SELECT id,request_no,requested_by,facility_manager_user_id,assigned_procurement_manager_id,
-             approved_by_user_id,status,payment_status,approval_rescinded_at,selected_payee_detail_id,
+             approved_by_user_id,status,payment_status,approval_rescinded_at,next_role,requires_logistics,logistics_completed_at,selected_payee_detail_id,
              selected_vendor_id,selected_vendor_quote_id,linked_po_id,estimated_amount
       FROM purchase_requests WHERE id=${requestId} FOR UPDATE
     `;
@@ -279,8 +287,8 @@ export async function recordFinancePayment(
       `;
       if (prior[0]) return { paymentId: Number(prior[0].id), paymentNo: prior[0].payment_no, status: "Paid", alreadyPaid: true };
     }
-    if (!requestPaymentReady(request.status, request.payment_status)) {
-      throw new Error("Only an approved request can be paid.");
+    if (!requestPaymentReady(request.payment_status, request.next_role, request.requires_logistics, request.logistics_completed_at)) {
+      throw new Error("This request is not currently routed to Finance for payment. Complete the post-approval/Logistics workflow first.");
     }
     if (request.approval_rescinded_at && String(request.status || "") !== "Approved") {
       throw new Error("Finance cannot pay a request while its approval is rescinded.");
