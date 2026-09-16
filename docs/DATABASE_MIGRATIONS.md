@@ -18,6 +18,10 @@ Adds the requested workflow data without replacing existing records:
 
 SQLite compatibility uses the matching `ensure_e2e_update_schema()` additions so the updated application can be validated locally before the production cutover.
 
+## `008_post_approval_logistics_routing.sql`
+
+Adds an explicit post-approval routing gate to purchase requests. New approvals return to Procurement for a one-time choice: **No Logistics Required** routes directly to Finance, while **Logistics Required** keeps Finance blocked until the linked purchase order is released to Logistics and fully received. The migration records the routing decision and Logistics completion timestamps/users, adds queue indexes and foreign keys, and preserves historical requests that were already Finance-ready before this workflow existed.
+
 ## `003_relationship_constraints.sql`
 
 Adds deferrable, initially deferred, `NOT VALID` foreign keys after data loading. This prevents migration order from breaking historical imports while still allowing the verification script to detect orphans before constraints are validated. It covers identity, request/vendor, approvals, payees/payments/receipts, documents/OCR, gateway passes, delegation, and administrative relationships.
