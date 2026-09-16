@@ -66,6 +66,14 @@ export function FinanceReceiptWorkspaceV2({ data, receiptRows = [] }: { data: an
     () => (data?.documents || []).filter((doc: any) => String(doc.document_type || "") === "Receipt Supporting Document"),
     [data?.documents],
   );
+  const selectedPaidPayment = useMemo(
+    () => paidPayments.find((row: any) => String(row.id) === form.paymentId) || null,
+    [paidPayments, form.paymentId],
+  );
+  const selectedRequest = useMemo(
+    () => requests.find((row: any) => String(row.id) === String(form.requestId || selectedPaidPayment?.request_id || "")) || null,
+    [requests, form.requestId, selectedPaidPayment],
+  );
 
   function setField(key: keyof typeof initial, value: string) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -98,6 +106,7 @@ export function FinanceReceiptWorkspaceV2({ data, receiptRows = [] }: { data: an
       setField("paymentId", value);
       return;
     }
+    const linkedRequest = requests.find((row: any) => String(row.id) === String(payment.request_id || ""));
     setForm((current) => ({
       ...current,
       paymentId: String(payment.id),
@@ -108,8 +117,10 @@ export function FinanceReceiptWorkspaceV2({ data, receiptRows = [] }: { data: an
       currency: payment.currency || current.currency,
       paymentDate: payment.payment_date ? String(payment.payment_date).slice(0, 10) : current.paymentDate,
       transferReference: payment.payment_reference || current.transferReference,
-      paymentMethod: payment.transfer_type || current.paymentMethod,
+      paymentMethod: payment.transfer_type || payment.payment_method || current.paymentMethod,
       payeeName: payment.recipient_name || payment.vendor_name || current.payeeName,
+      purpose: linkedRequest?.justification || current.purpose,
+      departmentProject: linkedRequest?.department_project || current.departmentProject,
     }));
   }
 
@@ -156,13 +167,13 @@ export function FinanceReceiptWorkspaceV2({ data, receiptRows = [] }: { data: an
     <div className="parity-stack finance-receipt-v2">
       <div className="panel">
         <div className="panel-heading">
-          <div><h2>Record receipt / proof of payment</h2><p>Select a paid request first. You can enter the receipt manually, attach the receipt/proof, or use both. Supporting documents remain optional.</p></div>
+          <div><h2>Record receipt / proof of payment</h2><p>Select a paid request first. Manual entry can be saved without a file. Upload Receipt Only can be saved without completing the manual receipt fields.</p></div>
           <span className="status-pill">Finance evidence</span>
         </div>
 
         <div className="receipt-mode-toggle" role="group" aria-label="Receipt entry method">
-          <button type="button" className={mode === "manual" ? "active" : ""} onClick={() => setMode("manual")}><ReceiptText size={16}/> Manual Receipt Entry</button>
-          <button type="button" className={mode === "attachment" ? "active" : ""} onClick={() => setMode("attachment")}><Upload size={16}/> Attach Receipt</button>
+          <button type="button" className={mode === "manual" ? "active" : ""} onClick={() => setMode("manual")}><ReceiptText size={16}/> Manual Receipt — no file required</button>
+          <button type="button" className={mode === "attachment" ? "active" : ""} onClick={() => setMode("attachment")}><Upload size={16}/> Upload Receipt Only</button>
         </div>
 
         <div className="review-form receipt-link-grid">
@@ -171,6 +182,14 @@ export function FinanceReceiptWorkspaceV2({ data, receiptRows = [] }: { data: an
           <label><span>Link PO (optional)</span><select value={form.poId} onChange={(event) => setField("poId", event.target.value)}><option value="">No PO selected</option>{purchaseOrders.map((row: any) => <option key={row.id} value={row.id}>{row.po_no} — {row.vendor_name || "Vendor pending"}</option>)}</select></label>
           <label><span>Vendor (optional)</span><select value={form.vendorId} onChange={(event) => setField("vendorId", event.target.value)}><option value="">No vendor selected</option>{vendors.map((row: any) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>
         </div>
+
+        {selectedPaidPayment ? (
+          <div className="receipt-paid-context">
+            <div><span>Paid request</span><strong>{selectedPaidPayment.request_no || selectedPaidPayment.payment_no}</strong></div>
+            <div><span>Amount paid</span><strong>{money(selectedPaidPayment.amount, selectedPaidPayment.currency || "NGN")}</strong></div>
+            <div className="wide"><span>Business justification</span><p>{selectedRequest?.justification || "No business justification was recorded for this request."}</p></div>
+          </div>
+        ) : null}
 
         {mode === "manual" ? (
           <div className="review-form receipt-manual-grid">
@@ -188,7 +207,7 @@ export function FinanceReceiptWorkspaceV2({ data, receiptRows = [] }: { data: an
             <label className="wide"><span>Finance note</span><textarea rows={3} value={form.note} onChange={(event) => setField("note", event.target.value)}/></label>
           </div>
         ) : (
-          <div className="receipt-attachment-note"><FilePlus2 size={18}/><div><strong>Attachment-only receipt entry</strong><span>Attach the receipt and optionally link it to a payment, request, PO or vendor above. A receipt reference and date are generated automatically when you leave them blank.</span></div></div>
+          <div className="receipt-attachment-note"><FilePlus2 size={18}/><div><strong>Upload receipt only</strong><span>No manual receipt fields are required. Choose the paid request above and attach the receipt/proof file; ProcureFlow uses the linked payment amount, date, reference and request context automatically.</span></div></div>
         )}
 
         <div className="receipt-file-grid">
