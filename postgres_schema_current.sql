@@ -1852,7 +1852,12 @@ CREATE TABLE public.purchase_requests (
     approval_rescinded_reason text,
     completed_by_user_id bigint,
     archived_at timestamp with time zone,
-    archived_by_user_id bigint
+    archived_by_user_id bigint,
+    requires_logistics boolean,
+    logistics_routing_decided_at timestamp with time zone,
+    logistics_routing_decided_by bigint,
+    logistics_completed_at timestamp with time zone,
+    logistics_completed_by bigint
 );
 
 
@@ -3688,6 +3693,20 @@ CREATE INDEX idx_pr_next_role_status ON public.purchase_requests USING btree (ne
 
 
 --
+-- Name: idx_pr_post_approval_routing; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_pr_post_approval_routing ON public.purchase_requests USING btree (next_role, requires_logistics, payment_status, status, updated_at);
+
+
+--
+-- Name: idx_pr_logistics_completion; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_pr_logistics_completion ON public.purchase_requests USING btree (requires_logistics, logistics_completed_at, linked_po_id);
+
+
+--
 -- Name: idx_pr_request_type; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4273,6 +4292,22 @@ ALTER TABLE ONLY public.purchase_requests
 
 ALTER TABLE ONLY public.purchase_requests
     ADD CONSTRAINT fk_purchase_requests_requested_by FOREIGN KEY (requested_by) REFERENCES public.users(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: purchase_requests fk_purchase_requests_logistics_routing_decided_by; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.purchase_requests
+    ADD CONSTRAINT fk_purchase_requests_logistics_routing_decided_by FOREIGN KEY (logistics_routing_decided_by) REFERENCES public.users(id) ON DELETE SET NULL NOT VALID;
+
+
+--
+-- Name: purchase_requests fk_purchase_requests_logistics_completed_by; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.purchase_requests
+    ADD CONSTRAINT fk_purchase_requests_logistics_completed_by FOREIGN KEY (logistics_completed_by) REFERENCES public.users(id) ON DELETE SET NULL NOT VALID;
 
 
 --
