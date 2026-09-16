@@ -6,6 +6,7 @@ export type FinanceReadyRow = {
   requestNo: string;
   departmentProject: string | null;
   category: string | null;
+  businessJustification: string | null;
   amount: number;
   status: string | null;
   paymentStatus: string | null;
@@ -105,6 +106,7 @@ type RawReady = {
   request_no: string;
   department_project: string | null;
   category: string | null;
+  justification: string | null;
   estimated_amount: string | number | null;
   status: string | null;
   payment_status: string | null;
@@ -165,7 +167,7 @@ export async function getFinanceDashboardData(): Promise<FinanceDashboardData> {
     `,
     sql<RawReady[]>`
       SELECT
-        pr.id,pr.request_no,pr.department_project,pr.category,pr.estimated_amount,
+        pr.id,pr.request_no,pr.department_project,pr.category,pr.justification,pr.estimated_amount,
         pr.status,pr.payment_status,pr.next_role,
         COALESCE(latest_approval.approved_by_role,pr.approved_by_role) AS approved_by,
         COALESCE(pr.approved_at,latest_approval.created_at) AS approval_date,
@@ -268,6 +270,7 @@ export async function getFinanceDashboardData(): Promise<FinanceDashboardData> {
         requestNo: row.request_no,
         departmentProject: row.department_project,
         category: row.category,
+        businessJustification: row.justification,
         amount: Number(row.estimated_amount || 0),
         status: row.status,
         paymentStatus: row.payment_status,
