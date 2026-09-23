@@ -81,8 +81,8 @@ export async function getParityData(user: CurrentUser): Promise<ParityData> {
   const gatewayItems = gatewayIds.length
     ? await sql<any[]>`SELECT * FROM gateway_pass_items WHERE gateway_pass_id IN ${sql(gatewayIds)} ORDER BY gateway_pass_id,id`
     : [];
-  const gatewayReviewQueue = (user.role === "Procurement Manager" || user.role === "Admin")
-    ? gateways.filter((row:any) => ["Submitted","Pending Procurement Manager / Approver Review"].includes(String(row.status||"")) && [null,"procurement_manager","Procurement Manager"].includes(row.next_role))
+  const gatewayReviewQueue = (user.role === "Procurement Manager" || user.role === "Logistics Officer" || user.role === "Admin")
+    ? gateways.filter((row:any) => ["Submitted","Pending Procurement Manager / Approver Review"].includes(String(row.status||"")))
     : [];
 
   const threads = user.role === "Facility Manager"
