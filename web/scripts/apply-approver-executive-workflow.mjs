@@ -19,7 +19,7 @@ const need=(s,m,l)=>{if(!s.includes(m))throw new Error(`Approver executive patch
     title: "Executive Navigation",
     sections: [
       "Approval Dashboard", "Reimbursement Request", "Pending Approvals", "Approved Requests", "Quote Comparison", "PO Approval",
-      "Pending Payments", "Gateway Pass Approval", "Availability / Away Notice", "My Approval History", "Income", "Settings",
+      "Pending Payments", "Approved Gateway Passes", "Availability / Away Notice", "My Approval History", "Income", "Settings",
     ],
   },`);
  need(s,'"Approved Requests"',"Approved Requests navigation");need(s,'"Pending Payments"',"Pending Payments navigation");write(p,s);
@@ -34,7 +34,7 @@ const need=(s,m,l)=>{if(!s.includes(m))throw new Error(`Approver executive patch
   if(section==="Quote Comparison")return <ApproverRequests rows={data?.quoteComparisons||[]} approvalLimit={data?.approvalLimit||parityData.policyLimit} mode="quotes"/>;
   if(section==="PO Approval")return <ApproverPOApprovals rows={data?.pendingPOs||[]} approvalLimit={data?.approvalLimit||parityData.policyLimit}/>;
   if(section==="Pending Payments")return <ApproverPendingPayments rows={data?.pendingPaymentRequests||[]}/>;
-  if(section==="Gateway Pass Approval")return <ApproverGatewayApprovals rows={data?.pendingGatewayPasses||[]}/>;
+  if(section==="Approved Gateway Passes")return <ParityWorkspace section={section} role="Approver" data={parityData}/>;
   if(section==="Availability / Away Notice")return <ParityWorkspace section={section} role="Approver" data={parityData}/>;
   if(section==="My Approval History")return <ApproverApprovalHistory rows={data?.requestApprovalHistory||[]}/>;
   return null;
@@ -43,7 +43,7 @@ const need=(s,m,l)=>{if(!s.includes(m))throw new Error(`Approver executive patch
 `;
  const re=/function ApproverSection\([\s\S]*?\n}\n\n(?=function FinanceSection)/;if(!re.test(s))throw new Error("Approver executive patch could not find ApproverSection.");s=s.replace(re,block);
  s=s.replace(/else if\(role==="Approver"\)\{cards=\[[\s\S]*?\];summary=`[^`]*`;\}/,
- 'else if(role==="Approver"){cards=[["Pending Approvals",String(approverData?.pendingApprovals?.length||0),"Requests awaiting decision"],["Approved Requests",String(approverData?.approvedRequests?.length||0),"Approved request register"],["Pending Payments",String(approverData?.pendingPaymentRequests?.length||0),"Awaiting Finance payment"],["Gateway Passes",String(approverData?.pendingGatewayPasses?.length||0),"Final movement approval"]];summary=`${approverData?.requestApprovalHistory?.length||0} approval-history records · ${approverData?.pendingPOs?.length||0} pending POs`;}');
+ 'else if(role==="Approver"){cards=[["Pending Approvals",String(approverData?.pendingApprovals?.length||0),"Requests awaiting decision"],["Approved Requests",String(approverData?.approvedRequests?.length||0),"Approved request register"],["Pending Payments",String(approverData?.pendingPaymentRequests?.length||0),"Awaiting Finance payment"],["Approved Gateway Passes",String(parityData.gateways.filter((g:any)=>["Approved","Generated","Downloaded","Closed"].includes(String(g.status||""))).length),"Read-only management view"]];summary=`${approverData?.requestApprovalHistory?.length||0} approval-history records · ${approverData?.pendingPOs?.length||0} pending POs · gateway approval is handled by Procurement or Logistics`;}');
  need(s,"ApproverPendingRequests","pending request workspace");need(s,"ApproverApprovedRequests","approved request workspace");need(s,"ApproverPendingPayments","pending payment workspace");write(p,s);
 }
 {
@@ -97,12 +97,12 @@ const need=(s,m,l)=>{if(!s.includes(m))throw new Error(`Approver executive patch
  s=s.replace(/  Approver: \[[\s\S]*?\n  \],\n  Finance:/,
 `  Approver: [
     "Approval Dashboard", "Reimbursement Request", "Pending Approvals", "Approved Requests", "Quote Comparison", "PO Approval",
-    "Pending Payments", "Gateway Pass Approval", "Availability / Away Notice", "My Approval History", "Income", "Settings",
+    "Pending Payments", "Approved Gateway Passes", "Availability / Away Notice", "My Approval History", "Income", "Settings",
   ],
   Finance:`);
  s=s.replace(/  if \(role === "Approver"\) \{[\s\S]*?\n  \}\n\n  if \(role === "Finance"\)/,
 `  if (role === "Approver") {
-    if (/gateway/.test(text)) return "Gateway Pass Approval";
+    if (/gateway/.test(text)) return "Approved Gateway Passes";
     if (/purchase order|\\bpo\\b/.test(text)) return "PO Approval";
     if (/quote/.test(text)) return "Quote Comparison";
     if (/approved for payment|awaiting payment|payment reminder|pending payment/.test(text) && !/payment recorded|\\bpaid\\b|completed/.test(text)) return "Pending Payments";
@@ -130,6 +130,7 @@ const need=(s,m,l)=>{if(!s.includes(m))throw new Error(`Approver executive patch
       else if (request && /approved|completed|payment recorded|\\bpaid\\b|low[- ]?value approval audit/.test(text) && !pending) sectionTarget = "Approved Requests";
       else if (request && pending) sectionTarget = "Pending Approvals";
       else if (originalTarget === "Payment Approval") sectionTarget = "Pending Payments";
+      else if (String(notification?.entity_type || "") === "Gateway Pass" || originalTarget === "Gateway Pass Approval") sectionTarget = "Approved Gateway Passes";
       else sectionTarget = valid.has(originalTarget) ? originalTarget : inferTarget(role, notification);
     } else sectionTarget = valid.has(originalTarget) ? originalTarget : inferTarget(role, notification);
     return { ...notification, original_section_target: originalTarget || null, section_target: sectionTarget };
