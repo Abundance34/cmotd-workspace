@@ -75,12 +75,54 @@ export async function runParityAction(user:CurrentUser, action:string, payload:a
   }
 
   if(action==="gateway-submit"){
-    assertRole(user,["Facility Manager","Admin"]);const id=positiveId(payload.gatewayPassId,"gateway pass");return sql.begin(async tx=>{const gp=(await tx<any[]>`SELECT * FROM gateway_passes WHERE id=${id} FOR UPDATE`)[0];if(!gp)throw new Error("Gateway pass not found.");if(user.role!=="Admin"&&Number(gp.facility_manager_user_id)!==user.id)throw new Error("You can submit only your own gateway passes.");if(!["Draft","Returned for Correction"].includes(String(gp.status||"")))throw new Error("This gateway pass is not ready for submission.");await tx`UPDATE gateway_passes SET status='Submitted',submitted_at=NOW(),next_role='procurement_manager',updated_at=NOW() WHERE id=${id}`;await workflow(tx,user,"Gateway Pass",id,"Submitted","Submitted",clean(payload.note,1000)||"Submitted for Procurement Manager review");await evidence(tx,user,{action:"Gateway Pass Submitted",entityType:"Gateway Pass",entityId:id,entityReference:gp.pass_number,before:{status:gp.status},after:{status:"Submitted",next_role:"procurement_manager"},note:clean(payload.note,1000)||"Submitted for review"});await notifyRole(tx,"Procurement Manager","Gateway pass awaiting review",`${gp.pass_number} requires Procurement Manager review.`,"Gateway Pass",id,"Gateway Pass Review","High");return {id,status:"Submitted"};});
+    assertRole(user,["Facility Manager","Admin"]);const id=positiveId(payload.gatewayPassId,"gateway pass");
+    return sql.begin(async tx=>{
+      const gp=(await tx<any[]>`SELECT * FROM gateway_passes WHERE id=${id} FOR UPDATE`)[0];
+      if(!gp)throw new Error("Gateway pass not found.");
+      if(user.role!=="Admin"&&Number(gp.facility_manager_user_id)!==user.id)throw new Error("You can submit only your own gateway passes.");
+      if(!["Draft","Returned for Correction"].includes(String(gp.status||"")))throw new Error("This gateway pass is not ready for submission.");
+      const note=clean(payload.note,1000)||"Submitted for Procurement or Logistics approval";
+      await tx`UPDATE gateway_passes SET status='Submitted',submitted_at=NOW(),next_role='gateway_approval',reviewed_by_user_id=NULL,reviewed_at=NULL,procurement_review_note=NULL,updated_at=NOW() WHERE id=${id}`;
+      await workflow(tx,user,"Gateway Pass",id,"Submitted","Submitted",note);
+      await evidence(tx,user,{action:"Gateway Pass Submitted",entityType:"Gateway Pass",entityId:id,entityReference:gp.pass_number,before:{status:gp.status,next_role:gp.next_role},after:{status:"Submitted",next_role:"gateway_approval"},note});
+      await notifyRole(tx,"Procurement Manager","Gateway pass awaiting approval",`${gp.pass_number} is ready for review and approval.`,"Gateway Pass",id,"Gateway Pass Review","High");
+      await notifyRole(tx,"Logistics Officer","Gateway pass awaiting approval",`${gp.pass_number} is ready for review and approval.`,"Gateway Pass",id,"Gateway Pass Review & Approval","High");
+      return {id,status:"Submitted",nextRole:"gateway_approval"};
+    });
   }
 
   if(action==="gateway-review"){
-    assertRole(user,["Procurement Manager","Admin"]);const id=positiveId(payload.gatewayPassId,"gateway pass");const decision=clean(payload.decision,30);if(!["forward","return","reject"].includes(decision))throw new Error("Choose a valid review decision.");const note=reason(payload.note);
-    return sql.begin(async tx=>{const gp=(await tx<any[]>`SELECT * FROM gateway_passes WHERE id=${id} FOR UPDATE`)[0];if(!gp)throw new Error("Gateway pass not found.");if(!["Submitted","Pending Procurement Manager / Approver Review"].includes(String(gp.status||"")))throw new Error("This gateway pass is not awaiting Procurement review.");const status=decision==="forward"?"Pending Procurement Manager / Approver Review":decision==="return"?"Returned for Correction":"Rejected";const next=decision==="forward"?"approver":decision==="return"?"facility_manager":null;await tx`UPDATE gateway_passes SET status=${status},next_role=${next},reviewed_by_user_id=${user.id},reviewed_at=NOW(),procurement_review_note=${note},rejected_at=${decision==="reject"?new Date().toISOString():gp.rejected_at},rejected_by_user_id=${decision==="reject"?user.id:gp.rejected_by_user_id},rejection_reason=${decision==="reject"?note:gp.rejection_reason},updated_at=NOW() WHERE id=${id}`;await tx`INSERT INTO gateway_pass_approvals (gateway_pass_id,approver_user_id,approver_role,decision,note,created_at) VALUES (${id},${user.id},${user.role},${decision},${note},NOW())`;await workflow(tx,user,"Gateway Pass",id,`Procurement ${decision}`,status,note);await evidence(tx,user,{action:`Gateway Pass Procurement ${decision}`,entityType:"Gateway Pass",entityId:id,entityReference:gp.pass_number,before:{status:gp.status},after:{status,next_role:next},note});if(decision==="forward")await notifyRole(tx,"Approver","Gateway pass requires final approval",`${gp.pass_number} passed Procurement review.`,"Gateway Pass",id,"Gateway Pass Approval","High");else if(gp.facility_manager_user_id)await notifyUser(tx,Number(gp.facility_manager_user_id),`Gateway pass ${status}`,`${gp.pass_number}: ${note}`,"Gateway Pass",id,"Gateway Pass","High");return {id,status};});
+    assertRole(user,["Procurement Manager","Logistics Officer","Admin"]);const id=positiveId(payload.gatewayPassId,"gateway pass");const rawDecision=clean(payload.decision,30);const decision=rawDecision==="forward"?"approve":rawDecision;if(!["approve","return","reject"].includes(decision))throw new Error("Choose a valid gateway pass decision.");const note=reason(payload.note);
+    return sql.begin(async tx=>{
+      const gp=(await tx<any[]>`SELECT * FROM gateway_passes WHERE id=${id} FOR UPDATE`)[0];
+      if(!gp)throw new Error("Gateway pass not found.");
+      if(!["Submitted","Pending Procurement Manager / Approver Review"].includes(String(gp.status||"")))throw new Error("This gateway pass has already been decided or is not awaiting approval.");
+      const now=new Date().toISOString();
+      const status=decision==="approve"?"Approved":decision==="return"?"Returned for Correction":"Rejected";
+      const next="facility_manager";
+      await tx`
+        UPDATE gateway_passes
+        SET status=${status},next_role=${next},reviewed_by_user_id=${user.id},reviewed_at=${now},procurement_review_note=${note},
+            approved_at=${decision==="approve"?now:gp.approved_at},
+            approved_by_user_id=${decision==="approve"?user.id:gp.approved_by_user_id},
+            approved_by_role=${decision==="approve"?user.role:gp.approved_by_role},
+            approval_note=${decision==="approve"?note:gp.approval_note},
+            rejected_at=${decision==="reject"?now:gp.rejected_at},
+            rejected_by_user_id=${decision==="reject"?user.id:gp.rejected_by_user_id},
+            rejection_reason=${decision==="reject"?note:gp.rejection_reason},
+            updated_at=${now}
+        WHERE id=${id}
+      `;
+      await tx`INSERT INTO gateway_pass_approvals (gateway_pass_id,approver_user_id,approver_role,decision,note,created_at) VALUES (${id},${user.id},${user.role},${decision},${note},${now})`;
+      await workflow(tx,user,"Gateway Pass",id,`Gateway Pass ${decision}`,status,note);
+      await evidence(tx,user,{action:`Gateway Pass ${decision}`,entityType:"Gateway Pass",entityId:id,entityReference:gp.pass_number,before:{status:gp.status,next_role:gp.next_role},after:{status,next_role:next,approved_by_role:decision==="approve"?user.role:null,approved_at:decision==="approve"?now:null},note});
+      if(gp.facility_manager_user_id)await notifyUser(tx,Number(gp.facility_manager_user_id),`Gateway pass ${status}`,decision==="approve"?`${gp.pass_number} was approved by ${user.role}. You can now open, print, or download the approved PDF.`:`${gp.pass_number}: ${note}`,"Gateway Pass",id,"Gateway Pass",decision==="approve"?"High":"High");
+      if(decision==="approve"){
+        await notifyRole(tx,"Approver","Gateway pass approved",`${gp.pass_number} was approved by ${user.role} and is available in Approved Gateway Passes.`,"Gateway Pass",id,"Approved Gateway Passes","Normal");
+        await notifyRole(tx,"Auditor","Gateway pass approved",`${gp.pass_number} was approved by ${user.role}.`,"Gateway Pass",id,"Gateway Pass Audit","Normal");
+      }
+      return {id,status,approvedByRole:decision==="approve"?user.role:null,approvedAt:decision==="approve"?now:null};
+    });
   }
 
   if(action==="gateway-generate"){

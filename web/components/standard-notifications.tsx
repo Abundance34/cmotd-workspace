@@ -25,7 +25,7 @@ const ROLE_SECTIONS: Record<string, string[]> = {
   ],
   "Logistics Officer": [
     "Logistics Dashboard", "PO Delivery Handover", "Delivery Tracking", "Receiving Slips", "Delivery Exceptions & Returns",
-    "Gateway Pass Coordination", "Logistics Documents", "My Activity History", "Settings",
+    "Gateway Pass Review & Approval", "Gateway Pass Coordination", "Logistics Documents", "My Activity History", "Settings",
   ],
   Admin: [
     "Admin Control Centre", "Action & Exception Centre", "Workflow Intervention Centre", "User Management",
@@ -101,6 +101,7 @@ function inferTarget(role: string, notification: any) {
   }
 
   if (role === "Logistics Officer") {
+    if (/gateway/.test(text) && (/awaiting approval|review and approval|ready for review|requires review|approve gateway/.test(text) || String(notification?.section_target || "") === "Gateway Pass Review & Approval")) return "Gateway Pass Review & Approval";
     if (/gateway/.test(text)) return "Gateway Pass Coordination";
     if (/receiv|proof of delivery|delivery note/.test(text)) return "Receiving Slips";
     if (/exception|return/.test(text)) return "Delivery Exceptions & Returns";

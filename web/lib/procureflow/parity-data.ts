@@ -75,14 +75,14 @@ export async function getParityData(user: CurrentUser): Promise<ParityData> {
   const vendors = await sql<any[]>`SELECT id,name,category,phone,email,address,tax_id,rating,completed_orders,total_spend,average_delivery_time,rejection_count,last_purchase_date,status,created_at,updated_at FROM vendors ORDER BY COALESCE(updated_at,created_at) DESC,name LIMIT 500`;
 
   const gateways = user.role === "Facility Manager"
-    ? await sql<any[]>`SELECT gp.*, fm.full_name facility_manager_name FROM gateway_passes gp LEFT JOIN users fm ON fm.id=gp.facility_manager_user_id WHERE gp.facility_manager_user_id=${user.id} ORDER BY COALESCE(gp.updated_at,gp.created_at) DESC LIMIT 300`
+    ? await sql<any[]>`SELECT gp.*, fm.full_name facility_manager_name, rv.full_name reviewed_by_name, av.full_name approved_by_name FROM gateway_passes gp LEFT JOIN users fm ON fm.id=gp.facility_manager_user_id LEFT JOIN users rv ON rv.id=gp.reviewed_by_user_id LEFT JOIN users av ON av.id=gp.approved_by_user_id WHERE gp.facility_manager_user_id=${user.id} ORDER BY COALESCE(gp.updated_at,gp.created_at) DESC LIMIT 300`
     : await sql<any[]>`SELECT gp.*, fm.full_name facility_manager_name, rv.full_name reviewed_by_name, av.full_name approved_by_name FROM gateway_passes gp LEFT JOIN users fm ON fm.id=gp.facility_manager_user_id LEFT JOIN users rv ON rv.id=gp.reviewed_by_user_id LEFT JOIN users av ON av.id=gp.approved_by_user_id ORDER BY COALESCE(gp.updated_at,gp.created_at) DESC LIMIT 400`;
   const gatewayIds = gateways.map((row:any)=>Number(row.id)).filter(Boolean);
   const gatewayItems = gatewayIds.length
     ? await sql<any[]>`SELECT * FROM gateway_pass_items WHERE gateway_pass_id IN ${sql(gatewayIds)} ORDER BY gateway_pass_id,id`
     : [];
-  const gatewayReviewQueue = (user.role === "Procurement Manager" || user.role === "Admin")
-    ? gateways.filter((row:any) => ["Submitted","Pending Procurement Manager / Approver Review"].includes(String(row.status||"")) && [null,"procurement_manager","Procurement Manager"].includes(row.next_role))
+  const gatewayReviewQueue = (user.role === "Procurement Manager" || user.role === "Logistics Officer" || user.role === "Admin")
+    ? gateways.filter((row:any) => ["Submitted","Pending Procurement Manager / Approver Review"].includes(String(row.status||"")))
     : [];
 
   const threads = user.role === "Facility Manager"

@@ -48,6 +48,7 @@ export type GatewayPassPdfInput = {
   procurementReviewNote: string | null;
   approvedByName: string | null;
   approvedByRole: string | null;
+  approvedAt: string | null;
   approvalNote: string | null;
   securityCheckpoint: string | null;
   securityOfficerName: string | null;
@@ -157,9 +158,9 @@ function buildPage(input: GatewayPassPdfInput, pageIndex: number, pageCount: num
     strokeRect(34,boxTop-boxH,527,boxH,border);
     line(210,boxTop-boxH,210,boxTop,border); line(385,boxTop-boxH,385,boxTop,border);
     labelValue(48,boxTop-34,145,"Utility / Facility Head",input.facilityManagerName||"-");
-    labelValue(224,boxTop-34,145,"Procurement review",input.reviewedByName||"Pending / not recorded");
-    labelValue(399,boxTop-34,145,"Approver / MD",input.approvedByName||input.approvedByRole||"Pending / not recorded");
-    txt(48,boxTop-56,6.8,"Approval note",true,slate); fitText(101,boxTop-56,444,7.3,input.approvalNote||input.procurementReviewNote||"-",false,dark);
+    labelValue(224,boxTop-34,145,"Approved by",input.approvedByName||"Pending / not recorded");
+    labelValue(399,boxTop-34,145,"Approval date",input.approvedAt||"-");
+    txt(48,boxTop-56,6.8,"Approval",true,slate); fitText(91,boxTop-56,454,7.3,[input.approvedByRole,input.approvalNote||input.procurementReviewNote].filter(Boolean).join(" - ")||"-",false,dark);
 
     const securityY=boxTop-boxH-52;
     txt(34,securityY+36,10,"SECURITY / LOGISTICS CHECKPOINT",true,navy);
