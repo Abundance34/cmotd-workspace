@@ -10,7 +10,7 @@ const REVIEWABLE = new Set([
   "Reviewed by Procurement",
 ]);
 
-export type ProcurementReviewAction = "review" | "return" | "submit_approval";
+export type ProcurementReviewAction = "review" | "return" | "reject" | "submit_approval";
 
 type RequestRecord = {
   id: number;
@@ -42,6 +42,15 @@ function actionPolicy(action: ProcurementReviewAction, note: string) {
       defaultNote: note.trim(),
     };
   }
+  if (action === "reject") {
+    if (!note.trim()) throw new Error("A rejection reason is required before rejecting a request.");
+    return {
+      status: "Rejected",
+      nextRole: null,
+      event: "Rejected by Procurement",
+      defaultNote: note.trim(),
+    };
+  }
   return {
     status: "Submitted for Approval",
     nextRole: "approver",
@@ -60,7 +69,7 @@ export async function transitionProcurementRequest(
     throw new Error("Only Procurement Manager or Admin can perform this review action.");
   }
   if (!Number.isInteger(requestId) || requestId <= 0) throw new Error("A valid request is required.");
-  if (!["review", "return", "submit_approval"].includes(action)) throw new Error("Unsupported procurement action.");
+  if (!["review", "return", "reject", "submit_approval"].includes(action)) throw new Error("Unsupported procurement action.");
 
   const policy = actionPolicy(action, note);
   const sql = db();
@@ -159,18 +168,23 @@ export async function transitionProcurementRequest(
       source: "nextjs",
     });
 
-    if (request.facility_manager_user_id) {
+    const requestOwnerId = request.facility_manager_user_id || request.requested_by;
+    if (requestOwnerId) {
       const title = action === "return"
         ? "Request returned for correction"
-        : action === "submit_approval"
-          ? "Request submitted for final approval"
-          : "Request reviewed by Procurement";
+        : action === "reject"
+          ? "Request rejected by Procurement"
+          : action === "submit_approval"
+            ? "Request submitted for final approval"
+            : "Request reviewed by Procurement";
       const message = action === "return"
         ? `${request.request_no} was returned by Procurement for correction. Reason: ${finalNote}`
-        : action === "submit_approval"
-          ? `${request.request_no} was submitted by Procurement to Approver / MD.`
-          : `${request.request_no} was reviewed by the Procurement Manager.`;
-      const sectionTarget = action === "return" ? "Returned Requests" : "My Activity History";
+        : action === "reject"
+          ? `${request.request_no} was rejected by Procurement. Reason: ${finalNote}`
+          : action === "submit_approval"
+            ? `${request.request_no} was submitted by Procurement to Approver / MD.`
+            : `${request.request_no} was reviewed by the Procurement Manager.`;
+      const sectionTarget = action === "return" ? "Returned Requests" : action === "reject" ? "My Draft Requests" : "My Activity History";
 
       await tx`
         INSERT INTO notifications (
@@ -178,10 +192,10 @@ export async function transitionProcurementRequest(
           is_read, popup_shown, importance, delivery_channel,
           push_sent, email_sent, action_label, section_target, created_at
         ) VALUES (
-          ${request.facility_manager_user_id}, NULL, ${title}, ${message},
+          ${requestOwnerId}, NULL, ${title}, ${message},
           'Purchase Request', ${requestId}, FALSE, FALSE,
-          ${action === "return" ? "High" : "Normal"}, 'in_app', FALSE, FALSE,
-          ${action === "return" ? "Open Returned Requests" : "Open Request"}, ${sectionTarget}, ${now}
+          ${action === "return" || action === "reject" ? "High" : "Normal"}, 'in_app', FALSE, FALSE,
+          ${action === "return" ? "Open Returned Requests" : action === "reject" ? "Open Request History" : "Open Request"}, ${sectionTarget}, ${now}
         )
       `;
     }

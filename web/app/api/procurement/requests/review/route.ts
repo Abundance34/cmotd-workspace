@@ -26,7 +26,7 @@ export async function POST(request: Request) {
     if (!Number.isInteger(requestId) || requestId <= 0) {
       return NextResponse.json({ error: "A valid requestId is required." }, { status: 400 });
     }
-    if (!["review", "return", "submit_approval"].includes(action)) {
+    if (!["review", "return", "reject", "submit_approval"].includes(action)) {
       return NextResponse.json({ error: "A valid procurement action is required." }, { status: 400 });
     }
 
