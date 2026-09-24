@@ -74,6 +74,39 @@ export async function runParityAction(user:CurrentUser, action:string, payload:a
       await workflow(tx,user,"Gateway Pass",id,"Gateway Pass Draft Created","Draft",purpose);await evidence(tx,user,{action:"Gateway Pass Created",entityType:"Gateway Pass",entityId:id,entityReference:pass,after:{department,movement_type:movementType,status:"Draft",item_count:items.length},note:purpose});return {gatewayPassId:id,passNumber:pass};});
   }
 
+  if(action==="gateway-update"){
+    assertRole(user,["Facility Manager","Admin"]);const id=positiveId(payload.gatewayPassId,"gateway pass");const department=clean(payload.department,180);const movementType=clean(payload.movementType,120);const purpose=reason(payload.purpose);const items=Array.isArray(payload.items)?payload.items:[];if(!department||!movementType)throw new Error("Department and movement type are required.");if(!items.length)throw new Error("Add at least one item to the gateway pass.");
+    return sql.begin(async tx=>{
+      const gp=(await tx<any[]>`SELECT * FROM gateway_passes WHERE id=${id} FOR UPDATE`)[0];
+      if(!gp)throw new Error("Gateway pass not found.");
+      if(user.role!=="Admin"&&Number(gp.facility_manager_user_id)!==user.id)throw new Error("You can edit only your own gateway passes.");
+      const currentStatus=String(gp.status||"");
+      if(!["Draft","Returned for Correction"].includes(currentStatus))throw new Error("Only a draft or a gateway pass returned for correction can be edited.");
+      const validItems=items.slice(0,100).filter((item:any)=>clean(item?.description,500));
+      if(!validItems.length)throw new Error("Add at least one item with a description to the gateway pass.");
+      const now=new Date().toISOString();
+      await tx`
+        UPDATE gateway_passes
+        SET department=${department},movement_type=${movementType},purpose=${purpose},
+            origin_location=${clean(payload.originLocation,250)||null},destination=${clean(payload.destination,250)||null},
+            expected_movement_date=${clean(payload.expectedMovementDate,20)||null},expected_return_date=${clean(payload.expectedReturnDate,20)||null},
+            vehicle_number=${clean(payload.vehicleNumber,80)||null},driver_name=${clean(payload.driverName,160)||null},
+            driver_phone=${clean(payload.driverPhone,80)||null},receiver_name=${clean(payload.receiverName,160)||null},
+            receiver_organization=${clean(payload.receiverOrganization,180)||null},updated_at=${now}
+        WHERE id=${id}
+      `;
+      await tx`DELETE FROM gateway_pass_items WHERE gateway_pass_id=${id}`;
+      for(const item of validItems){
+        const desc=clean(item.description,500);
+        await tx`INSERT INTO gateway_pass_items (gateway_pass_id,item_description,item_category,quantity,unit_of_measure,quality_condition,estimated_value,serial_number,asset_tag,fragility_status,handling_instruction,remarks,created_at,colour) VALUES (${id},${desc},${clean(item.category,120)||null},${money(item.quantity||1,"quantity")},${clean(item.unit,60)||'Unit'},${clean(item.condition,80)||'Good'},${money(item.estimatedValue||0,"estimated value")},${clean(item.serialNumber,120)||null},${clean(item.assetTag,120)||null},${clean(item.fragility,80)||'Normal'},${clean(item.handlingInstruction,400)||null},${clean(item.remarks,400)||null},${now},${clean(item.colour,80)||null})`;
+      }
+      const event=currentStatus==="Returned for Correction"?"Gateway Pass Corrections Saved":"Gateway Pass Draft Updated";
+      await workflow(tx,user,"Gateway Pass",id,event,currentStatus,currentStatus==="Returned for Correction"?"Returned gateway pass corrected and ready for resubmission":"Gateway pass draft updated before submission");
+      await evidence(tx,user,{action:event,entityType:"Gateway Pass",entityId:id,entityReference:gp.pass_number,before:{status:currentStatus,department:gp.department,movement_type:gp.movement_type,item_count:null},after:{status:currentStatus,department,movement_type:movementType,item_count:validItems.length},note:currentStatus==="Returned for Correction"?"Facility Manager saved corrections before resubmission":"Facility Manager updated gateway pass draft"});
+      return {id,status:currentStatus,passNumber:gp.pass_number,itemCount:validItems.length};
+    });
+  }
+
   if(action==="gateway-submit"){
     assertRole(user,["Facility Manager","Admin"]);const id=positiveId(payload.gatewayPassId,"gateway pass");
     return sql.begin(async tx=>{
