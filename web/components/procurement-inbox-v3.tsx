@@ -2,11 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, CornerUpLeft, Filter, PackageSearch, SearchCheck, Send, ShieldCheck, UserRound } from "lucide-react";
+import { CheckCircle2, CornerUpLeft, Filter, PackageSearch, SearchCheck, Send, ShieldCheck, UserRound, XCircle } from "lucide-react";
 import type { ProcurementRequestRow } from "@/lib/procureflow/procurement-data";
 import { requestConfirmation } from "@/components/in-app-confirmation";
 
-type ActionName = "review" | "sourcing" | "return" | "submit_approval" | "approve_low_value";
+type ActionName = "review" | "sourcing" | "return" | "reject" | "submit_approval" | "approve_low_value";
 type SourceFilter = "All" | "Facility" | "ICT";
 
 function money(value: unknown) {
@@ -79,8 +79,8 @@ export function ProcurementInboxV3({ rows, approvalLimit = 0 }: { rows: Procurem
       setMessage({ type: "error", text: `${selected.requestNo} is within the ${money(approvalLimit)} Procurement Manager approval limit. Use Approve Low-Value Request instead.` });
       return;
     }
-    if (action === "return" && note.trim().length < 4) {
-      setMessage({ type: "error", text: "Enter the correction reason before returning this request." });
+    if ((action === "return" || action === "reject") && note.trim().length < 4) {
+      setMessage({ type: "error", text: action === "reject" ? "Enter the rejection reason before rejecting this request." : "Enter the correction reason before returning this request." });
       return;
     }
     const origin = sourceFor(selected);
@@ -92,7 +92,9 @@ export function ProcurementInboxV3({ rows, approvalLimit = 0 }: { rows: Procurem
           ? { title: "Start vendor quote collection?", detail: `${selected.requestNo} will move into Vendor Quote Collection and a sourcing task will be created.`, label: "Start Sourcing", tone: "primary" as const }
           : action === "return"
             ? { title: `Return request to ${origin}?`, detail: `${selected.requestNo} will be returned with the correction reason entered below.`, label: "Return Request", tone: "danger" as const }
-            : { title: lowValue ? "Mark this low-value request as reviewed?" : "Mark request as reviewed?", detail: lowValue ? `${selected.requestNo} will be recorded as reviewed. You may also approve it directly while it remains within your low-value authority.` : `${selected.requestNo} will be recorded as reviewed by Procurement.`, label: "Mark Reviewed", tone: "primary" as const };
+            : action === "reject"
+              ? { title: "Reject this purchase request?", detail: `${selected.requestNo} will be rejected and removed from Procurement's active approval queue. The requester will be notified with the reason entered below.`, label: "Reject Request", tone: "danger" as const }
+              : { title: lowValue ? "Mark this low-value request as reviewed?" : "Mark request as reviewed?", detail: lowValue ? `${selected.requestNo} will be recorded as reviewed. You may also approve it directly while it remains within your low-value authority.` : `${selected.requestNo} will be recorded as reviewed by Procurement.`, label: "Mark Reviewed", tone: "primary" as const };
 
     const confirmed = await requestConfirmation({
       eyebrow: `${origin.toUpperCase()} INBOX`,
@@ -157,12 +159,13 @@ export function ProcurementInboxV3({ rows, approvalLimit = 0 }: { rows: Procurem
       <div className="facility-detail-block"><div className="facility-detail-block-title"><strong>Line items</strong><span>{detail.items?.length || 0} item(s)</span></div><div className="table-wrap"><table className="data-table compact-table"><thead><tr><th>Item / Service</th><th>Qty</th><th>Unit price</th><th>Total</th><th>Category</th><th>Suggested vendor</th></tr></thead><tbody>{(detail.items || []).map((item: any) => <tr key={item.id}><td><strong>{item.item_name}</strong><small>{item.description && item.description !== item.item_name ? item.description : ""}</small></td><td>{item.quantity}</td><td>{money(item.unit_price)}</td><td>{money(item.total)}</td><td>{item.category || "—"}</td><td>{item.suggested_vendor || "—"}</td></tr>)}</tbody></table></div></div>
       <div className="facility-detail-block"><div className="facility-detail-block-title"><strong>Payment recipient readiness</strong><span>Masked operational view</span></div><div className="facility-payee-summary"><span>Recipient known<b>{detail.payee?.recipient_known ? "Yes" : "No"}</b></span><span>Payee<b>{detail.payee?.payee_name_masked || "Pending"}</b></span><span>Bank<b>{detail.payee?.bank_name_masked || "Pending"}</b></span><span>Account<b>{detail.payee?.account_number_masked || "Pending"}</b></span><span>Verification<b>{detail.payee?.verification_status || "Pending"}</b></span></div></div>
       <div className={lowValue ? "approval-policy-note" : "approval-policy-note high-route"}><ShieldCheck size={17}/><div><strong>{lowValue ? "Procurement Manager low-value authority" : "Approver / MD authority required"}</strong><span>{lowValue ? `${money(selected.estimatedAmount)} is within the configured ${money(approvalLimit)} limit. You may approve it here immediately or mark it reviewed first.` : `${money(selected.estimatedAmount)} exceeds the configured ${money(approvalLimit)} limit and may be submitted to Approver / MD after Procurement review.`}</span></div></div>
-      <label className="review-note"><span>Procurement review comment / correction reason</span><textarea rows={3} value={note} onChange={(event) => setNote(event.target.value)} placeholder={`Add context for this ${origin} request. A reason is mandatory when returning for correction.`}/></label>
+      <label className="review-note"><span>Procurement review comment / correction reason</span><textarea rows={3} value={note} onChange={(event) => setNote(event.target.value)} placeholder={`Add context for this ${origin} request. A reason is mandatory when returning or rejecting.`}/></label>
       <div className="procurement-review-actions">
         {lowValue ? <button type="button" className="review-action reviewed" disabled={Boolean(busyAction)} onClick={() => void requestAction("approve_low_value")}><CheckCircle2 size={16}/>{busyAction === "approve_low_value" ? "Approving…" : "Approve Low-Value Request"}</button> : null}
         <button type="button" className="review-action reviewed" disabled={Boolean(busyAction)} onClick={() => void requestAction("review")}><CheckCircle2 size={16}/>{busyAction === "review" ? "Updating…" : "Mark Reviewed"}</button>
         <button type="button" className="review-action sourcing" disabled={Boolean(busyAction)} onClick={() => void requestAction("sourcing")}><SearchCheck size={16}/>{busyAction === "sourcing" ? "Opening…" : "Requires Sourcing"}</button>
         <button type="button" className="review-action return" disabled={Boolean(busyAction)} onClick={() => void requestAction("return")}><CornerUpLeft size={16}/>{busyAction === "return" ? "Returning…" : `Return to ${origin}`}</button>
+        <button type="button" className="review-action reject" disabled={Boolean(busyAction)} onClick={() => void requestAction("reject")}><XCircle size={16}/>{busyAction === "reject" ? "Rejecting…" : "Reject Request"}</button>
         {!lowValue ? <button type="button" className="review-action approval" disabled={Boolean(busyAction)} onClick={() => void requestAction("submit_approval")}><Send size={16}/>{busyAction === "submit_approval" ? "Submitting…" : "Submit to Approver / MD"}</button> : null}
       </div>
       <div className="facility-detail-block"><div className="facility-detail-block-title"><strong>Workflow history</strong><span>{detail.workflow?.length || 0} event(s)</span></div><div className="facility-timeline">{(detail.workflow || []).map((event: any) => <div key={event.id}><span/><div><strong>{event.event}</strong><small>{event.user_name || event.user_role || "System"} · {event.status || ""} · {dateTime(event.created_at)}</small><p>{event.note || ""}</p></div></div>)}</div></div>
