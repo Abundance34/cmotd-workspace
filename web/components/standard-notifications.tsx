@@ -6,12 +6,12 @@ import { useRouter } from "next/navigation";
 const ROLE_SECTIONS: Record<string, string[]> = {
   "Facility Manager": [
     "Utility / Facility Dashboard", "Create Request Draft", "My Draft Requests", "Submit to Procurement Manager",
-    "Import Documents", "Gateway Pass", "Shared Thread with Procurement Manager", "Returned Requests",
-    "Approved / Accepted Requests", "Income", "My Activity History", "Settings",
+    "Vendor Directory", "Suggest Vendor", "My Vendor Suggestions", "Import Documents", "Gateway Pass",
+    "Shared Thread with Procurement Manager", "Returned Requests", "Approved / Accepted Requests", "Income", "My Activity History", "Settings",
   ],
   "Procurement Manager": [
     "Operations Dashboard", "Purchase Requests", "Low-Value Approvals", "Utility Head / Facility Head Inbox",
-    "Import Center", "Sourcing", "Vendor Quotes", "Vendor Recommendation", "Commercial PO Management", "Vendors",
+    "Import Center", "Sourcing & Quotations", "Vendor Recommendations", "Commercial PO Management", "Vendor Directory",
     "Gateway Pass Review", "Post-Payment Closure", "Availability / Away Notice", "Procurement Documents",
     "Procurement Reports", "Income", "My Activity History", "Settings",
   ],
@@ -51,6 +51,8 @@ function inferTarget(role: string, notification: any) {
   const text = haystack(notification);
 
   if (role === "Facility Manager") {
+    if (/vendor suggestion|vendor nomination|more information|required for vendor|suggestion approved|suggestion rejected/.test(text)) return "My Vendor Suggestions";
+    if (/vendor directory|approved vendor|supplier/.test(text)) return "Vendor Directory";
     if (/return|correction|resubmit/.test(text)) return "Returned Requests";
     if (/draft/.test(text)) return "My Draft Requests";
     if (/gateway/.test(text)) return "Gateway Pass";
@@ -62,16 +64,16 @@ function inferTarget(role: string, notification: any) {
   }
 
   if (role === "Procurement Manager") {
+    if (/vendor nomination|vendor suggestion/.test(text)) return "Vendor Directory";
     if (/facility|utility head|handoff|pending procurement review|sent for procurement review/.test(text)) return "Utility Head / Facility Head Inbox";
     if (/low[- ]?value/.test(text)) return "Low-Value Approvals";
-    if (/quote/.test(text)) return "Vendor Quotes";
-    if (/recommend/.test(text)) return "Vendor Recommendation";
-    if (/sourc/.test(text)) return "Sourcing";
+    if (/recommend/.test(text)) return "Vendor Recommendations";
+    if (/quote|sourc/.test(text)) return "Sourcing & Quotations";
     if (/purchase order|\bpo\b/.test(text)) return "Commercial PO Management";
     if (/gateway/.test(text)) return "Gateway Pass Review";
     if (/closure|close|completed|paid/.test(text)) return "Post-Payment Closure";
     if (/document|attachment|receipt/.test(text)) return "Procurement Documents";
-    if (/vendor/.test(text)) return "Vendors";
+    if (/vendor|supplier/.test(text)) return "Vendor Directory";
     if (/income|budget/.test(text)) return "Income";
     return "Purchase Requests";
   }
