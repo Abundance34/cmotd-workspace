@@ -28,10 +28,9 @@ export async function addVendorQuote(user: CurrentUser, input: AddVendorQuoteInp
   if (!Number.isInteger(sourcingTaskId) || sourcingTaskId <= 0) throw new Error("A valid sourcing task is required.");
 
   const vendorId = input?.vendorId == null || Number(input.vendorId) <= 0 ? null : Number(input.vendorId);
-  const manualVendor = clean(input?.manualVendor, 250);
   const quotedAmount = Number(input?.quotedAmount);
   const deliveryDays = Number(input?.deliveryDays ?? 0);
-  const vendorRating = Number(input?.vendorRating ?? 3);
+  let vendorRating = 3;
   const currency = clean(input?.currency || "NGN", 12).toUpperCase();
   const paymentTerms = clean(input?.paymentTerms, 1000);
   const warranty = clean(input?.warranty, 1000);
@@ -39,7 +38,7 @@ export async function addVendorQuote(user: CurrentUser, input: AddVendorQuoteInp
 
   if (!Number.isFinite(quotedAmount) || quotedAmount <= 0) throw new Error("Quoted amount must be greater than zero.");
   if (!Number.isFinite(deliveryDays) || deliveryDays < 0) throw new Error("Delivery days cannot be negative.");
-  if (!Number.isInteger(vendorRating) || vendorRating < 1 || vendorRating > 5) throw new Error("Vendor rating must be between 1 and 5.");
+  if (!vendorId) throw new Error("Select an approved active vendor from the Vendor Directory. Manual unregistered vendors are no longer accepted in sourcing.");
   if (!currency) throw new Error("Currency is required.");
 
   const sql = db();
@@ -78,20 +77,18 @@ export async function addVendorQuote(user: CurrentUser, input: AddVendorQuoteInp
     }
 
     let finalVendorId: number | null = null;
-    let finalVendorName = manualVendor;
-    if (vendorId) {
-      const vendors = await tx<{ id: number; name: string }[]>`
-        SELECT id, name
-        FROM vendors
-        WHERE id = ${vendorId}
-          AND COALESCE(status, 'Active') = 'Active'
-        LIMIT 1
-      `;
-      if (!vendors[0]) throw new Error("The selected vendor is unavailable or inactive.");
-      finalVendorId = Number(vendors[0].id);
-      if (!finalVendorName) finalVendorName = vendors[0].name;
-    }
-    if (!finalVendorName) throw new Error("Select a registered vendor or enter a manual vendor name.");
+    let finalVendorName = "";
+    const vendors = await tx<{ id: number; name: string; rating: string | number | null }[]>`
+      SELECT id, name, rating
+      FROM vendors
+      WHERE id = ${vendorId}
+        AND COALESCE(status, 'Active') = 'Active'
+      LIMIT 1
+    `;
+    if (!vendors[0]) throw new Error("The selected vendor is unavailable, archived, or inactive.");
+    finalVendorId = Number(vendors[0].id);
+    finalVendorName = vendors[0].name;
+    vendorRating = Math.max(1, Math.min(5, Number(vendors[0].rating || 3)));
 
     const now = new Date().toISOString();
     const inserted = await tx<{ id: number }[]>`
