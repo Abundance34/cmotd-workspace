@@ -42,6 +42,26 @@ function VendorProfile({ vendor, data, role, onEdit, onDelete }: { vendor: any; 
   const receiving = data.vendorReceiving.filter((row: any) => Number(row.vendor_id) === Number(vendor.id));
   const docs = data.documents.filter((row: any) => row.source_type === "Vendor Document" && Number(row.entity_id) === Number(vendor.id));
   const canManage = ["Procurement Manager", "Admin"].includes(role);
+  const router = useRouter();
+  const activeOperations = data.vendorOperationalCategories.filter((x: any) => x.status === "Active");
+  const activeServices = data.vendorServiceCategories.filter((x: any) => x.status === "Active");
+  const [operationId, setOperationId] = useState(String(activeOperations[0]?.id || ""));
+  const [serviceId, setServiceId] = useState(String(activeServices[0]?.id || ""));
+  const [classBusy, setClassBusy] = useState(false);
+  const [classMsg, setClassMsg] = useState<{type:"success"|"error";text:string}|null>(null);
+  async function addClassification() {
+    if (!operationId || !serviceId) return setClassMsg({ type: "error", text: "Choose both a company operation and service category." });
+    setClassBusy(true); setClassMsg(null);
+    try { await post("vendor-category-link", { vendorId: vendor.id, operationalCategoryId: Number(operationId), serviceCategoryId: Number(serviceId), isPrimary: links.length === 0 }); setClassMsg({ type: "success", text: "Vendor classification added." }); router.refresh(); }
+    catch (e) { setClassMsg({ type: "error", text: e instanceof Error ? e.message : "Unable to add classification." }); }
+    finally { setClassBusy(false); }
+  }
+  async function removeClassification(linkId: number) {
+    setClassBusy(true); setClassMsg(null);
+    try { await post("vendor-category-unlink", { linkId }); setClassMsg({ type: "success", text: "Vendor classification removed." }); router.refresh(); }
+    catch (e) { setClassMsg({ type: "error", text: e instanceof Error ? e.message : "Unable to remove classification." }); }
+    finally { setClassBusy(false); }
+  }
   const operations = Array.from(new Set(links.map((x: any) => x.operational_category_name))).join(", ") || "Unclassified";
   const services = Array.from(new Set(links.map((x: any) => x.service_category_name))).join(", ") || vendor.category || "Unclassified";
 
@@ -69,8 +89,9 @@ function VendorProfile({ vendor, data, role, onEdit, onDelete }: { vendor: any; 
     </section>
 
     <section>
-      <div className="parity-section-head"><div><h3>Company operation & service classifications</h3><p>A supplier may support more than one company activity.</p></div><span>{links.length} classification(s)</span></div>
-      {links.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Company operation</th><th>Service category</th><th>Primary</th><th>Added</th></tr></thead><tbody>{links.map((link: any) => <tr key={link.id}><td>{link.operational_category_name}</td><td>{link.service_category_name}</td><td>{link.is_primary ? "Yes" : "No"}</td><td>{dateText(link.created_at)}</td></tr>)}</tbody></table></div> : <Empty text="No classification assigned yet."/>}
+      <div className="parity-section-head"><div><h3>Company operation & service classifications</h3><p>A supplier may support more than one company activity and service combination.</p></div><span>{links.length} classification(s)</span></div>
+      {links.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Company operation</th><th>Service category</th><th>Primary</th><th>Added</th>{canManage ? <th>Action</th> : null}</tr></thead><tbody>{links.map((link: any) => <tr key={link.id}><td>{link.operational_category_name}</td><td>{link.service_category_name}</td><td>{link.is_primary ? "Yes" : "No"}</td><td>{dateText(link.created_at)}</td>{canManage ? <td><button className="parity-danger" disabled={classBusy} onClick={() => void removeClassification(Number(link.id))}>Remove</button></td> : null}</tr>)}</tbody></table></div> : <Empty text="No classification assigned yet."/>}
+      {canManage ? <div className="parity-form-card"><div className="parity-section-head"><div><h3>Add another classification</h3><p>Use this when the same vendor serves another CMOTD operation or supplies another type of service.</p></div></div><div className="parity-form-grid"><label><span>Company operation</span><select value={operationId} onChange={(e) => setOperationId(e.target.value)}>{activeOperations.map((x: any) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label><label><span>Service category</span><select value={serviceId} onChange={(e) => setServiceId(e.target.value)}>{activeServices.map((x: any) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label></div><button className="parity-primary" disabled={classBusy} onClick={() => void addClassification()}>{classBusy ? "Saving…" : "Add Classification"}</button><Message value={classMsg}/></div> : null}
     </section>
 
     {role === "Facility Manager" ? <section className="parity-info"><ShieldCheck size={17}/><div><strong>Read-only Facility view</strong><span>Facility can identify approved suppliers and suggest new vendors. Procurement retains sourcing, quote comparison, award, vendor master and payment authority.</span></div></section> : <>
