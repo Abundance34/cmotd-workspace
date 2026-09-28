@@ -34,13 +34,11 @@ export function ProcurementSourcing({ tasks, vendors }: { tasks: ProcurementSour
   const router = useRouter();
   const [selectedId, setSelectedId] = useState<number | null>(tasks[0]?.id ?? null);
   const [vendorId, setVendorId] = useState("");
-  const [manualVendor, setManualVendor] = useState("");
   const [quotedAmount, setQuotedAmount] = useState("");
   const [currency, setCurrency] = useState("NGN");
   const [deliveryDays, setDeliveryDays] = useState("7");
   const [paymentTerms, setPaymentTerms] = useState("");
   const [warranty, setWarranty] = useState("");
-  const [vendorRating, setVendorRating] = useState("3");
   const [notes, setNotes] = useState("");
   const [quoteFile, setQuoteFile] = useState<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
@@ -56,8 +54,8 @@ export function ProcurementSourcing({ tasks, vendors }: { tasks: ProcurementSour
   const predictedRecommendation = useMemo(() => scoredQuotes.length ? [...scoredQuotes].sort((a, b) => b.calculatedScore - a.calculatedScore || a.quotedAmount - b.quotedAmount || a.deliveryDays - b.deliveryDays || b.vendorRating - a.vendorRating || a.id - b.id)[0] : null, [scoredQuotes]);
 
   function resetQuoteForm() {
-    setVendorId(""); setManualVendor(""); setQuotedAmount(""); setCurrency("NGN"); setDeliveryDays("7");
-    setPaymentTerms(""); setWarranty(""); setVendorRating("3"); setNotes(""); setQuoteFile(null); setFileInputKey((value)=>value+1);
+    setVendorId(""); setQuotedAmount(""); setCurrency("NGN"); setDeliveryDays("7");
+    setPaymentTerms(""); setWarranty(""); setNotes(""); setQuoteFile(null); setFileInputKey((value)=>value+1);
   }
 
   async function uploadQuoteDocument(quoteId:number,file:File){
@@ -70,7 +68,7 @@ export function ProcurementSourcing({ tasks, vendors }: { tasks: ProcurementSour
   async function submitQuote(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selected) return;
-    if (!vendorId && !manualVendor.trim()) return setMessage({ type: "error", text: "Select a registered vendor or enter a manual vendor name." });
+    if (!vendorId) return setMessage({ type: "error", text: "Select an approved active vendor from the Vendor Directory." });
     if (!(Number(quotedAmount) > 0)) return setMessage({ type: "error", text: "Quoted amount must be greater than zero." });
     if(quoteFile && quoteFile.size>MAX_QUOTE_FILE_BYTES) return setMessage({type:"error",text:`${quoteFile.name} exceeds the 3 MB quotation-document limit.`});
 
@@ -78,9 +76,8 @@ export function ProcurementSourcing({ tasks, vendors }: { tasks: ProcurementSour
     try {
       const response = await fetch("/api/procurement/sourcing/quotes", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourcingTaskId: selected.id, vendorId: vendorId ? Number(vendorId) : null, manualVendor,
-          quotedAmount: Number(quotedAmount), currency, deliveryDays: Number(deliveryDays || 0), paymentTerms, warranty,
-          vendorRating: Number(vendorRating || 3), notes }),
+        body: JSON.stringify({ sourcingTaskId: selected.id, vendorId: Number(vendorId),
+          quotedAmount: Number(quotedAmount), currency, deliveryDays: Number(deliveryDays || 0), paymentTerms, warranty, notes }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload?.error || "Unable to save vendor quote.");
@@ -97,7 +94,6 @@ export function ProcurementSourcing({ tasks, vendors }: { tasks: ProcurementSour
 
   async function recommendVendor() {
     if (!selected || !predictedRecommendation) return;
-    if (!window.confirm(`Recommend ${predictedRecommendation.vendorName} for ${selected.requestNo} using the weighted quote score?`)) return;
     setRecommendBusy(true); setMessage(null);
     try {
       const response = await fetch("/api/procurement/sourcing/recommend", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sourcingTaskId: selected.id }) });
@@ -144,15 +140,13 @@ export function ProcurementSourcing({ tasks, vendors }: { tasks: ProcurementSour
       </section>
 
       <section className="quote-entry-panel">
-        <div className="sourcing-section-heading"><div><h3>Add Vendor Quote</h3><p>Capture a registered supplier or manual vendor, commercial terms and the supplier quotation document in one workflow.</p></div><CirclePlus size={18} /></div>
+        <div className="sourcing-section-heading"><div><h3>Add Vendor Quote</h3><p>Only approved active vendors from the Vendor Directory can participate in sourcing. Add or approve a vendor first if the supplier is not listed.</p></div><CirclePlus size={18} /></div>
         <form className="quote-entry-form" onSubmit={submitQuote}>
           <div className="form-grid form-grid-3">
-            <label><span>Registered vendor</span><select value={vendorId} onChange={(e) => setVendorId(e.target.value)}><option value="">Choose vendor</option>{vendors.map((vendor) => <option key={vendor.id} value={vendor.id}>{vendor.name}{vendor.category ? ` — ${vendor.category}` : ""}</option>)}</select></label>
-            <label><span>Or manual vendor</span><input value={manualVendor} onChange={(e) => setManualVendor(e.target.value)} placeholder="New / unregistered vendor" maxLength={250} /></label>
+            <label><span>Approved vendor *</span><select value={vendorId} onChange={(e) => setVendorId(e.target.value)}><option value="">Choose active vendor</option>{vendors.map((vendor) => <option key={vendor.id} value={vendor.id}>{vendor.name}{vendor.category ? ` — ${vendor.category}` : ""}{vendor.rating ? ` — ${vendor.rating}/5` : ""}</option>)}</select><small>Vendor rating is taken from the controlled Vendor Directory.</small></label>
             <label><span>Quoted amount *</span><input type="number" min="0.01" step="0.01" value={quotedAmount} onChange={(e) => setQuotedAmount(e.target.value)} /></label>
             <label><span>Currency *</span><select value={currency} onChange={(e) => setCurrency(e.target.value)}><option>NGN</option><option>USD</option><option>GBP</option><option>EUR</option></select></label>
             <label><span>Delivery days</span><input type="number" min="0" step="1" value={deliveryDays} onChange={(e) => setDeliveryDays(e.target.value)} /></label>
-            <label><span>Vendor rating</span><select value={vendorRating} onChange={(e) => setVendorRating(e.target.value)}>{[1,2,3,4,5].map((rating) => <option key={rating} value={rating}>{rating} / 5</option>)}</select></label>
             <label><span>Payment terms</span><input value={paymentTerms} onChange={(e) => setPaymentTerms(e.target.value)} placeholder="e.g. 50% advance, balance on delivery" /></label>
             <label><span>Warranty / guarantee</span><input value={warranty} onChange={(e) => setWarranty(e.target.value)} /></label>
             <label><span>Notes</span><input value={notes} onChange={(e) => setNotes(e.target.value)} /></label>

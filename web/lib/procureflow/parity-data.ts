@@ -11,6 +11,13 @@ export type ParityData = {
   closureQueue: any[];
   purchaseOrders: any[];
   vendors: any[];
+  vendorOperationalCategories: any[];
+  vendorServiceCategories: any[];
+  vendorCategoryLinks: any[];
+  vendorNominations: any[];
+  vendorQuotes: any[];
+  vendorPayments: any[];
+  vendorReceiving: any[];
   gateways: any[];
   gatewayItems: any[];
   gatewayReviewQueue: any[];
@@ -72,7 +79,90 @@ export async function getParityData(user: CurrentUser): Promise<ParityData> {
     LEFT JOIN users cb ON cb.id=po.created_by LEFT JOIN users ab ON ab.id=po.approved_by
     ORDER BY COALESCE(po.updated_at,po.created_at) DESC LIMIT 400`;
 
-  const vendors = await sql<any[]>`SELECT id,name,category,phone,email,address,tax_id,rating,completed_orders,total_spend,average_delivery_time,rejection_count,last_purchase_date,status,created_at,updated_at FROM vendors ORDER BY COALESCE(updated_at,created_at) DESC,name LIMIT 500`;
+  const vendors = await sql<any[]>`
+    SELECT v.id,v.name,v.contact_person,v.category,v.phone,v.email,v.address,v.tax_id,v.rating,
+           v.completed_orders,v.total_spend,v.average_delivery_time,v.rejection_count,v.last_purchase_date,
+           v.status,v.source,v.notes,v.created_by_user_id,v.archived_at,v.archived_by_user_id,v.created_at,v.updated_at,
+           (SELECT COUNT(*)::int FROM vendor_quotes q WHERE q.vendor_id=v.id) quote_count,
+           (SELECT COUNT(*)::int FROM vendor_quotes q WHERE q.vendor_id=v.id AND COALESCE(q.is_recommended,FALSE)=TRUE) recommendation_count,
+           (SELECT COUNT(*)::int FROM purchase_orders po WHERE po.vendor_id=v.id) awarded_orders,
+           (SELECT COUNT(*)::int FROM purchase_orders po WHERE po.vendor_id=v.id AND (po.receiving_status='Fully Received' OR po.status IN ('Completed','Closed','Paid'))) completed_order_count,
+           (SELECT COALESCE(SUM(p.amount),0) FROM payments p WHERE p.vendor_id=v.id AND p.status='Paid') actual_total_spend,
+           (SELECT MAX(po.po_date) FROM purchase_orders po WHERE po.vendor_id=v.id) actual_last_purchase_date,
+           (SELECT COALESCE(AVG((po.actual_delivery_date-po.po_date)::float),0) FROM purchase_orders po WHERE po.vendor_id=v.id AND po.actual_delivery_date IS NOT NULL) actual_average_delivery_time
+    FROM vendors v
+    ORDER BY CASE WHEN COALESCE(v.status,'Active')='Active' THEN 0 WHEN v.status='Archived' THEN 2 ELSE 1 END,
+             COALESCE(v.updated_at,v.created_at) DESC,v.name
+    LIMIT 500`;
+
+  const vendorOperationalCategories = await sql<any[]>`
+    SELECT id,name,description,status,created_by_user_id,created_at,updated_at
+    FROM vendor_operational_categories
+    ORDER BY CASE WHEN status='Active' THEN 0 ELSE 1 END,name`;
+  const vendorServiceCategories = await sql<any[]>`
+    SELECT id,name,description,status,created_by_user_id,created_at,updated_at
+    FROM vendor_service_categories
+    ORDER BY CASE WHEN status='Active' THEN 0 ELSE 1 END,name`;
+  const vendorCategoryLinks = await sql<any[]>`
+    SELECT l.id,l.vendor_id,l.operational_category_id,l.service_category_id,l.is_primary,l.created_at,
+           oc.name operational_category_name,sc.name service_category_name
+    FROM vendor_category_links l
+    JOIN vendor_operational_categories oc ON oc.id=l.operational_category_id
+    JOIN vendor_service_categories sc ON sc.id=l.service_category_id
+    ORDER BY l.vendor_id,l.is_primary DESC,oc.name,sc.name`;
+
+  const vendorNominations = user.role === "Facility Manager"
+    ? await sql<any[]>`
+      SELECT n.*,oc.name operational_category_name,sc.name service_category_name,
+             submitter.full_name submitted_by_name,reviewer.full_name reviewed_by_name,v.name approved_vendor_name
+      FROM vendor_nominations n
+      JOIN vendor_operational_categories oc ON oc.id=n.operational_category_id
+      JOIN vendor_service_categories sc ON sc.id=n.service_category_id
+      LEFT JOIN users submitter ON submitter.id=n.submitted_by_user_id
+      LEFT JOIN users reviewer ON reviewer.id=n.reviewed_by_user_id
+      LEFT JOIN vendors v ON v.id=n.approved_vendor_id
+      WHERE n.submitted_by_user_id=${user.id}
+      ORDER BY COALESCE(n.updated_at,n.created_at) DESC,n.id DESC`
+    : ["Procurement Manager","Admin","Auditor"].includes(user.role)
+      ? await sql<any[]>`
+        SELECT n.*,oc.name operational_category_name,sc.name service_category_name,
+               submitter.full_name submitted_by_name,reviewer.full_name reviewed_by_name,v.name approved_vendor_name
+        FROM vendor_nominations n
+        JOIN vendor_operational_categories oc ON oc.id=n.operational_category_id
+        JOIN vendor_service_categories sc ON sc.id=n.service_category_id
+        LEFT JOIN users submitter ON submitter.id=n.submitted_by_user_id
+        LEFT JOIN users reviewer ON reviewer.id=n.reviewed_by_user_id
+        LEFT JOIN vendors v ON v.id=n.approved_vendor_id
+        ORDER BY CASE n.status WHEN 'Pending Procurement Review' THEN 0 WHEN 'More Information Required' THEN 1 ELSE 2 END,
+                 COALESCE(n.updated_at,n.created_at) DESC,n.id DESC`
+      : [];
+
+  const vendorHistoryReadable=["Procurement Manager","Admin","Auditor"].includes(user.role);
+  const vendorQuotes = vendorHistoryReadable ? await sql<any[]>`
+    SELECT q.id,q.vendor_id,q.vendor_name,q.quoted_amount,q.quotation_total,q.currency,q.delivery_time_days,q.payment_terms,q.warranty,
+           q.vendor_rating,q.notes,q.quote_date,q.is_recommended,q.is_selected,q.score,q.created_at,
+           st.sourcing_no,pr.request_no,pr.department_project
+    FROM vendor_quotes q
+    LEFT JOIN sourcing_tasks st ON st.id=q.sourcing_task_id
+    LEFT JOIN purchase_requests pr ON pr.id=COALESCE(q.request_id,st.request_id)
+    WHERE q.vendor_id IS NOT NULL
+    ORDER BY q.created_at DESC,q.id DESC LIMIT 1000` : [];
+  const vendorPayments = vendorHistoryReadable ? await sql<any[]>`
+    SELECT p.id,p.vendor_id,p.payment_no,p.request_id,p.po_id,p.amount,p.currency,p.status,p.payment_date,p.payment_reference,p.transfer_type,
+           pr.request_no,po.po_no
+    FROM payments p
+    LEFT JOIN purchase_requests pr ON pr.id=p.request_id
+    LEFT JOIN purchase_orders po ON po.id=p.po_id
+    WHERE p.vendor_id IS NOT NULL
+    ORDER BY COALESCE(p.payment_date,p.created_at::date) DESC,p.id DESC LIMIT 1000` : [];
+  const vendorReceiving = vendorHistoryReadable ? await sql<any[]>`
+    SELECT rs.id,rs.vendor_id,rs.slip_no,rs.po_id,rs.date_received,rs.delivery_note_no,rs.discrepancy_notes,rs.status,rs.created_at,
+           po.po_no,pr.request_no
+    FROM receiving_slips rs
+    LEFT JOIN purchase_orders po ON po.id=rs.po_id
+    LEFT JOIN purchase_requests pr ON pr.id=po.request_id
+    WHERE rs.vendor_id IS NOT NULL
+    ORDER BY rs.date_received DESC,rs.id DESC LIMIT 1000` : [];
 
   const gateways = user.role === "Facility Manager"
     ? await sql<any[]>`SELECT gp.*, fm.full_name facility_manager_name, rv.full_name reviewed_by_name, av.full_name approved_by_name FROM gateway_passes gp LEFT JOIN users fm ON fm.id=gp.facility_manager_user_id LEFT JOIN users rv ON rv.id=gp.reviewed_by_user_id LEFT JOIN users av ON av.id=gp.approved_by_user_id WHERE gp.facility_manager_user_id=${user.id} ORDER BY COALESCE(gp.updated_at,gp.created_at) DESC LIMIT 300`
@@ -162,7 +252,14 @@ export async function getParityData(user: CurrentUser): Promise<ParityData> {
     lowValueQueue: lowValueQueue.map(mapRequest),
     closureQueue: closureQueue.map(mapRequest),
     purchaseOrders: poRows.map((r:any)=>({...r,id:Number(r.id),total_amount:numberValue(r.total_amount)})),
-    vendors: vendors.map((r:any)=>({...r,id:Number(r.id),rating:numberValue(r.rating),completed_orders:numberValue(r.completed_orders),total_spend:numberValue(r.total_spend)})),
+    vendors: vendors.map((r:any)=>({...r,id:Number(r.id),rating:numberValue(r.rating),completed_orders:numberValue(r.completed_order_count??r.completed_orders),total_spend:numberValue(r.actual_total_spend??r.total_spend),average_delivery_time:numberValue(r.actual_average_delivery_time??r.average_delivery_time),last_purchase_date:r.actual_last_purchase_date??r.last_purchase_date,quote_count:numberValue(r.quote_count),recommendation_count:numberValue(r.recommendation_count),awarded_orders:numberValue(r.awarded_orders)})),
+    vendorOperationalCategories: vendorOperationalCategories.map((r:any)=>({...r,id:Number(r.id)})),
+    vendorServiceCategories: vendorServiceCategories.map((r:any)=>({...r,id:Number(r.id)})),
+    vendorCategoryLinks: vendorCategoryLinks.map((r:any)=>({...r,id:Number(r.id),vendor_id:Number(r.vendor_id),operational_category_id:Number(r.operational_category_id),service_category_id:Number(r.service_category_id)})),
+    vendorNominations: vendorNominations.map((r:any)=>({...r,id:Number(r.id),submitted_by_user_id:Number(r.submitted_by_user_id),operational_category_id:Number(r.operational_category_id),service_category_id:Number(r.service_category_id),approved_vendor_id:r.approved_vendor_id==null?null:Number(r.approved_vendor_id)})),
+    vendorQuotes: vendorQuotes.map((r:any)=>({...r,id:Number(r.id),vendor_id:Number(r.vendor_id),quoted_amount:numberValue(r.quotation_total??r.quoted_amount),vendor_rating:numberValue(r.vendor_rating),score:numberValue(r.score)})),
+    vendorPayments: vendorPayments.map((r:any)=>({...r,id:Number(r.id),vendor_id:Number(r.vendor_id),amount:numberValue(r.amount)})),
+    vendorReceiving: vendorReceiving.map((r:any)=>({...r,id:Number(r.id),vendor_id:Number(r.vendor_id)})),
     gateways: gateways.map((r:any)=>({...r,id:Number(r.id)})), gatewayItems: gatewayItems.map((r:any)=>({...r,id:Number(r.id),gateway_pass_id:Number(r.gateway_pass_id),quantity:numberValue(r.quantity),estimated_value:numberValue(r.estimated_value)})),
     gatewayReviewQueue: gatewayReviewQueue.map((r:any)=>({...r,id:Number(r.id)})),
     threads: threads.map((r:any)=>({...r,id:Number(r.id)})), messages: messages.map((r:any)=>({...r,id:Number(r.id),thread_id:Number(r.thread_id)})),

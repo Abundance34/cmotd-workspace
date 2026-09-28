@@ -45,8 +45,8 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
     title: "Procurement Navigation",
     sections: [
       "Operations Dashboard", "Create Request Draft", "My Draft Requests", "Purchase Requests", "Reimbursement Request", "Low-Value Approvals",
-      "Utility Head / Facility Head Inbox", "Import Center", "Sourcing", "Vendor Quotes", "Vendor Recommendation",
-      "Commercial PO Management", "Vendors", "Gateway Pass Review", "Post-Payment Closure", "Availability / Away Notice",
+      "Utility Head / Facility Head Inbox", "Import Center", "Sourcing & Quotations", "Vendor Recommendations",
+      "Commercial PO Management", "Vendor Directory", "Gateway Pass Review", "Post-Payment Closure", "Availability / Away Notice",
       "Procurement Documents", "Procurement Reports", "Income", "My Activity History", "Settings",
     ],
   },
@@ -54,7 +54,7 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
     title: "Utility / Facility Navigation",
     sections: [
       "Utility / Facility Dashboard", "Create Request Draft", "My Draft Requests", "Submit to Procurement Manager", "Reimbursement Request",
-      "Import Documents", "Gateway Pass", "Shared Thread with Procurement Manager", "Returned Requests",
+      "Vendor Directory", "Suggest Vendor", "My Vendor Suggestions", "Import Documents", "Gateway Pass", "Shared Thread with Procurement Manager", "Returned Requests",
       "Approved / Accepted Requests", "Income", "My Activity History", "Settings",
     ],
   },
