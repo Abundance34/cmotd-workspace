@@ -65,8 +65,8 @@ function ensureImport(source, marker, importLine, label) {
   let source = read(relativePath);
   source = source.replaceAll('"Utility Head / Facility Head Inbox"', '"Inbox"');
   source = source.replace(
-    '"Utility / Facility Dashboard", "Create Request Draft", "My Draft Requests", "Submit to Procurement Manager",\n    "Import Documents"',
-    '"Utility / Facility Dashboard", "Create Request Draft", "My Draft Requests", "Submit to Procurement Manager", "Reimbursement Request",\n    "Import Documents"',
+    '"Utility / Facility Dashboard", "Create Request Draft", "My Draft Requests", "Submit to Procurement Manager",\n    "Vendor Directory", "Suggest Vendor", "My Vendor Suggestions", "Import Documents"',
+    '"Utility / Facility Dashboard", "Create Request Draft", "My Draft Requests", "Submit to Procurement Manager", "Reimbursement Request",\n    "Vendor Directory", "Suggest Vendor", "My Vendor Suggestions", "Import Documents"',
   );
   source = source.replace(
     '"Operations Dashboard", "Purchase Requests", "Low-Value Approvals", "Inbox",',
