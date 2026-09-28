@@ -33,3 +33,20 @@ Adds deferrable, initially deferred, `NOT VALID` foreign keys after data loading
 ## Persistent document paths
 
 `scripts/migrate_document_storage.py` preserves existing file relationships during Cloud Run cutover by copying referenced documents to the mounted persistent root, verifying SHA-256 checksums, and updating PostgreSQL path columns by source record ID. The operation is restart-safe and produces a detailed document migration report.
+
+
+## `009_vendor_governance_directory.sql`
+
+Introduces controlled vendor governance and replaces the flat vendor category model with a two-dimensional classification:
+
+- **Company operation / activity** identifies where CMOTD uses the supplier, such as Graduation, Training Programme, Facility Operations, ICT Operations, Maintenance or Events / Protocol.
+- **Vendor service category** identifies what the supplier provides, such as Polos / Apparel, Branding / Graphics, Decoration, Food / Catering, ICT / Software or Repairs / Maintenance.
+- A vendor may be linked to multiple operation/service combinations while one classification can be marked primary.
+- Facility Managers can submit vendor nominations, track Procurement review, and supply additional information when requested. A nomination is not usable for sourcing until Procurement approves it.
+- Procurement Manager / Admin retains vendor-master authority: direct creation, classification, profile editing, nomination approval/rejection, suspension, archiving and safe deletion.
+- Safe delete permanently removes only vendors with no transaction/document references. Vendors with history are archived so quotations, POs, payments and audit evidence remain intact.
+- Existing placeholder vendor rows are archived rather than destructively removed because several already have test transaction references.
+- The four supplied real Graduation vendors are seeded and classified under Graduation with their corresponding service categories.
+- Sourcing now accepts only active approved Vendor Directory records; manual/unregistered quote vendors are no longer permitted.
+
+The migration is additive and compatible with the previous application revision while the new UI is deployed.
