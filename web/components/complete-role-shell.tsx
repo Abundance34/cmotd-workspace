@@ -25,6 +25,7 @@ import { CompleteLogisticsWorkspace } from "@/components/complete-logistics-work
 import { GlobalTools } from "@/components/global-tools";
 import { AuditorReviewWorkspace } from "@/components/auditor-review-workspace";
 import { AuditorPayeeDetails } from "@/components/auditor-payee-details";
+import { VendorGovernanceWorkspace } from "@/components/vendor-governance-workspace";
 
 export type CompleteShellUser = { id: number; fullName: string; username: string; role: ProcureFlowRole };
 
@@ -59,6 +60,7 @@ function FacilitySection({section,data,parityData}:{section:string;data:any;pari
   const router=useRouter();const [busy,setBusy]=useState<number|null>(null);const [msg,setMsg]=useState<any>(null);
   async function submit(id:number){setBusy(id);setMsg(null);try{const r=await fetch("/api/facility/requests/submit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requestId:id})});const p=await r.json().catch(()=>({}));if(!r.ok)throw new Error(p?.error||"Unable to submit request.");setMsg({type:"success",text:"Request submitted to Procurement Manager."});router.refresh();}catch(e){setMsg({type:"error",text:e instanceof Error?e.message:"Unable to submit request."});}finally{setBusy(null)}}
   if(section==="Create Request Draft")return <FacilityDraftForm/>;
+  if(["Vendor Directory","Suggest Vendor","My Vendor Suggestions"].includes(section))return <VendorGovernanceWorkspace section={section} role="Facility Manager" data={parityData}/>;
   if(["Import Documents","Gateway Pass","Shared Thread with Procurement Manager","My Activity History"].includes(section))return <ParityWorkspace section={section} role="Facility Manager" data={parityData}/>;
   if(section==="My Draft Requests")return <GenericRequestTable rows={data?.drafts||[]}/>;
   if(section==="Returned Requests")return <GenericRequestTable rows={data?.returned||[]}/>;
@@ -70,9 +72,10 @@ function FacilitySection({section,data,parityData}:{section:string;data:any;pari
 function ProcurementSection({section,data,parityData}:{section:string;data:any;parityData:ParityData}){
   if(section==="Utility Head / Facility Head Inbox")return <ProcurementInbox rows={data?.inbox||[]}/>;
   if(section==="Purchase Requests")return <GenericRequestTable rows={data?.requests||[]}/>;
-  if(section==="Sourcing"||section==="Vendor Quotes")return <ProcurementSourcing tasks={data?.sourcingTasks||[]} vendors={data?.vendors||[]}/>;
-  if(section==="Vendor Recommendation")return <ProcurementRecommendations tasks={data?.sourcingTasks||[]} approvalLimit={data?.approvalLimit||parityData.policyLimit}/>;
-  if(["Low-Value Approvals","Import Center","Commercial PO Management","Vendors","Gateway Pass Review","Post-Payment Closure","Availability / Away Notice","Procurement Documents","Procurement Reports","My Activity History"].includes(section))return <ParityWorkspace section={section} role="Procurement Manager" data={parityData}/>;
+  if(section==="Sourcing & Quotations")return <ProcurementSourcing tasks={data?.sourcingTasks||[]} vendors={data?.vendors||[]}/>;
+  if(section==="Vendor Recommendations")return <ProcurementRecommendations tasks={data?.sourcingTasks||[]} approvalLimit={data?.approvalLimit||parityData.policyLimit}/>;
+  if(section==="Vendor Directory")return <VendorGovernanceWorkspace section={section} role="Procurement Manager" data={parityData}/>;
+  if(["Low-Value Approvals","Import Center","Commercial PO Management","Gateway Pass Review","Post-Payment Closure","Availability / Away Notice","Procurement Documents","Procurement Reports","My Activity History"].includes(section))return <ParityWorkspace section={section} role="Procurement Manager" data={parityData}/>;
   return null;
 }
 
