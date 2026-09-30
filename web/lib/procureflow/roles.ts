@@ -14,7 +14,7 @@ export const ROLE_LABELS: Record<ProcureFlowRole, string> = {
   Admin: "Admin",
   "Procurement Manager": "Procurement Manager",
   "Facility Manager": "Utility Head / Facility Head",
-  "Logistics Officer": "Logistics Officer",
+  "Logistics Officer": "Logistics Manager",
   Finance: "Finance",
   Approver: "Approver / MD",
   Auditor: "Auditor",
@@ -24,7 +24,7 @@ export const ROLE_LANDING: Record<ProcureFlowRole, string> = {
   Admin: "Admin Console",
   "Procurement Manager": "Procurement Workspace",
   "Facility Manager": "Utility Head / Facility Head Workspace",
-  "Logistics Officer": "Logistics Workspace",
+  "Logistics Officer": "Logistics Manager Workspace",
   Finance: "Finance Workspace",
   Approver: "Executive Approval Workspace",
   Auditor: "Audit & Compliance Workspace",
@@ -59,7 +59,7 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
     ],
   },
   "Logistics Officer": {
-    title: "Logistics Navigation",
+    title: "Logistics Manager Navigation",
     sections: [
       "Logistics Dashboard", "Reimbursement Request", "PO Delivery Handover", "Delivery Tracking", "Receiving Slips",
       "Delivery Exceptions & Returns", "Gateway Pass Review & Approval", "Gateway Pass Coordination", "Logistics Documents",
