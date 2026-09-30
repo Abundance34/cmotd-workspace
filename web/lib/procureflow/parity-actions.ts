@@ -10,7 +10,8 @@ function assertRole(user: CurrentUser, allowed: string[]) {
 }
 function clean(value: unknown, max = 4000) { return String(value ?? "").trim().replace(/\s+/g, " ").slice(0, max); }
 function positiveId(value: unknown, label = "record") { const n=Number(value); if(!Number.isInteger(n)||n<=0) throw new Error(`Choose a valid ${label}.`); return n; }
-function money(value: unknown, label = "amount") { const n=Number(value); if(!Number.isFinite(n)||n<0) throw new Error(`Enter a valid ${label}.`); return n; }\nfunction wholeNumber(value: unknown, label = "quantity") { const n=Number(value); if(!Number.isInteger(n)||n<=0) throw new Error(`Enter a whole number greater than zero for ${label}.`); return n; }
+function money(value: unknown, label = "amount") { const n=Number(value); if(!Number.isFinite(n)||n<0) throw new Error(`Enter a valid ${label}.`); return n; }
+function wholeNumber(value: unknown, label = "quantity") { const n=Number(value); if(!Number.isInteger(n)||n<=0) throw new Error(`Enter a whole number greater than zero for ${label}.`); return n; }
 function reason(value: unknown) { const v=clean(value,2000); if(v.length<4) throw new Error("Enter a meaningful reason or note."); return v; }
 function ref(prefix:string){return `${prefix}-${new Date().toISOString().replace(/[-:TZ.]/g,"").slice(0,17)}-${randomUUID().slice(0,8).toUpperCase()}`;}
 function maskAccount(value:string){const d=value.replace(/\D/g,""); return d ? `••••${d.slice(-4)}` : "";}
@@ -343,6 +344,7 @@ export async function runParityAction(user:CurrentUser, action:string, payload:a
       if(!gp)throw new Error("Gateway pass not found.");
       if(!["Submitted","Pending Procurement Manager / Approver Review"].includes(String(gp.status||"")))throw new Error("This gateway pass has already been decided or is not awaiting approval.");
       const now=new Date().toISOString();
+      const approvalRole=user.role==="Logistics Officer"?"Logistics Manager":user.role;
       const status=decision==="approve"?"Approved":decision==="return"?"Returned for Correction":"Rejected";
       const next="facility_manager";
       await tx`
@@ -363,7 +365,7 @@ export async function runParityAction(user:CurrentUser, action:string, payload:a
       await evidence(tx,user,{action:`Gateway Pass ${decision}`,entityType:"Gateway Pass",entityId:id,entityReference:gp.pass_number,before:{status:gp.status,next_role:gp.next_role},after:{status,next_role:next,approved_by_role:decision==="approve"?approvalRole:null,approved_at:decision==="approve"?now:null},note});
       if(gp.facility_manager_user_id)await notifyUser(tx,Number(gp.facility_manager_user_id),`Gateway pass ${status}`,decision==="approve"?`${gp.pass_number} was approved by ${approvalRole}. You can now open, print, or download the approved PDF.`:`${gp.pass_number}: ${note}`,"Gateway Pass",id,"Gateway Pass",decision==="approve"?"High":"High");
       if(decision==="approve"){
-        await notifyRole(tx,"Approver","Gateway pass approved",`${gp.pass_number} was approved by ${user.role} and is available in Approved Gateway Passes.`,"Gateway Pass",id,"Approved Gateway Passes","Normal");
+        await notifyRole(tx,"Approver","Gateway pass approved",`${gp.pass_number} was approved by ${approvalRole} and is available in Approved Gateway Passes.`,"Gateway Pass",id,"Approved Gateway Passes","Normal");
         await notifyRole(tx,"Auditor","Gateway pass approved",`${gp.pass_number} was approved by ${approvalRole}.`,"Gateway Pass",id,"Gateway Pass Audit","Normal");
       }
       return {id,status,approvedByRole:decision==="approve"?approvalRole:null,approvedAt:decision==="approve"?now:null};
