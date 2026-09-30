@@ -1,32 +1,6 @@
-function pdfEscape(value: string) {
-  return value.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)").replace(/[\r\n]+/g, " ");
-}
-
-const REPLACEMENTS: Record<string, string> = {
-  "₦": "NGN ", "–": "-", "—": "-", "→": "->", "•": "*", "…": "...", "’": "'", "“": '"', "”": '"',
-};
-
-function ascii(value: unknown) {
-  return String(value ?? "").normalize("NFKD").replace(/[^\x20-\x7E]/g, (char) => REPLACEMENTS[char] || "?");
-}
-
-function textWidth(value: string, size: number) {
-  return ascii(value).length * size * 0.49;
-}
-
-function wrap(value: unknown, maxChars: number) {
-  const words = ascii(value).split(/\s+/).filter(Boolean);
-  if (!words.length) return [""];
-  const lines: string[] = [];
-  let current = "";
-  for (const word of words) {
-    if (!current) current = word;
-    else if (`${current} ${word}`.length <= maxChars) current += ` ${word}`;
-    else { lines.push(current); current = word; }
-  }
-  if (current) lines.push(current);
-  return lines;
-}
+import fs from "node:fs";
+import path from "node:path";
+import { PDFDocument, PDFPage, PDFFont, PDFImage, StandardFonts, rgb } from "pdf-lib";
 
 export type GatewayPassPdfInput = {
   passNumber: string;
@@ -72,135 +46,354 @@ export type GatewayPassPdfInput = {
   }>;
 };
 
-function rgb(r: number, g: number, b: number) { return `${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)}`; }
+const PAGE_W = 595.28;
+const PAGE_H = 841.89;
+const LEFT = 36;
+const RIGHT = PAGE_W - 36;
+const CONTENT_W = RIGHT - LEFT;
+const FOOTER_TOP = 51;
+const NAVY = rgb(13 / 255, 41 / 255, 71 / 255);
+const BLUE = rgb(27 / 255, 95 / 255, 171 / 255);
+const PALE = rgb(243 / 255, 247 / 255, 251 / 255);
+const LINE = rgb(204 / 255, 217 / 255, 229 / 255);
+const MUTED = rgb(95 / 255, 113 / 255, 130 / 255);
+const INK = rgb(22 / 255, 40 / 255, 58 / 255);
+const WHITE = rgb(1, 1, 1);
 
-function buildPage(input: GatewayPassPdfInput, pageIndex: number, pageCount: number, items: GatewayPassPdfInput["items"], continuation: boolean) {
-  const ops: string[] = [];
-  const navy = rgb(0.055, 0.145, 0.255);
-  const blue = rgb(0.105, 0.365, 0.690);
-  const pale = rgb(0.945, 0.970, 0.995);
-  const slate = rgb(0.330, 0.400, 0.475);
-  const dark = rgb(0.070, 0.110, 0.165);
-  const border = rgb(0.790, 0.835, 0.885);
-
-  const fillRect = (x:number,y:number,w:number,h:number,color:string) => ops.push(`q ${color} rg ${x} ${y} ${w} ${h} re f Q`);
-  const strokeRect = (x:number,y:number,w:number,h:number,color=border,width=0.7) => ops.push(`q ${color} RG ${width} w ${x} ${y} ${w} ${h} re S Q`);
-  const line = (x1:number,y1:number,x2:number,y2:number,color=border,width=0.7) => ops.push(`q ${color} RG ${width} w ${x1} ${y1} m ${x2} ${y2} l S Q`);
-  const txt = (x:number,y:number,size:number,value:unknown,bold=false,color=dark) => ops.push(`BT ${color} rg /${bold?"F2":"F1"} ${size} Tf ${x} ${y} Td (${pdfEscape(ascii(value))}) Tj ET`);
-  const fitText = (x:number,y:number,w:number,size:number,value:unknown,bold=false,color=dark) => {
-    const raw=ascii(value); let use=size; while(use>6 && textWidth(raw,use)>w)use-=0.4; txt(x,y,use,raw,bold,color);
-  };
-  const labelValue = (x:number,y:number,w:number,label:string,value:unknown) => {
-    txt(x,y+15,7,label.toUpperCase(),true,slate); fitText(x,y,w,10,value||"-",false,dark);
-  };
-
-  fillRect(0,0,595,842,rgb(1,1,1));
-  fillRect(34,752,527,58,navy);
-  txt(50,783,18,"CMOTD",true,rgb(1,1,1));
-  txt(50,767,7.5,"PROCUREFLOW CONTROLLED DOCUMENT",true,rgb(0.815,0.890,0.980));
-  txt(388,783,15,continuation?"GATEWAY PASS - CONTINUED":"GATEWAY PASS",true,rgb(1,1,1));
-  fitText(388,766,157,9,input.passNumber,true,rgb(0.875,0.930,1));
-
-  if (!continuation) {
-    fillRect(34,715,527,25,pale); strokeRect(34,715,527,25,border);
-    txt(48,724,7,"STATUS",true,slate); fitText(92,723,125,9,input.status||"Draft",true,blue);
-    txt(253,724,7,"DEPARTMENT",true,slate); fitText(320,723,225,9,input.department||"-",true,dark);
-
-    strokeRect(34,622,527,82,border);
-    line(297,622,297,704,border);
-    labelValue(48,676,225,"Movement type",input.movementType);
-    labelValue(311,676,225,"Expected movement",input.expectedMovementDate||"-");
-    labelValue(48,642,225,"Origin",input.originLocation||"-");
-    labelValue(311,642,225,"Destination",input.destination||"-");
-
-    strokeRect(34,559,527,52,border);
-    txt(48,592,7,"PURPOSE",true,slate);
-    const purposeLines=wrap(input.purpose,105).slice(0,2); purposeLines.forEach((v,i)=>txt(48,576-i*13,9.5,v,false,dark));
-
-    txt(34,540,10,"MOVEMENT & RECEIVER DETAILS",true,navy);
-    strokeRect(34,474,527,54,border);
-    line(210,474,210,528,border); line(385,474,385,528,border);
-    labelValue(48,500,145,"Vehicle",input.vehicleNumber||"-");
-    labelValue(224,500,145,"Driver",input.driverName||"-");
-    labelValue(399,500,145,"Driver phone",input.driverPhone||"-");
-    labelValue(48,478,145,"Expected return",input.expectedReturnDate||"-");
-    labelValue(224,478,145,"Receiver",input.receiverName||"-");
-    labelValue(399,478,145,"Organisation",input.receiverOrganization||"-");
-  }
-
-  let tableTop = continuation ? 706 : 447;
-  txt(34,tableTop+13,10,continuation?"ITEMS - CONTINUED":"ITEMS / ASSETS",true,navy);
-  tableTop -= 2;
-  const cols=[34,56,270,326,376,450,561];
-  fillRect(34,tableTop-24,527,24,navy);
-  ["#","Description","Qty","Unit","Condition","Serial / Asset"].forEach((h,i)=>txt(cols[i]+5,tableTop-16,7.2,h,true,rgb(1,1,1)));
-  let y=tableTop-24;
-  items.forEach((item,index)=>{
-    const desc=wrap(item.item_description,38).slice(0,2);
-    const serial=[item.serial_number,item.asset_tag].filter(Boolean).join(" / ")||"-";
-    const condition=[item.quality_condition,item.fragility_status&&item.fragility_status!=="Normal"?item.fragility_status:null].filter(Boolean).join(" / ")||"-";
-    const rowH=Math.max(31,desc.length*11+12);
-    fillRect(34,y-rowH,527,rowH,index%2===0?rgb(0.985,0.990,0.997):rgb(1,1,1));
-    for(const x of cols)line(x,y,x,y-rowH,border); line(561,y,561,y-rowH,border); line(34,y-rowH,561,y-rowH,border);
-    txt(40,y-18,8,String(pageIndex===0?index+1:(pageIndex*18)+index+1),true,dark);
-    desc.forEach((v,i)=>fitText(62,y-17-i*10,200,8.2,v,false,dark));
-    fitText(276,y-18,44,8,String(item.quantity),false,dark);
-    fitText(332,y-18,38,8,item.unit_of_measure||"-",false,dark);
-    fitText(382,y-18,62,7.8,condition,false,dark);
-    fitText(456,y-18,99,7.5,serial,false,dark);
-    y-=rowH;
-  });
-
-  if (!continuation) {
-    const approvalTop=Math.min(y-18,205);
-    txt(34,approvalTop,10,"AUTHORIZATION & CONTROL",true,navy);
-    const boxTop=approvalTop-12; const boxH=68;
-    strokeRect(34,boxTop-boxH,527,boxH,border);
-    line(210,boxTop-boxH,210,boxTop,border); line(385,boxTop-boxH,385,boxTop,border);
-    labelValue(48,boxTop-34,145,"Utility / Facility Head",input.facilityManagerName||"-");
-    labelValue(224,boxTop-34,145,"Approved by",input.approvedByName||"Pending / not recorded");
-    labelValue(399,boxTop-34,145,"Approval date",input.approvedAt||"-");
-    txt(48,boxTop-56,6.8,"Approval",true,slate); fitText(91,boxTop-56,454,7.3,[input.approvedByRole,input.approvalNote||input.procurementReviewNote].filter(Boolean).join(" - ")||"-",false,dark);
-
-    const securityY=boxTop-boxH-52;
-    txt(34,securityY+36,10,"SECURITY / LOGISTICS CHECKPOINT",true,navy);
-    strokeRect(34,securityY-18,527,45,border);
-    labelValue(48,securityY-1,112,"Checkpoint",input.securityCheckpoint||"To be completed");
-    labelValue(172,securityY-1,112,"Security officer",input.securityOfficerName||"To be completed");
-    labelValue(296,securityY-1,112,"Gate verification",input.gateVerificationTime||"To be completed");
-    labelValue(420,securityY-1,125,"Movement status",input.exitEntryConfirmation||input.logisticsStatus||"Pending");
-  }
-
-  fillRect(34,25,527,1,border);
-  txt(34,13,6.8,"Generated by ProcureFlow | Controlled copy | Validate status in the live system",false,slate);
-  txt(505,13,6.8,`Page ${pageIndex+1} of ${pageCount}`,true,slate);
-  return ops.join("\n");
+function roleLabel(value: unknown) {
+  const role = String(value || "").trim();
+  return role === "Logistics Officer" ? "Logistics Manager" : role || "-";
 }
 
-export function gatewayPassPdf(input: GatewayPassPdfInput) {
-  const firstItems=input.items.slice(0,7);
-  const remaining=input.items.slice(7);
-  const chunks: GatewayPassPdfInput["items"][]=[];
-  for(let i=0;i<remaining.length;i+=18)chunks.push(remaining.slice(i,i+18));
-  const pageItems=[firstItems,...chunks];
-  const pageCount=pageItems.length;
+function quantityText(value: unknown) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return String(value ?? "-");
+  return String(Math.max(0, Math.round(number)));
+}
 
-  const objects:string[]=[]; const catalogId=1,pagesId=2,fontId=3,boldFontId=4; let nextId=5;
-  const pageIds:number[]=[];const contentIds:number[]=[];
-  for(let i=0;i<pageCount;i++){pageIds.push(nextId++);contentIds.push(nextId++);}
-  objects[catalogId]=`<< /Type /Catalog /Pages ${pagesId} 0 R >>`;
-  objects[fontId]="<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
-  objects[boldFontId]="<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>";
-  objects[pagesId]=`<< /Type /Pages /Kids [${pageIds.map(id=>`${id} 0 R`).join(" ")}] /Count ${pageCount} >>`;
-  pageItems.forEach((items,index)=>{
-    const stream=buildPage(input,index,pageCount,items,index>0);
-    objects[contentIds[index]]=`<< /Length ${Buffer.byteLength(stream,"utf8")} >>\nstream\n${stream}\nendstream`;
-    objects[pageIds[index]]=`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${fontId} 0 R /F2 ${boldFontId} 0 R >> >> /Contents ${contentIds[index]} 0 R >>`;
+function dateText(value: unknown, includeTime = false) {
+  if (!value) return "-";
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("en-NG", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    ...(includeTime ? { hour: "2-digit", minute: "2-digit", hour12: true } : {}),
+    timeZone: "Africa/Lagos",
+  }).format(date);
+}
+
+const PDF_REPLACEMENTS: Record<string, string> = {
+  "₦": "NGN ", "–": "-", "—": "-", "→": "->", "•": "*", "…": "...",
+  "’": "'", "‘": "'", "“": '"', "”": '"', " ": " ",
+};
+
+function safe(value: unknown) {
+  return String(value ?? "-")
+    .normalize("NFKD")
+    .replace(/[\r\n]+/g, " ")
+    .replace(/[^\x20-\x7E]/g, (char) => PDF_REPLACEMENTS[char] || "?")
+    .trim() || "-";
+}
+
+function wrapText(font: PDFFont, text: unknown, size: number, maxWidth: number, maxLines = 3) {
+  const words = safe(text).split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let current = "";
+
+  const pushLongWord = (word: string) => {
+    let part = "";
+    for (const ch of word) {
+      const next = part + ch;
+      if (font.widthOfTextAtSize(next, size) <= maxWidth) part = next;
+      else {
+        if (part) lines.push(part);
+        part = ch;
+        if (lines.length >= maxLines) break;
+      }
+    }
+    return part;
+  };
+
+  for (const word of words) {
+    if (lines.length >= maxLines) break;
+    const candidate = current ? current + " " + word : word;
+    if (font.widthOfTextAtSize(candidate, size) <= maxWidth) {
+      current = candidate;
+      continue;
+    }
+    if (current) {
+      lines.push(current);
+      current = "";
+      if (lines.length >= maxLines) break;
+    }
+    if (font.widthOfTextAtSize(word, size) <= maxWidth) current = word;
+    else current = pushLongWord(word);
+  }
+  if (current && lines.length < maxLines) lines.push(current);
+
+  const raw = safe(text);
+  const joined = lines.join(" ");
+  if (joined.length < raw.length && lines.length) {
+    let last = lines[lines.length - 1];
+    while (last.length > 1 && font.widthOfTextAtSize(last + "...", size) > maxWidth) last = last.slice(0, -1);
+    lines[lines.length - 1] = last + "...";
+  }
+  return lines.length ? lines : ["-"];
+}
+
+function fitSize(font: PDFFont, text: unknown, preferred: number, maxWidth: number, min = 6) {
+  const raw = safe(text);
+  let size = preferred;
+  while (size > min && font.widthOfTextAtSize(raw, size) > maxWidth) size -= 0.25;
+  return size;
+}
+
+function drawLines(page: PDFPage, font: PDFFont, lines: string[], x: number, y: number, size: number, color = INK, lineHeight = size + 2) {
+  lines.forEach((line, index) => page.drawText(line, { x, y: y - index * lineHeight, font, size, color }));
+}
+
+function drawBox(page: PDFPage, x: number, y: number, width: number, height: number, fill = WHITE) {
+  page.drawRectangle({ x, y, width, height, color: fill, borderColor: LINE, borderWidth: 0.65 });
+}
+
+function drawField(page: PDFPage, fonts: Fonts, x: number, y: number, width: number, height: number, label: string, value: unknown, maxLines = 2) {
+  page.drawText(label.toUpperCase(), { x: x + 8, y: y + height - 13, font: fonts.helveticaBold, size: 6.6, color: MUTED });
+  const lines = wrapText(fonts.helvetica, value, 8.4, width - 16, maxLines);
+  drawLines(page, fonts.helvetica, lines, x + 8, y + height - 29, 8.4, INK, 10);
+}
+
+type Fonts = {
+  helvetica: PDFFont;
+  helveticaBold: PDFFont;
+  times: PDFFont;
+  timesBold: PDFFont;
+  timesItalic: PDFFont;
+};
+
+type Branding = {
+  rsu: PDFImage | null;
+  cmotd: PDFImage | null;
+};
+
+async function loadBranding(pdf: PDFDocument): Promise<Branding> {
+  let rsu: PDFImage | null = null;
+  let cmotd: PDFImage | null = null;
+  try {
+    const bytes = fs.readFileSync(path.join(process.cwd(), "public", "branding", "rsu_logo.png"));
+    rsu = await pdf.embedPng(bytes);
+  } catch {}
+  try {
+    const bytes = fs.readFileSync(path.join(process.cwd(), "public", "branding", "cmotd_logo.png"));
+    cmotd = await pdf.embedPng(bytes);
+  } catch {}
+  return { rsu, cmotd };
+}
+
+function drawImageFit(page: PDFPage, image: PDFImage | null, x: number, y: number, width: number, height: number) {
+  if (!image) return;
+  const ratio = image.width / image.height;
+  let drawW = width;
+  let drawH = width / ratio;
+  if (drawH > height) {
+    drawH = height;
+    drawW = height * ratio;
+  }
+  page.drawImage(image, { x: x + (width - drawW) / 2, y: y + (height - drawH) / 2, width: drawW, height: drawH });
+}
+
+function drawInstitutionHeader(page: PDFPage, fonts: Fonts, branding: Branding) {
+  drawImageFit(page, branding.rsu, 36, 748, 62, 62);
+  drawImageFit(page, branding.cmotd, PAGE_W - 98, 748, 62, 62);
+
+  const title1 = "Centre For Marine and Offshore Technology Development (CMOTD)";
+  const title2 = "Consultancy Services Unit, Rivers State University";
+  const tagline = "Where Theory becomes Reality and Individuals are Equipped to Lead in the Industry!";
+  const titleSize = fitSize(fonts.timesBold, title1, 13.3, 390, 10.5);
+  page.drawText(title1, { x: (PAGE_W - fonts.timesBold.widthOfTextAtSize(title1, titleSize)) / 2, y: 794, font: fonts.timesBold, size: titleSize, color: rgb(0, 0, 0) });
+  page.drawText(title2, { x: (PAGE_W - fonts.timesBold.widthOfTextAtSize(title2, 11.7)) / 2, y: 775, font: fonts.timesBold, size: 11.7, color: rgb(0, 0, 0) });
+  const tagSize = fitSize(fonts.timesItalic, tagline, 9.7, 395, 8.2);
+  page.drawText(tagline, { x: (PAGE_W - fonts.timesItalic.widthOfTextAtSize(tagline, tagSize)) / 2, y: 758, font: fonts.timesItalic, size: tagSize, color: rgb(0, 0, 0) });
+  page.drawLine({ start: { x: LEFT, y: 740 }, end: { x: RIGHT, y: 740 }, thickness: 1.15, color: BLUE });
+}
+
+function drawBanner(page: PDFPage, fonts: Fonts, input: GatewayPassPdfInput, continuation = false) {
+  page.drawRectangle({ x: LEFT, y: 686, width: CONTENT_W, height: 44, color: NAVY });
+  const title = continuation ? "GATEWAY PASS - CONTINUED" : "GATEWAY PASS";
+  page.drawText(title, { x: 52, y: 703, font: fonts.helveticaBold, size: continuation ? 12.5 : 15, color: WHITE });
+  const controlled = "PROCUREFLOW CONTROLLED DOCUMENT";
+  page.drawText(controlled, { x: RIGHT - fonts.helveticaBold.widthOfTextAtSize(controlled, 8.3) - 12, y: 713, font: fonts.helveticaBold, size: 8.3, color: WHITE });
+  const passSize = fitSize(fonts.helvetica, input.passNumber, 8.2, 245, 6.8);
+  page.drawText(input.passNumber, { x: RIGHT - fonts.helvetica.widthOfTextAtSize(input.passNumber, passSize) - 12, y: 699, font: fonts.helvetica, size: passSize, color: WHITE });
+}
+
+function drawFooter(page: PDFPage, fonts: Fonts, pageIndex: number, pageCount: number) {
+  page.drawLine({ start: { x: LEFT, y: FOOTER_TOP }, end: { x: RIGHT, y: FOOTER_TOP }, thickness: 0.8, color: BLUE });
+  const address = "Consultancy Unit, Rivers State University, Nkpolu-Oroworokwo, Port Harcourt, Rivers State";
+  const contact = "Email: info@cmotd.org   |   Phone NO.: +2349163505000";
+  page.drawText(address, { x: (PAGE_W - fonts.times.widthOfTextAtSize(address, 7.4)) / 2, y: 37, font: fonts.times, size: 7.4, color: INK });
+  page.drawText(contact, { x: (PAGE_W - fonts.times.widthOfTextAtSize(contact, 7.1)) / 2, y: 26, font: fonts.times, size: 7.1, color: INK });
+  const controlled = "Generated by ProcureFlow | Controlled copy | Validate status in the live system";
+  page.drawText(controlled, { x: LEFT, y: 13, font: fonts.helvetica, size: 6.1, color: MUTED });
+  const pageText = `Page ${pageIndex + 1} of ${pageCount}`;
+  page.drawText(pageText, { x: RIGHT - fonts.helvetica.widthOfTextAtSize(pageText, 6.1), y: 13, font: fonts.helvetica, size: 6.1, color: MUTED });
+}
+
+function drawFirstPageDetails(page: PDFPage, fonts: Fonts, input: GatewayPassPdfInput) {
+  let y = 674;
+  drawBox(page, LEFT, y - 26, CONTENT_W, 26, PALE);
+  page.drawText("STATUS", { x: 48, y: y - 17, font: fonts.helveticaBold, size: 6.5, color: MUTED });
+  page.drawText(safe(input.status || "Draft").toUpperCase(), { x: 92, y: y - 17, font: fonts.helveticaBold, size: 8.4, color: BLUE });
+  page.drawText("DEPARTMENT", { x: 262, y: y - 17, font: fonts.helveticaBold, size: 6.5, color: MUTED });
+  const deptSize = fitSize(fonts.helveticaBold, input.department || "-", 8.4, 215, 6.5);
+  page.drawText(safe(input.department || "-"), { x: 328, y: y - 17, font: fonts.helveticaBold, size: deptSize, color: INK });
+  y -= 38;
+
+  const moveH = 70;
+  drawBox(page, LEFT, y - moveH, CONTENT_W, moveH);
+  const mid = PAGE_W / 2;
+  page.drawLine({ start: { x: mid, y: y - moveH }, end: { x: mid, y }, thickness: 0.65, color: LINE });
+  drawField(page, fonts, LEFT, y - 34, mid - LEFT, 34, "Movement Type", input.movementType);
+  drawField(page, fonts, mid, y - 34, RIGHT - mid, 34, "Expected Movement", dateText(input.expectedMovementDate));
+  drawField(page, fonts, LEFT, y - moveH, mid - LEFT, 34, "Origin", input.originLocation || "-");
+  drawField(page, fonts, mid, y - moveH, RIGHT - mid, 34, "Destination", input.destination || "-");
+  y -= 82;
+
+  drawBox(page, LEFT, y - 44, CONTENT_W, 44);
+  drawField(page, fonts, LEFT, y - 44, CONTENT_W, 44, "Purpose", input.purpose, 2);
+  y -= 60;
+
+  page.drawText("MOVEMENT & RECEIVER DETAILS", { x: LEFT, y, font: fonts.helveticaBold, size: 9.5, color: NAVY });
+  y -= 12;
+  const detailsH = 54;
+  drawBox(page, LEFT, y - detailsH, CONTENT_W, detailsH);
+  const cell = CONTENT_W / 3;
+  page.drawLine({ start: { x: LEFT + cell, y: y - detailsH }, end: { x: LEFT + cell, y }, thickness: 0.65, color: LINE });
+  page.drawLine({ start: { x: LEFT + cell * 2, y: y - detailsH }, end: { x: LEFT + cell * 2, y }, thickness: 0.65, color: LINE });
+  drawField(page, fonts, LEFT, y - 27, cell, 27, "Vehicle", input.vehicleNumber || "-");
+  drawField(page, fonts, LEFT + cell, y - 27, cell, 27, "Driver", input.driverName || "-");
+  drawField(page, fonts, LEFT + cell * 2, y - 27, cell, 27, "Driver Phone", input.driverPhone || "-");
+  drawField(page, fonts, LEFT, y - detailsH, cell, 27, "Expected Return", dateText(input.expectedReturnDate));
+  drawField(page, fonts, LEFT + cell, y - detailsH, cell, 27, "Receiver", input.receiverName || "-");
+  drawField(page, fonts, LEFT + cell * 2, y - detailsH, cell, 27, "Organisation", input.receiverOrganization || "-");
+  return y - 68;
+}
+
+const ITEM_COLS = [LEFT, 58, 300, 344, 392, 463, RIGHT];
+
+function drawItemsHeader(page: PDFPage, fonts: Fonts, y: number, continued = false) {
+  page.drawText(continued ? "ITEMS / ASSETS - CONTINUED" : "ITEMS / ASSETS", { x: LEFT, y, font: fonts.helveticaBold, size: 9.5, color: NAVY });
+  y -= 10;
+  page.drawRectangle({ x: LEFT, y: y - 22, width: CONTENT_W, height: 22, color: NAVY });
+  ["#", "Description", "Qty", "Unit", "Condition", "Serial / Asset"].forEach((heading, index) => {
+    page.drawText(heading, { x: ITEM_COLS[index] + 5, y: y - 15, font: fonts.helveticaBold, size: 6.8, color: WHITE });
   });
-  let body="%PDF-1.4\n";const offsets:number[]=[0];
-  for(let id=1;id<objects.length;id++){offsets[id]=Buffer.byteLength(body,"utf8");body+=`${id} 0 obj\n${objects[id]}\nendobj\n`;}
-  const xref=Buffer.byteLength(body,"utf8");body+=`xref\n0 ${objects.length}\n0000000000 65535 f \n`;
-  for(let id=1;id<objects.length;id++)body+=`${String(offsets[id]).padStart(10,"0")} 00000 n \n`;
-  body+=`trailer\n<< /Size ${objects.length} /Root ${catalogId} 0 R >>\nstartxref\n${xref}\n%%EOF`;
-  return Buffer.from(body,"utf8");
+  return y - 22;
+}
+
+function itemRowHeight(fonts: Fonts, item: GatewayPassPdfInput["items"][number]) {
+  const desc = wrapText(fonts.helvetica, item.item_description, 7.8, ITEM_COLS[2] - ITEM_COLS[1] - 10, 3);
+  const serial = wrapText(fonts.helvetica, [item.serial_number, item.asset_tag].filter(Boolean).join(" / ") || "-", 7.2, RIGHT - ITEM_COLS[5] - 10, 2);
+  return Math.max(27, 12 + Math.max(desc.length, serial.length) * 9);
+}
+
+function drawItemRow(page: PDFPage, fonts: Fonts, y: number, item: GatewayPassPdfInput["items"][number], index: number, rowHeight: number) {
+  drawBox(page, LEFT, y - rowHeight, CONTENT_W, rowHeight, index % 2 === 0 ? PALE : WHITE);
+  ITEM_COLS.slice(1, -1).forEach((x) => page.drawLine({ start: { x, y: y - rowHeight }, end: { x, y }, thickness: 0.55, color: LINE }));
+  const desc = wrapText(fonts.helvetica, item.item_description, 7.8, ITEM_COLS[2] - ITEM_COLS[1] - 10, 3);
+  const condition = [item.quality_condition, item.fragility_status && item.fragility_status !== "Normal" ? item.fragility_status : null].filter(Boolean).join(" / ") || "-";
+  const serial = [item.serial_number, item.asset_tag].filter(Boolean).join(" / ") || "-";
+  page.drawText(String(index + 1), { x: ITEM_COLS[0] + 6, y: y - 17, font: fonts.helvetica, size: 7.8, color: INK });
+  drawLines(page, fonts.helvetica, desc, ITEM_COLS[1] + 6, y - 17, 7.8, INK, 9);
+  page.drawText(quantityText(item.quantity), { x: ITEM_COLS[2] + 7, y: y - 17, font: fonts.helvetica, size: 7.8, color: INK });
+  page.drawText(safe(item.unit_of_measure || "-"), { x: ITEM_COLS[3] + 6, y: y - 17, font: fonts.helvetica, size: 7.6, color: INK });
+  drawLines(page, fonts.helvetica, wrapText(fonts.helvetica, condition, 7.4, ITEM_COLS[5] - ITEM_COLS[4] - 10, 2), ITEM_COLS[4] + 6, y - 17, 7.4, INK, 9);
+  drawLines(page, fonts.helvetica, wrapText(fonts.helvetica, serial, 7.2, RIGHT - ITEM_COLS[5] - 10, 2), ITEM_COLS[5] + 6, y - 17, 7.2, INK, 9);
+  return y - rowHeight;
+}
+
+function drawAuthorization(page: PDFPage, fonts: Fonts, input: GatewayPassPdfInput, y: number) {
+  page.drawText("AUTHORIZATION & CONTROL", { x: LEFT, y, font: fonts.helveticaBold, size: 9.5, color: NAVY });
+  y -= 10;
+  const height = 66;
+  drawBox(page, LEFT, y - height, CONTENT_W, height);
+  const cell = CONTENT_W / 3;
+  page.drawLine({ start: { x: LEFT + cell, y: y - height }, end: { x: LEFT + cell, y }, thickness: 0.65, color: LINE });
+  page.drawLine({ start: { x: LEFT + cell * 2, y: y - height }, end: { x: LEFT + cell * 2, y }, thickness: 0.65, color: LINE });
+  drawField(page, fonts, LEFT, y - height, cell, height, "Utility / Facility Head", input.facilityManagerName || "-");
+  drawField(page, fonts, LEFT + cell, y - height, cell, height, "Approved By", input.approvedByName || roleLabel(input.approvedByRole) || "Pending");
+  drawField(page, fonts, LEFT + cell * 2, y - height, cell, height, "Approval Date", dateText(input.approvedAt, true));
+
+  page.drawText("APPROVAL NOTE", { x: LEFT + 8, y: y - height + 10, font: fonts.helveticaBold, size: 6.2, color: MUTED });
+  const approvalText = [roleLabel(input.approvedByRole), input.approvalNote || input.procurementReviewNote].filter(Boolean).join(" - ") || "-";
+  const approvalSize = fitSize(fonts.helvetica, approvalText, 6.8, CONTENT_W - 78, 5.8);
+  page.drawText(approvalText, { x: LEFT + 76, y: y - height + 10, font: fonts.helvetica, size: approvalSize, color: INK });
+  return y - height - 16;
+}
+
+function drawSecurity(page: PDFPage, fonts: Fonts, input: GatewayPassPdfInput, y: number) {
+  page.drawText("SECURITY / LOGISTICS CHECKPOINT", { x: LEFT, y, font: fonts.helveticaBold, size: 9.5, color: NAVY });
+  y -= 10;
+  const height = 42;
+  drawBox(page, LEFT, y - height, CONTENT_W, height);
+  const cell = CONTENT_W / 4;
+  for (let i = 1; i < 4; i++) page.drawLine({ start: { x: LEFT + cell * i, y: y - height }, end: { x: LEFT + cell * i, y }, thickness: 0.65, color: LINE });
+  const values = [
+    ["Checkpoint", input.securityCheckpoint || "To be completed"],
+    ["Security Officer", input.securityOfficerName || "To be completed"],
+    ["Gate Verification", input.gateVerificationTime ? dateText(input.gateVerificationTime, true) : "To be completed"],
+    ["Movement Status", input.exitEntryConfirmation || input.logisticsStatus || "Pending"],
+  ];
+  values.forEach(([label, value], index) => drawField(page, fonts, LEFT + cell * index, y - height, cell, height, label, value, 2));
+}
+
+export async function gatewayPassPdf(input: GatewayPassPdfInput) {
+  const pdf = await PDFDocument.create();
+  const fonts: Fonts = {
+    helvetica: await pdf.embedFont(StandardFonts.Helvetica),
+    helveticaBold: await pdf.embedFont(StandardFonts.HelveticaBold),
+    times: await pdf.embedFont(StandardFonts.TimesRoman),
+    timesBold: await pdf.embedFont(StandardFonts.TimesRomanBold),
+    timesItalic: await pdf.embedFont(StandardFonts.TimesRomanItalic),
+  };
+  const branding = await loadBranding(pdf);
+  const pages: PDFPage[] = [];
+
+  const addPage = (continuation = false) => {
+    const page = pdf.addPage([PAGE_W, PAGE_H]);
+    pages.push(page);
+    drawInstitutionHeader(page, fonts, branding);
+    drawBanner(page, fonts, input, continuation);
+    return page;
+  };
+
+  let page = addPage(false);
+  let y = drawFirstPageDetails(page, fonts, input);
+  y = drawItemsHeader(page, fonts, y, false);
+
+  input.items.forEach((item, index) => {
+    const rowHeight = itemRowHeight(fonts, item);
+    const reserveForAuthorization = 174;
+    if (y - rowHeight < FOOTER_TOP + reserveForAuthorization) {
+      page = addPage(true);
+      y = drawItemsHeader(page, fonts, 666, true);
+    }
+    y = drawItemRow(page, fonts, y, item, index, rowHeight);
+  });
+
+  if (y < FOOTER_TOP + 150) {
+    page = addPage(true);
+    y = 666;
+  } else {
+    y -= 18;
+  }
+  y = drawAuthorization(page, fonts, input, y);
+  drawSecurity(page, fonts, input, y);
+
+  pages.forEach((current, index) => drawFooter(current, fonts, index, pages.length));
+  pdf.setTitle(`${input.passNumber} - CMOTD Gateway Pass`);
+  pdf.setSubject("ProcureFlow controlled gateway pass");
+  pdf.setAuthor("Centre For Marine and Offshore Technology Development (CMOTD)");
+  return Buffer.from(await pdf.save());
 }

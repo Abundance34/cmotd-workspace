@@ -6,6 +6,14 @@ import { spawnSync } from "node:child_process";
 const root = process.cwd();
 const rootPosix = root.replaceAll("\\", "/");
 
+const brandingDir = path.join(root, "public", "branding");
+fs.mkdirSync(brandingDir, { recursive: true });
+for (const [sourceName, targetName] of [["rsu_logo.png", "rsu_logo.png"], ["cmotd_logo.png", "cmotd_logo.png"]]) {
+  const source = path.resolve(root, "..", "static", "assets", sourceName);
+  const target = path.join(brandingDir, targetName);
+  if (fs.existsSync(source)) fs.copyFileSync(source, target);
+}
+
 const scripts = [
   "apply-local-parity-overlay.mjs",
   "apply-local-procurement-notification-parity.mjs",
