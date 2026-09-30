@@ -178,16 +178,17 @@ type Branding = {
 };
 
 async function loadBranding(pdf: PDFDocument): Promise<Branding> {
-  const brandingDir = path.join(process.cwd(), "public", "branding");
-  const embed = async (filename: string) => {
-    try {
-      const bytes = fs.readFileSync(path.join(brandingDir, filename));
-      return await pdf.embedPng(bytes);
-    } catch {
-      return null;
-    }
-  };
-  return { rsu: await embed("rsu_logo.png"), cmotd: await embed("cmotd_logo.png") };
+  let rsu: PDFImage | null = null;
+  let cmotd: PDFImage | null = null;
+  try {
+    const bytes = fs.readFileSync(path.join(process.cwd(), "public", "branding", "rsu_logo.png"));
+    rsu = await pdf.embedPng(bytes);
+  } catch {}
+  try {
+    const bytes = fs.readFileSync(path.join(process.cwd(), "public", "branding", "cmotd_logo.png"));
+    cmotd = await pdf.embedPng(bytes);
+  } catch {}
+  return { rsu, cmotd };
 }
 
 function drawImageFit(page: PDFPage, image: PDFImage | null, x: number, y: number, width: number, height: number) {
