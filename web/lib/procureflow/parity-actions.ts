@@ -10,7 +10,7 @@ function assertRole(user: CurrentUser, allowed: string[]) {
 }
 function clean(value: unknown, max = 4000) { return String(value ?? "").trim().replace(/\s+/g, " ").slice(0, max); }
 function positiveId(value: unknown, label = "record") { const n=Number(value); if(!Number.isInteger(n)||n<=0) throw new Error(`Choose a valid ${label}.`); return n; }
-function money(value: unknown, label = "amount") { const n=Number(value); if(!Number.isFinite(n)||n<0) throw new Error(`Enter a valid ${label}.`); return n; }
+function money(value: unknown, label = "amount") { const n=Number(value); if(!Number.isFinite(n)||n<0) throw new Error(`Enter a valid ${label}.`); return n; }\nfunction wholeNumber(value: unknown, label = "quantity") { const n=Number(value); if(!Number.isInteger(n)||n<=0) throw new Error(`Enter a whole number greater than zero for ${label}.`); return n; }
 function reason(value: unknown) { const v=clean(value,2000); if(v.length<4) throw new Error("Enter a meaningful reason or note."); return v; }
 function ref(prefix:string){return `${prefix}-${new Date().toISOString().replace(/[-:TZ.]/g,"").slice(0,17)}-${randomUUID().slice(0,8).toUpperCase()}`;}
 function maskAccount(value:string){const d=value.replace(/\D/g,""); return d ? `••••${d.slice(-4)}` : "";}
@@ -282,7 +282,7 @@ export async function runParityAction(user:CurrentUser, action:string, payload:a
 
   if(action==="gateway-create"){
     assertRole(user,["Facility Manager","Admin"]);const department=clean(payload.department,180);const movementType=clean(payload.movementType,120);const purpose=reason(payload.purpose);const items=Array.isArray(payload.items)?payload.items:[];if(!department||!movementType)throw new Error("Department and movement type are required.");if(!items.length)throw new Error("Add at least one item to the gateway pass.");const pass=ref("GP");
-    return sql.begin(async tx=>{const row=await tx<any[]>`INSERT INTO gateway_passes (pass_number,facility_manager_user_id,department,movement_type,purpose,origin_location,destination,expected_movement_date,expected_return_date,vehicle_number,driver_name,driver_phone,receiver_name,receiver_organization,status,next_role,created_at,updated_at) VALUES (${pass},${user.id},${department},${movementType},${purpose},${clean(payload.originLocation,250)||null},${clean(payload.destination,250)||null},${clean(payload.expectedMovementDate,20)||null},${clean(payload.expectedReturnDate,20)||null},${clean(payload.vehicleNumber,80)||null},${clean(payload.driverName,160)||null},${clean(payload.driverPhone,80)||null},${clean(payload.receiverName,160)||null},${clean(payload.receiverOrganization,180)||null},'Draft','facility_manager',NOW(),NOW()) RETURNING id`;const id=Number(row[0].id);for(const item of items.slice(0,100)){const desc=clean(item.description,500);if(!desc)continue;await tx`INSERT INTO gateway_pass_items (gateway_pass_id,item_description,item_category,quantity,unit_of_measure,quality_condition,estimated_value,serial_number,asset_tag,fragility_status,handling_instruction,remarks,created_at,colour) VALUES (${id},${desc},${clean(item.category,120)||null},${money(item.quantity||1,"quantity")},${clean(item.unit,60)||'Unit'},${clean(item.condition,80)||'Good'},${money(item.estimatedValue||0,"estimated value")},${clean(item.serialNumber,120)||null},${clean(item.assetTag,120)||null},${clean(item.fragility,80)||'Normal'},${clean(item.handlingInstruction,400)||null},${clean(item.remarks,400)||null},NOW(),${clean(item.colour,80)||null})`;}
+    return sql.begin(async tx=>{const row=await tx<any[]>`INSERT INTO gateway_passes (pass_number,facility_manager_user_id,department,movement_type,purpose,origin_location,destination,expected_movement_date,expected_return_date,vehicle_number,driver_name,driver_phone,receiver_name,receiver_organization,status,next_role,created_at,updated_at) VALUES (${pass},${user.id},${department},${movementType},${purpose},${clean(payload.originLocation,250)||null},${clean(payload.destination,250)||null},${clean(payload.expectedMovementDate,20)||null},${clean(payload.expectedReturnDate,20)||null},${clean(payload.vehicleNumber,80)||null},${clean(payload.driverName,160)||null},${clean(payload.driverPhone,80)||null},${clean(payload.receiverName,160)||null},${clean(payload.receiverOrganization,180)||null},'Draft','facility_manager',NOW(),NOW()) RETURNING id`;const id=Number(row[0].id);for(const item of items.slice(0,100)){const desc=clean(item.description,500);if(!desc)continue;await tx`INSERT INTO gateway_pass_items (gateway_pass_id,item_description,item_category,quantity,unit_of_measure,quality_condition,estimated_value,serial_number,asset_tag,fragility_status,handling_instruction,remarks,created_at,colour) VALUES (${id},${desc},${clean(item.category,120)||null},${wholeNumber(item.quantity??1,"quantity")},${clean(item.unit,60)||'Unit'},${clean(item.condition,80)||'Good'},${money(item.estimatedValue||0,"estimated value")},${clean(item.serialNumber,120)||null},${clean(item.assetTag,120)||null},${clean(item.fragility,80)||'Normal'},${clean(item.handlingInstruction,400)||null},${clean(item.remarks,400)||null},NOW(),${clean(item.colour,80)||null})`;}
       await workflow(tx,user,"Gateway Pass",id,"Gateway Pass Draft Created","Draft",purpose);await evidence(tx,user,{action:"Gateway Pass Created",entityType:"Gateway Pass",entityId:id,entityReference:pass,after:{department,movement_type:movementType,status:"Draft",item_count:items.length},note:purpose});return {gatewayPassId:id,passNumber:pass};});
   }
 
@@ -310,7 +310,7 @@ export async function runParityAction(user:CurrentUser, action:string, payload:a
       await tx`DELETE FROM gateway_pass_items WHERE gateway_pass_id=${id}`;
       for(const item of validItems){
         const desc=clean(item.description,500);
-        await tx`INSERT INTO gateway_pass_items (gateway_pass_id,item_description,item_category,quantity,unit_of_measure,quality_condition,estimated_value,serial_number,asset_tag,fragility_status,handling_instruction,remarks,created_at,colour) VALUES (${id},${desc},${clean(item.category,120)||null},${money(item.quantity||1,"quantity")},${clean(item.unit,60)||'Unit'},${clean(item.condition,80)||'Good'},${money(item.estimatedValue||0,"estimated value")},${clean(item.serialNumber,120)||null},${clean(item.assetTag,120)||null},${clean(item.fragility,80)||'Normal'},${clean(item.handlingInstruction,400)||null},${clean(item.remarks,400)||null},${now},${clean(item.colour,80)||null})`;
+        await tx`INSERT INTO gateway_pass_items (gateway_pass_id,item_description,item_category,quantity,unit_of_measure,quality_condition,estimated_value,serial_number,asset_tag,fragility_status,handling_instruction,remarks,created_at,colour) VALUES (${id},${desc},${clean(item.category,120)||null},${wholeNumber(item.quantity??1,"quantity")},${clean(item.unit,60)||'Unit'},${clean(item.condition,80)||'Good'},${money(item.estimatedValue||0,"estimated value")},${clean(item.serialNumber,120)||null},${clean(item.assetTag,120)||null},${clean(item.fragility,80)||'Normal'},${clean(item.handlingInstruction,400)||null},${clean(item.remarks,400)||null},${now},${clean(item.colour,80)||null})`;
       }
       const event=currentStatus==="Returned for Correction"?"Gateway Pass Corrections Saved":"Gateway Pass Draft Updated";
       await workflow(tx,user,"Gateway Pass",id,event,currentStatus,currentStatus==="Returned for Correction"?"Returned gateway pass corrected and ready for resubmission":"Gateway pass draft updated before submission");
@@ -350,7 +350,7 @@ export async function runParityAction(user:CurrentUser, action:string, payload:a
         SET status=${status},next_role=${next},reviewed_by_user_id=${user.id},reviewed_at=${now},procurement_review_note=${note},
             approved_at=${decision==="approve"?now:gp.approved_at},
             approved_by_user_id=${decision==="approve"?user.id:gp.approved_by_user_id},
-            approved_by_role=${decision==="approve"?user.role:gp.approved_by_role},
+            approved_by_role=${decision==="approve"?approvalRole:gp.approved_by_role},
             approval_note=${decision==="approve"?note:gp.approval_note},
             rejected_at=${decision==="reject"?now:gp.rejected_at},
             rejected_by_user_id=${decision==="reject"?user.id:gp.rejected_by_user_id},
@@ -358,15 +358,15 @@ export async function runParityAction(user:CurrentUser, action:string, payload:a
             updated_at=${now}
         WHERE id=${id}
       `;
-      await tx`INSERT INTO gateway_pass_approvals (gateway_pass_id,approver_user_id,approver_role,decision,note,created_at) VALUES (${id},${user.id},${user.role},${decision},${note},${now})`;
+      await tx`INSERT INTO gateway_pass_approvals (gateway_pass_id,approver_user_id,approver_role,decision,note,created_at) VALUES (${id},${user.id},${approvalRole},${decision},${note},${now})`;
       await workflow(tx,user,"Gateway Pass",id,`Gateway Pass ${decision}`,status,note);
-      await evidence(tx,user,{action:`Gateway Pass ${decision}`,entityType:"Gateway Pass",entityId:id,entityReference:gp.pass_number,before:{status:gp.status,next_role:gp.next_role},after:{status,next_role:next,approved_by_role:decision==="approve"?user.role:null,approved_at:decision==="approve"?now:null},note});
-      if(gp.facility_manager_user_id)await notifyUser(tx,Number(gp.facility_manager_user_id),`Gateway pass ${status}`,decision==="approve"?`${gp.pass_number} was approved by ${user.role}. You can now open, print, or download the approved PDF.`:`${gp.pass_number}: ${note}`,"Gateway Pass",id,"Gateway Pass",decision==="approve"?"High":"High");
+      await evidence(tx,user,{action:`Gateway Pass ${decision}`,entityType:"Gateway Pass",entityId:id,entityReference:gp.pass_number,before:{status:gp.status,next_role:gp.next_role},after:{status,next_role:next,approved_by_role:decision==="approve"?approvalRole:null,approved_at:decision==="approve"?now:null},note});
+      if(gp.facility_manager_user_id)await notifyUser(tx,Number(gp.facility_manager_user_id),`Gateway pass ${status}`,decision==="approve"?`${gp.pass_number} was approved by ${approvalRole}. You can now open, print, or download the approved PDF.`:`${gp.pass_number}: ${note}`,"Gateway Pass",id,"Gateway Pass",decision==="approve"?"High":"High");
       if(decision==="approve"){
         await notifyRole(tx,"Approver","Gateway pass approved",`${gp.pass_number} was approved by ${user.role} and is available in Approved Gateway Passes.`,"Gateway Pass",id,"Approved Gateway Passes","Normal");
-        await notifyRole(tx,"Auditor","Gateway pass approved",`${gp.pass_number} was approved by ${user.role}.`,"Gateway Pass",id,"Gateway Pass Audit","Normal");
+        await notifyRole(tx,"Auditor","Gateway pass approved",`${gp.pass_number} was approved by ${approvalRole}.`,"Gateway Pass",id,"Gateway Pass Audit","Normal");
       }
-      return {id,status,approvedByRole:decision==="approve"?user.role:null,approvedAt:decision==="approve"?now:null};
+      return {id,status,approvedByRole:decision==="approve"?approvalRole:null,approvedAt:decision==="approve"?now:null};
     });
   }
 
