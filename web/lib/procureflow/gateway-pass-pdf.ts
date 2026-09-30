@@ -84,8 +84,17 @@ function dateText(value: unknown, includeTime = false) {
   }).format(date);
 }
 
+const PDF_REPLACEMENTS: Record<string, string> = {
+  "₦": "NGN ", "–": "-", "—": "-", "→": "->", "•": "*", "…": "...",
+  "’": "'", "‘": "'", "“": '"', "”": '"', " ": " ",
+};
+
 function safe(value: unknown) {
-  return String(value ?? "-").replace(/[\r\n]+/g, " ").trim() || "-";
+  return String(value ?? "-")
+    .normalize("NFKD")
+    .replace(/[\r\n]+/g, " ")
+    .replace(/[^\x20-\x7E]/g, (char) => PDF_REPLACEMENTS[char] || "?")
+    .trim() || "-";
 }
 
 function wrapText(font: PDFFont, text: unknown, size: number, maxWidth: number, maxLines = 3) {
