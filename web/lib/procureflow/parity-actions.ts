@@ -376,6 +376,168 @@ export async function runParityAction(user:CurrentUser, action:string, payload:a
     assertRole(user,["Facility Manager","Admin"]);const id=positiveId(payload.gatewayPassId,"gateway pass");return sql.begin(async tx=>{const gp=(await tx<any[]>`SELECT * FROM gateway_passes WHERE id=${id} FOR UPDATE`)[0];if(!gp)throw new Error("Gateway pass not found.");if(user.role!=="Admin"&&Number(gp.facility_manager_user_id)!==user.id)throw new Error("You can generate only your own approved gateway passes.");if(!["Approved","Generated","Downloaded"].includes(String(gp.status||"")))throw new Error("Only an approved gateway pass can be generated.");const path=`/api/gateway-pass/${id}/pdf`;await tx`UPDATE gateway_passes SET status='Generated',generated_at=COALESCE(generated_at,NOW()),generated_file_path=${path},next_role='facility_manager',updated_at=NOW() WHERE id=${id}`;await workflow(tx,user,"Gateway Pass",id,"Generated","Generated","Gateway pass PDF generated");await evidence(tx,user,{action:"Gateway Pass Generated",entityType:"Gateway Pass",entityId:id,entityReference:gp.pass_number,before:{status:gp.status},after:{status:"Generated",generated_file_path:path},note:"Approved gateway pass generated for controlled download"});return {id,status:"Generated",downloadUrl:path};});
   }
 
+
+  if(action==="return-pass-create"){
+    assertRole(user,["Facility Manager","Admin"]);
+    const gatewayPassId=positiveId(payload.gatewayPassId,"gateway pass");
+    const items=Array.isArray(payload.items)?payload.items:[];
+    const pass=ref("RP");
+    return sql.begin(async tx=>{
+      const gp=(await tx<any[]>`SELECT * FROM gateway_passes WHERE id=${gatewayPassId} FOR UPDATE`)[0];
+      if(!gp)throw new Error("Gateway pass not found.");
+      if(user.role!=="Admin"&&Number(gp.facility_manager_user_id)!==user.id)throw new Error("You can create a return pass only for your own gateway pass.");
+      if(!["Approved","Generated","Downloaded","Closed"].includes(String(gp.status||"")))throw new Error("Only an approved gateway pass can start a return.");
+      if(String(gp.return_status||"")==="Fully Returned")throw new Error("All items on this gateway pass have already been fully returned.");
+      const sourceItems=await tx<any[]>`
+        SELECT gi.*,
+          COALESCE((SELECT SUM(rpi.quantity_returned) FROM return_pass_items rpi JOIN return_passes rp ON rp.id=rpi.return_pass_id
+                    WHERE rpi.gateway_pass_item_id=gi.id AND rp.status IN ('Returned','Partial Return','Returned With Exception')),0) previous_returned
+        FROM gateway_pass_items gi WHERE gi.gateway_pass_id=${gatewayPassId} ORDER BY gi.id FOR UPDATE OF gi`;
+      if(!sourceItems.length)throw new Error("The gateway pass has no item lines to return.");
+      const requested=new Map(items.map((item:any)=>[Number(item.gatewayPassItemId),item]));
+      let hasReturn=false;
+      const prepared=sourceItems.map((item:any)=>{
+        const input=requested.get(Number(item.id))||{};
+        const outbound=wholeNumber(item.quantity,"outbound quantity");
+        const previous=Math.max(0,Math.round(Number(item.previous_returned||0)));
+        const outstanding=Math.max(0,outbound-previous);
+        const quantity=Number(input.quantityReturned??0);
+        if(!Number.isInteger(quantity)||quantity<0)throw new Error(`Return quantity for ${item.item_description} must be a whole number.`);
+        if(quantity>outstanding)throw new Error(`Return quantity for ${item.item_description} cannot exceed the ${outstanding} item(s) outstanding.`);
+        if(quantity>0)hasReturn=true;
+        return {item,outbound,previous,quantity,condition:clean(input.conditionOnReturn,80)||"Good",discrepancyType:clean(input.discrepancyType,120)||null,discrepancyNotes:clean(input.discrepancyNotes,600)||null,remarks:clean(input.remarks,600)||null};
+      });
+      if(!hasReturn)throw new Error("Enter at least one item quantity being returned.");
+      const row=await tx<any[]>`
+        INSERT INTO return_passes (return_pass_number,gateway_pass_id,facility_manager_user_id,department,purpose,return_origin,receiving_location,actual_return_date,vehicle_number,driver_name,driver_phone,status,next_role,created_at,updated_at)
+        VALUES (${pass},${gatewayPassId},${gp.facility_manager_user_id},${gp.department},${clean(payload.purpose,800)||`Return against ${gp.pass_number}`},${clean(payload.returnOrigin,250)||gp.destination||null},${clean(payload.receivingLocation,250)||gp.origin_location||null},${clean(payload.actualReturnDate,20)||null},${clean(payload.vehicleNumber,80)||null},${clean(payload.driverName,160)||null},${clean(payload.driverPhone,80)||null},'Draft','facility_manager',NOW(),NOW()) RETURNING id`;
+      const id=Number(row[0].id);
+      for(const p of prepared){
+        await tx`INSERT INTO return_pass_items (return_pass_id,gateway_pass_item_id,quantity_outbound,quantity_previously_returned,quantity_returned,condition_on_return,discrepancy_type,discrepancy_notes,remarks,created_at,updated_at)
+          VALUES (${id},${p.item.id},${p.outbound},${p.previous},${p.quantity},${p.condition},${p.discrepancyType},${p.discrepancyNotes},${p.remarks},NOW(),NOW())`;
+      }
+      await tx`UPDATE gateway_passes SET return_status=CASE WHEN COALESCE(return_status,'Not Started')='Not Started' THEN 'Return Drafted' ELSE return_status END,updated_at=NOW() WHERE id=${gatewayPassId}`;
+      await tx`INSERT INTO return_pass_events (return_pass_id,event,status,note,user_id,created_at) VALUES (${id},'Return Pass Draft Created','Draft',${`Linked to ${gp.pass_number}`},${user.id},NOW())`;
+      await workflow(tx,user,"Return Pass",id,"Return Pass Draft Created","Draft",`Linked to ${gp.pass_number}`);
+      await evidence(tx,user,{action:"Return Pass Created",entityType:"Return Pass",entityId:id,entityReference:pass,after:{gateway_pass:gp.pass_number,status:"Draft"},note:`Return reconciliation started for ${gp.pass_number}`});
+      return {returnPassId:id,returnPassNumber:pass};
+    });
+  }
+
+  if(action==="return-pass-update"){
+    assertRole(user,["Facility Manager","Admin"]);
+    const id=positiveId(payload.returnPassId,"return pass");
+    const items=Array.isArray(payload.items)?payload.items:[];
+    return sql.begin(async tx=>{
+      const rp=(await tx<any[]>`SELECT * FROM return_passes WHERE id=${id} FOR UPDATE`)[0];
+      if(!rp)throw new Error("Return pass not found.");
+      if(user.role!=="Admin"&&Number(rp.facility_manager_user_id)!==user.id)throw new Error("You can edit only your own return pass.");
+      if(!["Draft","Returned for Correction"].includes(String(rp.status||"")))throw new Error("Only a draft or returned-for-correction return pass can be edited.");
+      const sourceItems=await tx<any[]>`
+        SELECT gi.*,
+          COALESCE((SELECT SUM(rpi.quantity_returned) FROM return_pass_items rpi JOIN return_passes other ON other.id=rpi.return_pass_id
+                    WHERE rpi.gateway_pass_item_id=gi.id AND other.id<>${id} AND other.status IN ('Returned','Partial Return','Returned With Exception')),0) previous_returned
+        FROM gateway_pass_items gi WHERE gi.gateway_pass_id=${rp.gateway_pass_id} ORDER BY gi.id`;
+      const requested=new Map(items.map((item:any)=>[Number(item.gatewayPassItemId),item]));
+      let hasReturn=false;
+      const prepared=sourceItems.map((item:any)=>{
+        const input=requested.get(Number(item.id))||{};
+        const outbound=wholeNumber(item.quantity,"outbound quantity");
+        const previous=Math.max(0,Math.round(Number(item.previous_returned||0)));
+        const outstanding=Math.max(0,outbound-previous);
+        const quantity=Number(input.quantityReturned??0);
+        if(!Number.isInteger(quantity)||quantity<0)throw new Error(`Return quantity for ${item.item_description} must be a whole number.`);
+        if(quantity>outstanding)throw new Error(`Return quantity for ${item.item_description} cannot exceed ${outstanding} outstanding.`);
+        if(quantity>0)hasReturn=true;
+        return {item,outbound,previous,quantity,condition:clean(input.conditionOnReturn,80)||"Good",discrepancyType:clean(input.discrepancyType,120)||null,discrepancyNotes:clean(input.discrepancyNotes,600)||null,remarks:clean(input.remarks,600)||null};
+      });
+      if(!hasReturn)throw new Error("Enter at least one item quantity being returned.");
+      await tx`UPDATE return_passes SET purpose=${clean(payload.purpose,800)||rp.purpose},return_origin=${clean(payload.returnOrigin,250)||null},receiving_location=${clean(payload.receivingLocation,250)||null},actual_return_date=${clean(payload.actualReturnDate,20)||null},vehicle_number=${clean(payload.vehicleNumber,80)||null},driver_name=${clean(payload.driverName,160)||null},driver_phone=${clean(payload.driverPhone,80)||null},updated_at=NOW() WHERE id=${id}`;
+      await tx`DELETE FROM return_pass_items WHERE return_pass_id=${id}`;
+      for(const p of prepared)await tx`INSERT INTO return_pass_items (return_pass_id,gateway_pass_item_id,quantity_outbound,quantity_previously_returned,quantity_returned,condition_on_return,discrepancy_type,discrepancy_notes,remarks,created_at,updated_at) VALUES (${id},${p.item.id},${p.outbound},${p.previous},${p.quantity},${p.condition},${p.discrepancyType},${p.discrepancyNotes},${p.remarks},NOW(),NOW())`;
+      await tx`INSERT INTO return_pass_events (return_pass_id,event,status,note,user_id,created_at) VALUES (${id},'Return Pass Updated',${rp.status},'Facility saved return reconciliation changes',${user.id},NOW())`;
+      await evidence(tx,user,{action:"Return Pass Updated",entityType:"Return Pass",entityId:id,entityReference:rp.return_pass_number,before:{status:rp.status},after:{status:rp.status},note:"Return quantities and conditions updated."});
+      return {returnPassId:id,status:rp.status};
+    });
+  }
+
+  if(action==="return-pass-submit"){
+    assertRole(user,["Facility Manager","Admin"]);
+    const id=positiveId(payload.returnPassId,"return pass");
+    return sql.begin(async tx=>{
+      const rp=(await tx<any[]>`SELECT * FROM return_passes WHERE id=${id} FOR UPDATE`)[0];
+      if(!rp)throw new Error("Return pass not found.");
+      if(user.role!=="Admin"&&Number(rp.facility_manager_user_id)!==user.id)throw new Error("You can submit only your own return pass.");
+      if(!["Draft","Returned for Correction"].includes(String(rp.status||"")))throw new Error("This return pass is not ready for submission.");
+      const rows=await tx<any[]>`SELECT * FROM return_pass_items WHERE return_pass_id=${id}`;
+      if(!rows.some((row:any)=>Number(row.quantity_returned||0)>0))throw new Error("At least one returned quantity is required.");
+      await tx`UPDATE return_passes SET status='Submitted',next_role='logistics_manager',submitted_at=NOW(),reviewed_at=NULL,reviewed_by_user_id=NULL,approval_note=NULL,rejection_reason=NULL,updated_at=NOW() WHERE id=${id}`;
+      await tx`INSERT INTO return_pass_events (return_pass_id,event,status,note,user_id,created_at) VALUES (${id},'Submitted to Logistics Manager','Submitted','Awaiting physical return verification',${user.id},NOW())`;
+      await workflow(tx,user,"Return Pass",id,"Submitted to Logistics Manager","Submitted","Return quantities and conditions ready for verification.");
+      await evidence(tx,user,{action:"Return Pass Submitted",entityType:"Return Pass",entityId:id,entityReference:rp.return_pass_number,before:{status:rp.status},after:{status:"Submitted",next_role:"logistics_manager"},note:"Return pass submitted for Logistics Manager verification."});
+      await notifyRole(tx,"Logistics Officer","Return pass awaiting verification",`${rp.return_pass_number} is ready for quantity, condition and gate verification.`,"Return Pass",id,"Return Pass Review","High");
+      return {returnPassId:id,status:"Submitted"};
+    });
+  }
+
+  if(action==="return-pass-review"){
+    assertRole(user,["Logistics Officer","Admin"]);
+    const id=positiveId(payload.returnPassId,"return pass");
+    const decision=clean(payload.decision,30);
+    if(!["approve","return","reject"].includes(decision))throw new Error("Choose a valid return pass decision.");
+    const note=decision==="approve"?(clean(payload.note,1200)||"Return physically verified by Logistics Manager"):reason(payload.note);
+    return sql.begin(async tx=>{
+      const rp=(await tx<any[]>`SELECT rp.*,gp.pass_number gateway_pass_number FROM return_passes rp JOIN gateway_passes gp ON gp.id=rp.gateway_pass_id WHERE rp.id=${id} FOR UPDATE OF rp`)[0];
+      if(!rp)throw new Error("Return pass not found.");
+      if(String(rp.status||"")!=="Submitted")throw new Error("This return pass is no longer awaiting Logistics Manager verification.");
+      const now=new Date().toISOString();
+      if(decision==="return"){
+        await tx`UPDATE return_passes SET status='Returned for Correction',next_role='facility_manager',reviewed_at=${now},reviewed_by_user_id=${user.id},approval_note=${note},updated_at=${now} WHERE id=${id}`;
+        await tx`INSERT INTO return_pass_events (return_pass_id,event,status,note,user_id,created_at) VALUES (${id},'Returned for Correction','Returned for Correction',${note},${user.id},NOW())`;
+        await workflow(tx,user,"Return Pass",id,"Returned for Correction","Returned for Correction",note);
+        await evidence(tx,user,{action:"Return Pass Returned for Correction",entityType:"Return Pass",entityId:id,entityReference:rp.return_pass_number,before:{status:"Submitted"},after:{status:"Returned for Correction",next_role:"facility_manager"},note});
+        await notifyUser(tx,Number(rp.facility_manager_user_id),"Return pass needs correction",`${rp.return_pass_number} was returned by Logistics Manager: ${note}`,"Return Pass",id,"Return Pass","High");
+        return {returnPassId:id,status:"Returned for Correction"};
+      }
+      if(decision==="reject"){
+        await tx`UPDATE return_passes SET status='Rejected',next_role=NULL,reviewed_at=${now},reviewed_by_user_id=${user.id},rejected_at=${now},rejected_by_user_id=${user.id},rejection_reason=${note},updated_at=${now} WHERE id=${id}`;
+        await tx`INSERT INTO return_pass_events (return_pass_id,event,status,note,user_id,created_at) VALUES (${id},'Return Pass Rejected','Rejected',${note},${user.id},NOW())`;
+        await workflow(tx,user,"Return Pass",id,"Return Pass Rejected","Rejected",note);
+        await evidence(tx,user,{action:"Return Pass Rejected",entityType:"Return Pass",entityId:id,entityReference:rp.return_pass_number,before:{status:"Submitted"},after:{status:"Rejected"},note,severity:"Important"});
+        await notifyUser(tx,Number(rp.facility_manager_user_id),"Return pass rejected",`${rp.return_pass_number} was rejected by Logistics Manager. Reason: ${note}`,"Return Pass",id,"Return Pass","High");
+        return {returnPassId:id,status:"Rejected"};
+      }
+
+      const lines=await tx<any[]>`
+        SELECT rpi.*,gi.item_description,gi.quantity outbound_qty,
+          COALESCE((SELECT SUM(prev.quantity_returned) FROM return_pass_items prev JOIN return_passes prp ON prp.id=prev.return_pass_id
+                    WHERE prev.gateway_pass_item_id=rpi.gateway_pass_item_id AND prp.id<>${id} AND prp.status IN ('Returned','Partial Return','Returned With Exception')),0) previous_approved
+        FROM return_pass_items rpi JOIN gateway_pass_items gi ON gi.id=rpi.gateway_pass_item_id
+        WHERE rpi.return_pass_id=${id} ORDER BY rpi.id FOR UPDATE OF rpi`;
+      if(!lines.length)throw new Error("Return pass has no item reconciliation lines.");
+      let allComplete=true;let hasException=false;
+      for(const line of lines){
+        const outbound=wholeNumber(line.outbound_qty,"outbound quantity");
+        const previous=Math.max(0,Math.round(Number(line.previous_approved||0)));
+        const current=wholeNumber(line.quantity_returned||0,`return quantity for ${line.item_description}`);
+        if(current+previous>outbound)throw new Error(`Verified quantity for ${line.item_description} exceeds the original outbound quantity.`);
+        if(current+previous<outbound)allComplete=false;
+        if(String(line.condition_on_return||"Good")!=="Good"||clean(line.discrepancy_type,120)||clean(line.discrepancy_notes,600))hasException=true;
+        await tx`UPDATE return_pass_items SET quantity_previously_returned=${previous},updated_at=NOW() WHERE id=${line.id}`;
+      }
+      const finalStatus=allComplete?(hasException?"Returned With Exception":"Returned"):"Partial Return";
+      const gatewayReturnStatus=allComplete?(hasException?"Returned With Exception":"Fully Returned"):"Partially Returned";
+      await tx`UPDATE return_passes SET status=${finalStatus},next_role=NULL,reviewed_at=${now},reviewed_by_user_id=${user.id},approved_at=${now},approved_by_user_id=${user.id},approved_by_role='Logistics Manager',approval_note=${note},security_checkpoint=${clean(payload.securityCheckpoint,160)||rp.security_checkpoint},security_officer_name=${clean(payload.securityOfficerName,160)||rp.security_officer_name},gate_verification_time=${clean(payload.gateVerificationTime,40)||now},updated_at=${now} WHERE id=${id}`;
+      await tx`UPDATE gateway_passes SET return_status=${gatewayReturnStatus},last_return_at=${now},return_completed_at=${allComplete?now:null},actual_return_date=${allComplete?(rp.actual_return_date||now.slice(0,10)):null},updated_at=NOW() WHERE id=${rp.gateway_pass_id}`;
+      await tx`INSERT INTO return_pass_events (return_pass_id,event,status,note,user_id,created_at) VALUES (${id},'Return Verified',${finalStatus},${note},${user.id},NOW())`;
+      await workflow(tx,user,"Return Pass",id,"Return Verified",finalStatus,note);
+      await evidence(tx,user,{action:"Return Pass Verified",entityType:"Return Pass",entityId:id,entityReference:rp.return_pass_number,before:{status:"Submitted"},after:{status:finalStatus,gateway_return_status:gatewayReturnStatus,approved_by_role:"Logistics Manager"},note,severity:hasException?"Important":"Normal"});
+      await notifyUser(tx,Number(rp.facility_manager_user_id),"Return pass verified",`${rp.return_pass_number} is ${finalStatus}. Linked ${rp.gateway_pass_number} is now ${gatewayReturnStatus}.`,"Return Pass",id,"Return Pass","Normal");
+      await notifyRole(tx,"Procurement Manager","Return reconciliation updated",`${rp.return_pass_number} was verified by Logistics Manager; ${rp.gateway_pass_number} is ${gatewayReturnStatus}.`,"Return Pass",id,"Return Pass Register","Normal");
+      return {returnPassId:id,status:finalStatus,gatewayReturnStatus};
+    });
+  }
+
   if(action==="thread-message"){
     assertRole(user,["Facility Manager","Procurement Manager","Admin"]);const threadId=positiveId(payload.threadId,"thread");const message=reason(payload.message);return sql.begin(async tx=>{const thread=(await tx<any[]>`SELECT * FROM collaboration_threads WHERE id=${threadId} FOR UPDATE`)[0];if(!thread)throw new Error("Shared thread not found.");if(user.role==="Facility Manager"&&Number(thread.facility_manager_user_id)!==user.id)throw new Error("This thread is not assigned to you.");if(user.role==="Procurement Manager"&&Number(thread.procurement_manager_user_id)!==user.id)throw new Error("This thread is not assigned to you.");const row=await tx<any[]>`INSERT INTO collaboration_messages (thread_id,sender_user_id,message_text,is_private,created_at) VALUES (${threadId},${user.id},${message},1,NOW()) RETURNING id`;await tx`UPDATE collaboration_threads SET updated_at=NOW() WHERE id=${threadId}`;const target=user.role==="Facility Manager"?Number(thread.procurement_manager_user_id):Number(thread.facility_manager_user_id);if(target)await notifyUser(tx,target,"New procurement thread message",message.slice(0,180),"Collaboration Thread",threadId,user.role==="Facility Manager"?"Utility Head / Facility Head Inbox":"Shared Thread with Procurement Manager");await evidence(tx,user,{action:"Shared Thread Message",entityType:"Collaboration Thread",entityId:threadId,after:{message_id:Number(row[0].id),message_length:message.length},note:"Private collaboration message recorded"});return {messageId:Number(row[0].id)};});
   }
