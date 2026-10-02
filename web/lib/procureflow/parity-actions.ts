@@ -523,7 +523,7 @@ export async function runParityAction(user:CurrentUser, action:string, payload:a
         if(!Number.isInteger(current)||current<0)throw new Error(`Return quantity for ${line.item_description} must be a whole number.`);
         if(current+previous>outbound)throw new Error(`Verified quantity for ${line.item_description} exceeds the original outbound quantity.`);
         if(current+previous<outbound)allComplete=false;
-        if(String(line.condition_on_return||"Good")!=="Good"||clean(line.discrepancy_type,120)||clean(line.discrepancy_notes,600))hasException=true;
+        if(current>0&&(String(line.condition_on_return||"Good")!=="Good"||clean(line.discrepancy_type,120)||clean(line.discrepancy_notes,600)))hasException=true;
         await tx`UPDATE return_pass_items SET quantity_previously_returned=${previous},updated_at=NOW() WHERE id=${line.id}`;
       }
       const finalStatus=allComplete?(hasException?"Returned With Exception":"Returned"):"Partial Return";
