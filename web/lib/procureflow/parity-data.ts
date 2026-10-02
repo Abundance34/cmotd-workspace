@@ -21,6 +21,9 @@ export type ParityData = {
   gateways: any[];
   gatewayItems: any[];
   gatewayReviewQueue: any[];
+  returnPasses: any[];
+  returnPassItems: any[];
+  returnPassReviewQueue: any[];
   threads: any[];
   messages: any[];
   invoices: any[];
@@ -169,10 +172,56 @@ export async function getParityData(user: CurrentUser): Promise<ParityData> {
     : await sql<any[]>`SELECT gp.*, fm.full_name facility_manager_name, rv.full_name reviewed_by_name, av.full_name approved_by_name FROM gateway_passes gp LEFT JOIN users fm ON fm.id=gp.facility_manager_user_id LEFT JOIN users rv ON rv.id=gp.reviewed_by_user_id LEFT JOIN users av ON av.id=gp.approved_by_user_id ORDER BY COALESCE(gp.updated_at,gp.created_at) DESC LIMIT 400`;
   const gatewayIds = gateways.map((row:any)=>Number(row.id)).filter(Boolean);
   const gatewayItems = gatewayIds.length
-    ? await sql<any[]>`SELECT * FROM gateway_pass_items WHERE gateway_pass_id IN ${sql(gatewayIds)} ORDER BY gateway_pass_id,id`
+    ? await sql<any[]>`
+      SELECT gi.*,
+        COALESCE((
+          SELECT SUM(rpi.quantity_returned)
+          FROM return_pass_items rpi
+          JOIN return_passes rp ON rp.id=rpi.return_pass_id
+          WHERE rpi.gateway_pass_item_id=gi.id
+            AND rp.status IN ('Returned','Partial Return','Returned With Exception')
+        ),0) returned_quantity
+      FROM gateway_pass_items gi
+      WHERE gi.gateway_pass_id IN ${sql(gatewayIds)}
+      ORDER BY gi.gateway_pass_id,gi.id`
     : [];
   const gatewayReviewQueue = (user.role === "Procurement Manager" || user.role === "Logistics Officer" || user.role === "Admin")
     ? gateways.filter((row:any) => ["Submitted","Pending Procurement Manager / Approver Review"].includes(String(row.status||"")))
+    : [];
+
+  const returnPasses = user.role === "Facility Manager"
+    ? await sql<any[]>`
+      SELECT rp.*,gp.pass_number gateway_pass_number,gp.expected_movement_date,gp.expected_return_date,gp.destination gateway_destination,
+             gp.return_status gateway_return_status,fm.full_name facility_manager_name,rv.full_name reviewed_by_name,av.full_name approved_by_name
+      FROM return_passes rp
+      JOIN gateway_passes gp ON gp.id=rp.gateway_pass_id
+      LEFT JOIN users fm ON fm.id=rp.facility_manager_user_id
+      LEFT JOIN users rv ON rv.id=rp.reviewed_by_user_id
+      LEFT JOIN users av ON av.id=rp.approved_by_user_id
+      WHERE rp.facility_manager_user_id=${user.id}
+      ORDER BY COALESCE(rp.updated_at,rp.created_at) DESC,rp.id DESC`
+    : ["Logistics Officer","Procurement Manager","Approver","Admin","Auditor"].includes(user.role)
+      ? await sql<any[]>`
+        SELECT rp.*,gp.pass_number gateway_pass_number,gp.expected_movement_date,gp.expected_return_date,gp.destination gateway_destination,
+               gp.return_status gateway_return_status,fm.full_name facility_manager_name,rv.full_name reviewed_by_name,av.full_name approved_by_name
+        FROM return_passes rp
+        JOIN gateway_passes gp ON gp.id=rp.gateway_pass_id
+        LEFT JOIN users fm ON fm.id=rp.facility_manager_user_id
+        LEFT JOIN users rv ON rv.id=rp.reviewed_by_user_id
+        LEFT JOIN users av ON av.id=rp.approved_by_user_id
+        ORDER BY COALESCE(rp.updated_at,rp.created_at) DESC,rp.id DESC`
+      : [];
+  const returnPassIds=returnPasses.map((row:any)=>Number(row.id)).filter(Boolean);
+  const returnPassItems=returnPassIds.length
+    ? await sql<any[]>`
+      SELECT rpi.*,gi.item_description,gi.item_category,gi.unit_of_measure,gi.serial_number,gi.asset_tag,gi.quality_condition outbound_condition
+      FROM return_pass_items rpi
+      JOIN gateway_pass_items gi ON gi.id=rpi.gateway_pass_item_id
+      WHERE rpi.return_pass_id IN ${sql(returnPassIds)}
+      ORDER BY rpi.return_pass_id,rpi.id`
+    : [];
+  const returnPassReviewQueue=(user.role==="Logistics Officer"||user.role==="Admin")
+    ? returnPasses.filter((row:any)=>String(row.status||"")==="Submitted"&&["logistics_manager","logistics"].includes(String(row.next_role||"")))
     : [];
 
   const threads = user.role === "Facility Manager"
@@ -260,8 +309,11 @@ export async function getParityData(user: CurrentUser): Promise<ParityData> {
     vendorQuotes: vendorQuotes.map((r:any)=>({...r,id:Number(r.id),vendor_id:Number(r.vendor_id),quoted_amount:numberValue(r.quotation_total??r.quoted_amount),vendor_rating:numberValue(r.vendor_rating),score:numberValue(r.score)})),
     vendorPayments: vendorPayments.map((r:any)=>({...r,id:Number(r.id),vendor_id:Number(r.vendor_id),amount:numberValue(r.amount)})),
     vendorReceiving: vendorReceiving.map((r:any)=>({...r,id:Number(r.id),vendor_id:Number(r.vendor_id)})),
-    gateways: gateways.map((r:any)=>({...r,id:Number(r.id)})), gatewayItems: gatewayItems.map((r:any)=>({...r,id:Number(r.id),gateway_pass_id:Number(r.gateway_pass_id),quantity:numberValue(r.quantity),estimated_value:numberValue(r.estimated_value)})),
+    gateways: gateways.map((r:any)=>({...r,id:Number(r.id)})), gatewayItems: gatewayItems.map((r:any)=>({...r,id:Number(r.id),gateway_pass_id:Number(r.gateway_pass_id),quantity:numberValue(r.quantity),returned_quantity:numberValue(r.returned_quantity),estimated_value:numberValue(r.estimated_value)})),
     gatewayReviewQueue: gatewayReviewQueue.map((r:any)=>({...r,id:Number(r.id)})),
+    returnPasses: returnPasses.map((r:any)=>({...r,id:Number(r.id),gateway_pass_id:Number(r.gateway_pass_id),facility_manager_user_id:Number(r.facility_manager_user_id)})),
+    returnPassItems: returnPassItems.map((r:any)=>({...r,id:Number(r.id),return_pass_id:Number(r.return_pass_id),gateway_pass_item_id:Number(r.gateway_pass_item_id),quantity_outbound:numberValue(r.quantity_outbound),quantity_previously_returned:numberValue(r.quantity_previously_returned),quantity_returned:numberValue(r.quantity_returned)})),
+    returnPassReviewQueue: returnPassReviewQueue.map((r:any)=>({...r,id:Number(r.id)})),
     threads: threads.map((r:any)=>({...r,id:Number(r.id)})), messages: messages.map((r:any)=>({...r,id:Number(r.id),thread_id:Number(r.thread_id)})),
     invoices: invoices.map((r:any)=>({...r,id:Number(r.id),amount:numberValue(r.amount),tax_amount:numberValue(r.tax_amount),total_amount:numberValue(r.total_amount),balance_due:numberValue(r.balance_due)})),
     expenses: expenses.map((r:any)=>({...r,id:Number(r.id),amount:numberValue(r.amount),tax_amount:numberValue(r.tax_amount)})),
