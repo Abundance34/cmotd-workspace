@@ -519,7 +519,8 @@ export async function runParityAction(user:CurrentUser, action:string, payload:a
       for(const line of lines){
         const outbound=wholeNumber(line.outbound_qty,"outbound quantity");
         const previous=Math.max(0,Math.round(Number(line.previous_approved||0)));
-        const current=wholeNumber(line.quantity_returned||0,`return quantity for ${line.item_description}`);
+        const current=Number(line.quantity_returned||0);
+        if(!Number.isInteger(current)||current<0)throw new Error(`Return quantity for ${line.item_description} must be a whole number.`);
         if(current+previous>outbound)throw new Error(`Verified quantity for ${line.item_description} exceeds the original outbound quantity.`);
         if(current+previous<outbound)allComplete=false;
         if(String(line.condition_on_return||"Good")!=="Good"||clean(line.discrepancy_type,120)||clean(line.discrepancy_notes,600))hasException=true;
