@@ -26,6 +26,7 @@ import { GlobalTools } from "@/components/global-tools";
 import { AuditorReviewWorkspace } from "@/components/auditor-review-workspace";
 import { AuditorPayeeDetails } from "@/components/auditor-payee-details";
 import { VendorGovernanceWorkspace } from "@/components/vendor-governance-workspace";
+import { ReturnPassWorkspace } from "@/components/return-pass-workspace";
 
 export type CompleteShellUser = { id: number; fullName: string; username: string; role: ProcureFlowRole };
 
@@ -61,6 +62,7 @@ function FacilitySection({section,data,parityData}:{section:string;data:any;pari
   async function submit(id:number){setBusy(id);setMsg(null);try{const r=await fetch("/api/facility/requests/submit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requestId:id})});const p=await r.json().catch(()=>({}));if(!r.ok)throw new Error(p?.error||"Unable to submit request.");setMsg({type:"success",text:"Request submitted to Procurement Manager."});router.refresh();}catch(e){setMsg({type:"error",text:e instanceof Error?e.message:"Unable to submit request."});}finally{setBusy(null)}}
   if(section==="Create Request Draft")return <FacilityDraftForm/>;
   if(["Vendor Directory","Suggest Vendor","My Vendor Suggestions"].includes(section))return <VendorGovernanceWorkspace section={section} role="Facility Manager" data={parityData}/>;
+  if(section==="Return Pass")return <ReturnPassWorkspace section={section} role="Facility Manager" data={parityData}/>;
   if(["Import Documents","Gateway Pass","Shared Thread with Procurement Manager","My Activity History"].includes(section))return <ParityWorkspace section={section} role="Facility Manager" data={parityData}/>;
   if(section==="My Draft Requests")return <GenericRequestTable rows={data?.drafts||[]}/>;
   if(section==="Returned Requests")return <GenericRequestTable rows={data?.returned||[]}/>;
@@ -75,6 +77,7 @@ function ProcurementSection({section,data,parityData}:{section:string;data:any;p
   if(section==="Sourcing & Quotations")return <ProcurementSourcing tasks={data?.sourcingTasks||[]} vendors={data?.vendors||[]}/>;
   if(section==="Vendor Recommendations")return <ProcurementRecommendations tasks={data?.sourcingTasks||[]} approvalLimit={data?.approvalLimit||parityData.policyLimit}/>;
   if(section==="Vendor Directory")return <VendorGovernanceWorkspace section={section} role="Procurement Manager" data={parityData}/>;
+  if(section==="Return Pass Register")return <ReturnPassWorkspace section={section} role="Procurement Manager" data={parityData}/>;
   if(["Low-Value Approvals","Import Center","Commercial PO Management","Gateway Pass Review","Post-Payment Closure","Availability / Away Notice","Procurement Documents","Procurement Reports","My Activity History"].includes(section))return <ParityWorkspace section={section} role="Procurement Manager" data={parityData}/>;
   return null;
 }
@@ -85,6 +88,7 @@ function ApproverSection({section,data,parityData}:{section:string;data:any;pari
   if(section==="PO Approval")return <ApproverPOApprovals rows={data?.pendingPOs||[]} approvalLimit={data?.approvalLimit||parityData.policyLimit}/>;
   if(section==="Payment Approval")return <ApproverPaymentApprovals rows={data?.pendingPayments||[]} approvalLimit={data?.approvalLimit||parityData.policyLimit}/>;
   if(section==="Approved Gateway Passes")return <ParityWorkspace section={section} role="Approver" data={parityData}/>;
+  if(section==="Return Pass Register")return <ReturnPassWorkspace section={section} role="Approver" data={parityData}/>;
   if(section==="Availability / Away Notice")return <ParityWorkspace section={section} role="Approver" data={parityData}/>;
   if(section==="My Approval History")return <ApprovalTable rows={data?.history||[]}/>;
   return null;
@@ -170,7 +174,7 @@ export function CompleteRoleShell(props:Props){
     else if(user.role==="Procurement Manager")content=<ProcurementSection section={section} data={procurementData} parityData={parityData}/>;
     else if(user.role==="Approver")content=<ApproverSection section={section} data={approverData} parityData={parityData}/>;
     else if(user.role==="Finance")content=<FinanceSection section={section} data={financeData} parityData={parityData}/>;
-    else if(user.role==="Logistics Officer")content=section==="Gateway Pass Review & Approval"?<ParityWorkspace section={section} role="Logistics Officer" data={parityData}/>:<CompleteLogisticsWorkspace section={section} data={logisticsData} items={logisticsItems} parityData={parityData}/>;
+    else if(user.role==="Logistics Officer")content=section==="Return Pass Review"?<ReturnPassWorkspace section={section} role="Logistics Officer" data={parityData}/>:section==="Gateway Pass Review & Approval"?<ParityWorkspace section={section} role="Logistics Officer" data={parityData}/>:<CompleteLogisticsWorkspace section={section} data={logisticsData} items={logisticsItems} parityData={parityData}/>;
     else if(user.role==="Admin")content=<AdminEvidenceSection section={section} data={adminData} parityData={parityData} securityStatus={securityStatus} user={user}/>;
     else if(user.role==="Auditor")content=<AuditorSection section={section} data={auditorData} parityData={parityData}/>;
     if(!content)content=<ParityWorkspace section={section} role={user.role} data={parityData}/>;

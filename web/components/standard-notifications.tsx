@@ -6,13 +6,13 @@ import { useRouter } from "next/navigation";
 const ROLE_SECTIONS: Record<string, string[]> = {
   "Facility Manager": [
     "Utility / Facility Dashboard", "Create Request Draft", "My Draft Requests", "Submit to Procurement Manager",
-    "Vendor Directory", "Suggest Vendor", "My Vendor Suggestions", "Import Documents", "Gateway Pass",
+    "Vendor Directory", "Suggest Vendor", "My Vendor Suggestions", "Import Documents", "Gateway Pass", "Return Pass",
     "Shared Thread with Procurement Manager", "Returned Requests", "Approved / Accepted Requests", "Income", "My Activity History", "Settings",
   ],
   "Procurement Manager": [
     "Operations Dashboard", "Purchase Requests", "Low-Value Approvals", "Utility Head / Facility Head Inbox",
     "Import Center", "Sourcing & Quotations", "Vendor Recommendations", "Commercial PO Management", "Vendor Directory",
-    "Gateway Pass Review", "Post-Payment Closure", "Availability / Away Notice", "Procurement Documents",
+    "Gateway Pass Review", "Return Pass Register", "Post-Payment Closure", "Availability / Away Notice", "Procurement Documents",
     "Procurement Reports", "Income", "My Activity History", "Settings",
   ],
   Approver: [
@@ -25,7 +25,7 @@ const ROLE_SECTIONS: Record<string, string[]> = {
   ],
   "Logistics Officer": [
     "Logistics Dashboard", "PO Delivery Handover", "Delivery Tracking", "Receiving Slips", "Delivery Exceptions & Returns",
-    "Gateway Pass Review & Approval", "Gateway Pass Coordination", "Logistics Documents", "My Activity History", "Settings",
+    "Gateway Pass Review & Approval", "Return Pass Review", "Gateway Pass Coordination", "Logistics Documents", "My Activity History", "Settings",
   ],
   Admin: [
     "Admin Control Centre", "Action & Exception Centre", "Workflow Intervention Centre", "User Management",
@@ -55,6 +55,7 @@ function inferTarget(role: string, notification: any) {
     if (/vendor directory|approved vendor|supplier/.test(text)) return "Vendor Directory";
     if (/return|correction|resubmit/.test(text)) return "Returned Requests";
     if (/draft/.test(text)) return "My Draft Requests";
+    if (/return pass|return reconciliation|physical return/.test(text)) return "Return Pass";
     if (/gateway/.test(text)) return "Gateway Pass";
     if (/thread|message|collaboration/.test(text)) return "Shared Thread with Procurement Manager";
     if (/approved|accepted|processed/.test(text)) return "Approved / Accepted Requests";
@@ -70,6 +71,7 @@ function inferTarget(role: string, notification: any) {
     if (/recommend/.test(text)) return "Vendor Recommendations";
     if (/quote|sourc/.test(text)) return "Sourcing & Quotations";
     if (/purchase order|\bpo\b/.test(text)) return "Commercial PO Management";
+    if (/return pass|return reconciliation|partially returned|fully returned/.test(text)) return "Return Pass Register";
     if (/gateway/.test(text)) return "Gateway Pass Review";
     if (/closure|close|completed|paid/.test(text)) return "Post-Payment Closure";
     if (/document|attachment|receipt/.test(text)) return "Procurement Documents";
@@ -103,6 +105,7 @@ function inferTarget(role: string, notification: any) {
   }
 
   if (role === "Logistics Officer") {
+    if (/return pass|return verification|physical return/.test(text) || String(notification?.section_target || "") === "Return Pass Review") return "Return Pass Review";
     if (/gateway/.test(text) && (/awaiting approval|review and approval|ready for review|requires review|approve gateway/.test(text) || String(notification?.section_target || "") === "Gateway Pass Review & Approval")) return "Gateway Pass Review & Approval";
     if (/gateway/.test(text)) return "Gateway Pass Coordination";
     if (/receiv|proof of delivery|delivery note/.test(text)) return "Receiving Slips";
