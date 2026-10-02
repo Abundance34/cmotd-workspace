@@ -50,3 +50,17 @@ Introduces controlled vendor governance and replaces the flat vendor category mo
 - Sourcing now accepts only active approved Vendor Directory records; manual/unregistered quote vendors are no longer permitted.
 
 The migration is additive and compatible with the previous application revision while the new UI is deployed.
+
+
+## `010_return_pass_module.sql`
+
+Adds a controlled Return Pass lifecycle linked directly to approved Gateway Passes.
+
+- A Facility Manager starts a Return Pass from an approved Gateway Pass rather than creating an unrelated movement.
+- Return quantities are reconciled per original Gateway Pass item as **Outbound → Previously Returned → Returning Now → Outstanding**.
+- Multiple Return Passes may be linked to one Gateway Pass, allowing partial returns.
+- Logistics Manager performs the physical return verification and may approve, return for correction, or reject with a reason.
+- Verified outcomes update the linked Gateway Pass return status to **Partially Returned**, **Fully Returned**, or **Returned With Exception**.
+- Return Pass item quantities are whole-number controlled and cannot exceed the remaining outstanding quantity.
+- Adds `return_passes`, `return_pass_items`, and `return_pass_events`, plus return summary columns on `gateway_passes`.
+- The migration is additive, so the currently deployed Gateway Pass workflow remains compatible before the Return Pass UI is promoted.
