@@ -394,7 +394,7 @@ export async function runParityAction(user:CurrentUser, action:string, payload:a
                     WHERE rpi.gateway_pass_item_id=gi.id AND rp.status IN ('Returned','Partial Return','Returned With Exception')),0) previous_returned
         FROM gateway_pass_items gi WHERE gi.gateway_pass_id=${gatewayPassId} ORDER BY gi.id FOR UPDATE OF gi`;
       if(!sourceItems.length)throw new Error("The gateway pass has no item lines to return.");
-      const requested=new Map(items.map((item:any)=>[Number(item.gatewayPassItemId),item]));
+      const requested=new Map<number,any>(); for(const input of items)requested.set(Number(input.gatewayPassItemId),input);
       let hasReturn=false;
       const prepared=sourceItems.map((item:any)=>{
         const input=requested.get(Number(item.id))||{};
@@ -438,7 +438,7 @@ export async function runParityAction(user:CurrentUser, action:string, payload:a
           COALESCE((SELECT SUM(rpi.quantity_returned) FROM return_pass_items rpi JOIN return_passes other ON other.id=rpi.return_pass_id
                     WHERE rpi.gateway_pass_item_id=gi.id AND other.id<>${id} AND other.status IN ('Returned','Partial Return','Returned With Exception')),0) previous_returned
         FROM gateway_pass_items gi WHERE gi.gateway_pass_id=${rp.gateway_pass_id} ORDER BY gi.id`;
-      const requested=new Map(items.map((item:any)=>[Number(item.gatewayPassItemId),item]));
+      const requested=new Map<number,any>(); for(const input of items)requested.set(Number(input.gatewayPassItemId),input);
       let hasReturn=false;
       const prepared=sourceItems.map((item:any)=>{
         const input=requested.get(Number(item.id))||{};
