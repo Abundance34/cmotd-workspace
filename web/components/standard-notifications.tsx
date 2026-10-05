@@ -252,12 +252,24 @@ export function StandardSectionNotice({
     try{await markRead(0);router.refresh();}
     catch{setDismissed(current=>{const next=new Set(current);ids.forEach(id=>next.delete(id));return next;});}
   }
+  async function open(notification:any) {
+    const id=Number(notification.id);
+    setDismissed(current=>new Set(current).add(id));
+    const requestId=Number(notification.entity_id||0);
+    const eventName=section==="Approved Requests"?"procureflow:open-approved-request":section==="Pending Payments"?"procureflow:open-pending-payment":"procureflow:open-approver-request";
+    if(requestId>0)window.dispatchEvent(new CustomEvent(eventName,{detail:{requestId}}));
+    try{await markRead(id);router.refresh();}
+    catch{setDismissed(current=>{const next=new Set(current);next.delete(id);return next;});}
+  }
 
   return <div className="standard-section-notices" aria-label={`Unread ${section} notifications`}>
     {relevant.length>1?<div className="standard-section-notice-actions"><button type="button" onClick={()=>void dismissAll()}><Check size={14}/> Mark all read</button></div>:null}
-    {relevant.map((notification) => <article key={notification.id}>
-      <div><span>NEW</span><strong>{notification.title || "New activity"}</strong><p>{notification.message || "New workflow activity is available."}</p></div>
-      <button type="button" onClick={() => void dismiss(Number(notification.id))}><Check size={14}/> Mark read</button>
-    </article>)}
+    {relevant.map((notification) => {
+      const executiveOpen=role==="Approver"&&["Pending Approvals","Approved Requests","Pending Payments"].includes(section)&&String(notification.entity_type||"")==="Purchase Request";
+      return <article key={notification.id}>
+        <div><span>NEW</span><strong>{notification.title || "New activity"}</strong><p>{notification.message || "New workflow activity is available."}</p></div>
+        {executiveOpen?<button type="button" onClick={()=>void open(notification)}>Open <ChevronRight size={14}/></button>:<button type="button" onClick={() => void dismiss(Number(notification.id))}><Check size={14}/> Mark read</button>}
+      </article>;
+    })}
   </div>;
 }
