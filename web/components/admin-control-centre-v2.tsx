@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { Activity, ChevronDown, ChevronRight, Circle, Clock3, FileSearch, Search, UsersRound } from "lucide-react";
 import type { AdminDashboardData } from "@/lib/procureflow/admin-data";
 
@@ -147,18 +147,7 @@ export function AdminProcurementRecordsV2({ data, initialStatus }: { data: Admin
   const workflow = selected ? data.evidence.workflow.filter((row) => row.entityId === selected.id && /purchase request|request/i.test(String(row.entityType || ""))) : [];
   const approvals = selected ? data.evidence.approvals.filter((row) => row.entityId === selected.id && /purchase request|request/i.test(String(row.entityType || ""))) : [];
 
-  return <div className="admin-v2-records">
-    <section className="admin-v2-record-controls">
-      <div className="admin-v2-record-search"><Search size={15}/><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search request number, department, category, requester, vendor…"/></div>
-      <label><span>Status</span><select value={status} onChange={(e) => { setStatus(e.target.value); setSelectedId(null); }}><option value="All">All procurement records</option>{statuses.map((s) => <option value={s} key={s}>{s} ({data.requestStatusCounts.find((row) => row.status === s)?.count || 0})</option>)}</select></label>
-    </section>
-
-    <div className="admin-v2-status-chips"><button className={status === "All" ? "active" : ""} onClick={() => setStatus("All")}>All <b>{data.requestDetails.length}</b></button>{data.requestStatusCounts.slice(0, 8).map((row) => <button className={status === row.status ? "active" : ""} key={row.status} onClick={() => { setStatus(row.status); setSelectedId(null); }}>{row.status} <b>{row.count}</b></button>)}</div>
-
-    <div className="admin-v2-record-summary"><strong>{rows.length} record{rows.length === 1 ? "" : "s"}</strong><span>{status === "All" ? "All statuses" : status} · click any request number to open the full transaction view</span></div>
-    {rows.length ? <div className="table-wrap"><table className="data-table admin-v2-request-table"><thead><tr><th>Request</th><th>Department / Project</th><th>Category</th><th>Amount</th><th>Status</th><th>Payment</th><th>Next role</th><th>Updated</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id} className={selectedId === row.id ? "selected" : ""} onClick={() => setSelectedId(row.id)}><td><button type="button" className="admin-v2-request-link"><FileSearch size={13}/><span><strong>{row.requestNo}</strong><small>{dateText(row.requestDate)}</small></span></button></td><td>{row.departmentProject || "—"}<small>{row.requestedBy || "—"} · {roleLabel(row.requesterRole)}</small></td><td>{row.category || "—"}</td><td>{money(row.estimatedAmount)}</td><td><Status value={row.status}/></td><td>{row.paymentStatus || "—"}</td><td>{roleLabel(row.nextRole)}</td><td>{dateText(row.updatedAt)}</td></tr>)}</tbody></table></div> : <Empty text="No procurement records match this status/search filter."/>}
-
-    {selected ? <article className="admin-v2-request-360">
+  const detailPanel = selected ? <article className="admin-v2-request-360">
       <header><div><span>Purchase Request 360°</span><h3>{selected.requestNo}</h3><p>Read-only Admin view of the complete procurement transaction and its linked evidence.</p></div><div><Status value={selected.status}/><button type="button" onClick={() => setSelectedId(null)}>Close details</button></div></header>
 
       <div className="admin-v2-facts">
@@ -190,6 +179,19 @@ export function AdminProcurementRecordsV2({ data, initialStatus }: { data: Admin
       <DetailSection title={"Purchase orders & receiving (" + pos.length + " PO)"}>{pos.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>PO</th><th>Vendor</th><th>Amount</th><th>Status</th><th>Logistics</th><th>Receiving</th></tr></thead><tbody>{pos.map((row) => <tr key={row.id}><td><strong>{row.poNo}</strong></td><td>{row.vendorName || "—"}</td><td>{money(row.amount)}</td><td>{row.status || "—"}</td><td>{row.logisticsStatus || "—"}</td><td>{row.receivingStatus || "—"}</td></tr>)}</tbody></table></div> : <Empty text="No purchase order is linked to this request."/>}{receiving.length ? <div className="admin-v2-mini-list">{receiving.map((row) => <div key={row.id}><strong>{row.slipNo}</strong><span>{dateText(row.dateReceived)} · {row.status || "—"} · {row.discrepancyNotes || "No discrepancy"}</span></div>)}</div> : null}</DetailSection>
 
       <DetailSection title={"Finance, payments & receipts (" + payments.length + " payment)"}>{payments.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Payment</th><th>Vendor</th><th>Amount</th><th>Status</th><th>Verification</th><th>Reference</th><th>Date</th></tr></thead><tbody>{payments.map((row) => <tr key={row.id}><td><strong>{row.paymentNo}</strong></td><td>{row.vendorName || "—"}</td><td>{money(row.amount)}</td><td>{row.status || "—"}</td><td>{row.verificationStatus || "—"}</td><td>{row.paymentReference || "—"}</td><td>{dateText(row.paymentDate || row.createdAt)}</td></tr>)}</tbody></table></div> : <Empty text="No payment is linked to this request."/>}{receipts.length ? <div className="admin-v2-mini-list">{receipts.map((row) => <div key={row.id}><strong>{row.receiptNo}</strong><span>{row.receiptType || "Receipt"} · {money(row.amount)} · {row.status || "—"} · {dateText(row.createdAt)}</span></div>)}</div> : null}</DetailSection>
-    </article> : null}
+    </article> : null;
+
+  return <div className="admin-v2-records">
+    <section className="admin-v2-record-controls">
+      <div className="admin-v2-record-search"><Search size={15}/><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search request number, department, category, requester, vendor…"/></div>
+      <label><span>Status</span><select value={status} onChange={(e) => { setStatus(e.target.value); setSelectedId(null); }}><option value="All">All procurement records</option>{statuses.map((s) => <option value={s} key={s}>{s} ({data.requestStatusCounts.find((row) => row.status === s)?.count || 0})</option>)}</select></label>
+    </section>
+
+    <div className="admin-v2-status-chips"><button className={status === "All" ? "active" : ""} onClick={() => setStatus("All")}>All <b>{data.requestDetails.length}</b></button>{data.requestStatusCounts.slice(0, 8).map((row) => <button className={status === row.status ? "active" : ""} key={row.status} onClick={() => { setStatus(row.status); setSelectedId(null); }}>{row.status} <b>{row.count}</b></button>)}</div>
+
+    <div className="admin-v2-record-summary"><strong>{rows.length} record{rows.length === 1 ? "" : "s"}</strong><span>{status === "All" ? "All statuses" : status} · click any request to expand its full transaction view directly underneath</span></div>
+    {rows.length ? <div className="table-wrap"><table className="data-table admin-v2-request-table"><thead><tr><th>Request</th><th>Department / Project</th><th>Category</th><th>Amount</th><th>Status</th><th>Payment</th><th>Next role</th><th>Updated</th></tr></thead><tbody>{rows.map((row) => <Fragment key={row.id}><tr className={selectedId === row.id ? "selected" : ""} onClick={() => setSelectedId((current) => current === row.id ? null : row.id)} aria-expanded={selectedId === row.id}><td><button type="button" className="admin-v2-request-link" aria-label={(selectedId === row.id ? "Collapse " : "Open ") + row.requestNo}><FileSearch size={14}/><span><strong>{row.requestNo}</strong><small>{dateText(row.requestDate)}</small></span>{selectedId === row.id ? <ChevronDown className="admin-v2-row-chevron" size={16}/> : <ChevronRight className="admin-v2-row-chevron" size={16}/>}</button></td><td>{row.departmentProject || "—"}<small>{row.requestedBy || "—"} · {roleLabel(row.requesterRole)}</small></td><td>{row.category || "—"}</td><td>{money(row.estimatedAmount)}</td><td><Status value={row.status}/></td><td>{row.paymentStatus || "—"}</td><td>{roleLabel(row.nextRole)}</td><td>{dateText(row.updatedAt)}</td></tr>{selectedId === row.id && detailPanel ? <tr className="admin-v2-inline-detail-row"><td colSpan={8}>{detailPanel}</td></tr> : null}</Fragment>)}</tbody></table></div> : <Empty text="No procurement records match this status/search filter."/>}
+
+
   </div>;
 }

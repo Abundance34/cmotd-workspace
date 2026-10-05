@@ -9,3 +9,77 @@
 
 @media(max-width:1200px){.admin-v2-metric-grid{grid-template-columns:repeat(3,1fr)}.admin-v2-dashboard-grid{grid-template-columns:1fr}.admin-v2-bottlenecks{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:760px){.admin-v2-live-strip,.admin-v2-record-summary{align-items:flex-start;flex-direction:column}.admin-v2-live-strip>div{align-items:flex-start;flex-wrap:wrap}.admin-v2-metric-grid{grid-template-columns:repeat(2,1fr)}.admin-v2-record-controls{grid-template-columns:1fr}.admin-v2-bars>button{grid-template-columns:1fr}.admin-v2-bottlenecks{grid-template-columns:1fr}.admin-v2-facts,.admin-v2-detail-grid{grid-template-columns:1fr}.admin-v2-timeline>div{grid-template-columns:1fr}.admin-v2-months{gap:4px}.admin-v2-columns{gap:2px}}
+
+
+/* Admin readability + inline request expansion hotfix */
+.admin-control-centre-v2-shell{color:#172033}
+.admin-control-centre-v2-shell .sidebar{color:#243247}
+.admin-control-centre-v2-shell .sidebar-context span,
+.admin-control-centre-v2-shell .sidebar-context small,
+.admin-control-centre-v2-shell .topbar p,
+.admin-control-centre-v2-shell .page-heading p{color:#526174!important}
+.admin-control-centre-v2-shell .admin-v2-nav-heading{color:#44546a!important;font-size:10px!important;font-weight:900!important;letter-spacing:.07em}
+.admin-control-centre-v2-shell .admin-v2-nav-items>button{color:#334155!important;font-size:11.5px!important;font-weight:700!important}
+.admin-control-centre-v2-shell .admin-v2-nav-items>button svg{opacity:.75!important}
+.admin-control-centre-v2-shell .admin-v2-nav-items>button:hover{background:#eef4ff!important;color:#163b70!important}
+.admin-control-centre-v2-shell .admin-v2-nav-items>button.active{color:#fff!important;background:linear-gradient(90deg,#2563eb,#4f7fe8)!important}
+.admin-control-centre-v2-shell .breadcrumb{color:#223047!important;font-weight:750}
+.admin-control-centre-v2-shell .user-chip strong{color:#172033!important}
+.admin-control-centre-v2-shell .user-chip small{color:#5b6b7f!important}
+.admin-control-centre-v2-shell .eyebrow{color:#3559d9!important;font-weight:900!important}
+.admin-control-centre-v2-shell .page-heading h1{color:#14213a!important}
+.admin-control-centre-v2-shell .status-pill{color:#3157d5!important;font-weight:800!important}
+
+.admin-control-centre-v2-shell .admin-v2-record-controls label>span,
+.admin-control-centre-v2-shell .admin-v2-record-summary span,
+.admin-control-centre-v2-shell .admin-v2-status-chips button,
+.admin-control-centre-v2-shell .admin-v2-request-link small,
+.admin-control-centre-v2-shell .admin-v2-facts small,
+.admin-control-centre-v2-shell .admin-v2-detail-grid span,
+.admin-control-centre-v2-shell .admin-v2-timeline span,
+.admin-control-centre-v2-shell .admin-v2-timeline small,
+.admin-control-centre-v2-shell .admin-v2-timeline p,
+.admin-control-centre-v2-shell .admin-v2-mini-list span{color:#516176!important}
+
+.admin-control-centre-v2-shell .admin-v2-record-search input,
+.admin-control-centre-v2-shell .admin-v2-record-controls select{color:#172033!important;font-size:10px!important;font-weight:600}
+.admin-control-centre-v2-shell .admin-v2-record-search input::placeholder{color:#6b7a8e!important;opacity:1}
+.admin-control-centre-v2-shell .admin-v2-status-chips button{font-size:9px!important;font-weight:700!important}
+.admin-control-centre-v2-shell .admin-v2-status-chips button b{color:#172033!important}
+.admin-control-centre-v2-shell .admin-v2-record-summary strong{font-size:11px!important;color:#172033!important}
+.admin-control-centre-v2-shell .admin-v2-record-summary span{font-size:9px!important}
+
+.admin-control-centre-v2-shell .admin-v2-records .data-table th{color:#435168!important;font-size:9.5px!important;font-weight:850!important}
+.admin-control-centre-v2-shell .admin-v2-records .data-table td{color:#172033!important;font-size:10px!important;font-weight:560!important}
+.admin-control-centre-v2-shell .admin-v2-records .data-table td small{color:#5d6d81!important;font-size:8.5px!important}
+.admin-control-centre-v2-shell .admin-v2-request-link{color:#153f73!important}
+.admin-control-centre-v2-shell .admin-v2-request-link strong{font-size:10px!important;font-weight:800!important}
+.admin-control-centre-v2-shell .admin-v2-row-chevron{margin-left:auto;flex:0 0 auto;color:#335f9d}
+.admin-control-centre-v2-shell .admin-v2-request-table tbody>tr:not(.admin-v2-inline-detail-row){transition:background .15s ease,box-shadow .15s ease}
+.admin-control-centre-v2-shell .admin-v2-request-table tbody>tr:not(.admin-v2-inline-detail-row):hover{background:#f2f7ff!important}
+.admin-control-centre-v2-shell .admin-v2-request-table tbody>tr.selected{background:#edf4ff!important;box-shadow:inset 3px 0 0 #2563eb}
+.admin-control-centre-v2-shell .admin-v2-inline-detail-row>td{padding:0!important;background:#f8fbff!important;border-top:0!important;border-bottom:1px solid #cfe0f4!important}
+.admin-control-centre-v2-shell .admin-v2-inline-detail-row:hover{background:#f8fbff!important}
+.admin-control-centre-v2-shell .admin-v2-inline-detail-row .admin-v2-request-360{margin:10px 12px 16px;border-color:#b9cee9;box-shadow:0 8px 22px rgba(27,67,115,.08)}
+.admin-control-centre-v2-shell .admin-v2-request-360>header span,
+.admin-control-centre-v2-shell .admin-v2-facts span{color:#4a5b70!important}
+.admin-control-centre-v2-shell .admin-v2-request-360>header h3,
+.admin-control-centre-v2-shell .admin-v2-facts strong,
+.admin-control-centre-v2-shell .admin-v2-detail-section h4,
+.admin-control-centre-v2-shell .admin-v2-detail-grid p,
+.admin-control-centre-v2-shell .admin-v2-timeline strong,
+.admin-control-centre-v2-shell .admin-v2-mini-list strong{color:#172033!important}
+.admin-control-centre-v2-shell .admin-v2-request-360>header p{color:#526174!important;font-size:9px!important}
+.admin-control-centre-v2-shell .status-chip{font-weight:800!important}
+
+.admin-control-centre-v2-shell .admin-v2-dashboard .admin-v2-card h3,
+.admin-control-centre-v2-shell .admin-v2-dashboard .admin-v2-metric-grid strong,
+.admin-control-centre-v2-shell .admin-v2-dashboard .admin-v2-bars strong,
+.admin-control-centre-v2-shell .admin-v2-dashboard .admin-v2-active-users strong,
+.admin-control-centre-v2-shell .admin-v2-dashboard .admin-v2-feed strong{color:#172033!important}
+.admin-control-centre-v2-shell .admin-v2-dashboard .admin-v2-card p,
+.admin-control-centre-v2-shell .admin-v2-dashboard .admin-v2-metric-grid small,
+.admin-control-centre-v2-shell .admin-v2-dashboard .admin-v2-bars span,
+.admin-control-centre-v2-shell .admin-v2-dashboard .admin-v2-active-users small,
+.admin-control-centre-v2-shell .admin-v2-dashboard .admin-v2-feed p,
+.admin-control-centre-v2-shell .admin-v2-dashboard .admin-v2-feed small{color:#526174!important}
