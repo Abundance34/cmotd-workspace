@@ -2,6 +2,7 @@
 
 import { BellRing, Check, ChevronRight } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { useState } from "react";
 
 const ROLE_SECTIONS: Record<string, string[]> = {
   "Facility Manager": [
@@ -28,10 +29,10 @@ const ROLE_SECTIONS: Record<string, string[]> = {
     "Gateway Pass Review & Approval", "Return Pass Review", "Gateway Pass Coordination", "Logistics Documents", "My Activity History", "Settings",
   ],
   Admin: [
-    "Admin Control Centre", "Action & Exception Centre", "Workflow Intervention Centre", "User Management",
+    "Admin Dashboard", "Reimbursement Request", "Action & Exception Centre", "Workflow Intervention Centre", "User Management",
     "Roles & Permissions", "Security & Access Management", "Approval Configuration", "Budget Tracker", "Income",
-    "Import Center", "All Procurement Records", "Notifications", "Availability & Delegation", "Gateway Pass Management",
-    "Activity Logs", "Audit Logs", "Database Console", "Backup / Export", "Settings",
+    "Import Center", "All Procurement Records", "Notifications Monitor", "Availability & Delegation Requests", "Gateway Pass Management",
+    "Activity & History Logs", "Audit Logs", "Database Viewer", "Backup / Export", "Settings",
   ],
   Auditor: [
     "Audit Dashboard", "Transaction 360", "Procurement Records", "Facility / Utility Handoff Trail", "Sourcing & Vendor Quote Audit",
@@ -125,10 +126,10 @@ function inferTarget(role: string, notification: any) {
     if (/budget/.test(text)) return "Budget Tracker";
     if (/income/.test(text)) return "Income";
     if (/audit/.test(text)) return "Audit Logs";
-    if (/activity/.test(text)) return "Activity Logs";
+    if (/activity/.test(text)) return "Activity & History Logs";
     if (/workflow|rescission|intervention/.test(text)) return "Workflow Intervention Centre";
     if (/request|procurement|payment|vendor|purchase order|\bpo\b/.test(text)) return "All Procurement Records";
-    return "Notifications";
+    return "Notifications Monitor";
   }
 
   if (role === "Auditor") {
@@ -188,7 +189,9 @@ export function StandardNotificationBanner({
   onNavigate: (section: string) => void;
 }) {
   const router = useRouter();
+  const [dismissed,setDismissed]=useState<Set<number>>(()=>new Set());
   const unread = standardizeNotifications(role, notifications)
+    .filter((notification)=>!dismissed.has(Number(notification.id)))
     .filter((notification) => !notification.is_read)
     .sort((a, b) => importanceRank(b.importance) - importanceRank(a.importance));
 
@@ -196,9 +199,10 @@ export function StandardNotificationBanner({
   const visible = unread.slice(0, 3);
 
   async function openNotification(notification: any) {
-    await markRead(Number(notification.id)).catch(() => undefined);
+    const id=Number(notification.id);
+    setDismissed(current=>new Set(current).add(id));
     onNavigate(notification.section_target);
-    router.refresh();
+    try{await markRead(id);router.refresh();}catch{setDismissed(current=>{const next=new Set(current);next.delete(id);return next;});}
   }
 
   return <section className="standard-notification-banner" aria-label="Unread notifications">
@@ -228,7 +232,9 @@ export function StandardSectionNotice({
   notifications: any[];
 }) {
   const router = useRouter();
+  const [dismissed,setDismissed]=useState<Set<number>>(()=>new Set());
   const relevant = standardizeNotifications(role, notifications)
+    .filter((notification) => !dismissed.has(Number(notification.id)))
     .filter((notification) => !notification.is_read && String(notification.section_target || "") === section)
     .sort((a, b) => importanceRank(b.importance) - importanceRank(a.importance))
     .slice(0, 3);
@@ -236,11 +242,19 @@ export function StandardSectionNotice({
   if (!relevant.length) return null;
 
   async function dismiss(notificationId: number) {
-    await markRead(notificationId).catch(() => undefined);
-    router.refresh();
+    setDismissed(current=>new Set(current).add(notificationId));
+    try{await markRead(notificationId);router.refresh();}
+    catch{setDismissed(current=>{const next=new Set(current);next.delete(notificationId);return next;});}
+  }
+  async function dismissAll() {
+    const ids=relevant.map((notification)=>Number(notification.id));
+    setDismissed(current=>{const next=new Set(current);ids.forEach(id=>next.add(id));return next;});
+    try{await markRead(0);router.refresh();}
+    catch{setDismissed(current=>{const next=new Set(current);ids.forEach(id=>next.delete(id));return next;});}
   }
 
   return <div className="standard-section-notices" aria-label={`Unread ${section} notifications`}>
+    {relevant.length>1?<div className="standard-section-notice-actions"><button type="button" onClick={()=>void dismissAll()}><Check size={14}/> Mark all read</button></div>:null}
     {relevant.map((notification) => <article key={notification.id}>
       <div><span>NEW</span><strong>{notification.title || "New activity"}</strong><p>{notification.message || "New workflow activity is available."}</p></div>
       <button type="button" onClick={() => void dismiss(Number(notification.id))}><Check size={14}/> Mark read</button>
