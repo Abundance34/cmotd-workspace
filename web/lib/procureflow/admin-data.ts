@@ -173,7 +173,7 @@ export async function getAdminDashboardData(): Promise<AdminDashboardData> {
         WHERE COALESCE(payment_date,created_at::date)>=date_trunc('month',CURRENT_DATE)-INTERVAL '5 months'
         GROUP BY 1
       )
-      SELECT to_char(m.month_start,'Mon YYYY') month,COALESCE(r.requested,0) requested,COALESCE(r.approved,0) approved,COALESCE(p.paid,0) paid
+      SELECT to_char(m.month_start,'Mon YYYY') AS month_label,COALESCE(r.requested,0) AS requested,COALESCE(r.approved,0) AS approved,COALESCE(p.paid,0) AS paid
       FROM months m LEFT JOIN requests r ON r.month_start=m.month_start LEFT JOIN paid p ON p.month_start=m.month_start
       ORDER BY m.month_start
     `,
@@ -238,7 +238,7 @@ export async function getAdminDashboardData(): Promise<AdminDashboardData> {
     })),
     requestItems: requestItemRows.map((row) => ({id:Number(row.id),requestId:Number(row.request_id),itemName:row.item_name,description:row.description,quantity:Number(row.quantity||0),unitPrice:Number(row.unit_price||0),total:Number(row.total||0),category:row.category,suggestedVendor:row.suggested_vendor})),
     requestStatusCounts: requestStatusRows.map((row) => ({status:row.status,count:Number(row.count||0),amount:Number(row.amount||0)})),
-    monthlyProcurement: monthlyRows.map((row) => ({month:row.month,requested:Number(row.requested||0),approved:Number(row.approved||0),paid:Number(row.paid||0)})),
+    monthlyProcurement: monthlyRows.map((row) => ({month:row.month_label,requested:Number(row.requested||0),approved:Number(row.approved||0),paid:Number(row.paid||0)})),
     roleActivity24h: roleActivityRows.map((row) => ({role:row.role,count:Number(row.count||0),lastActivityAt:textDate(row.last_activity_at)})),
     bottlenecks: (() => { const b=bottleneckRows[0]||{}; return [
       {key:"review",title:"Procurement review > 24h",detail:"Requests still waiting for Procurement review after 24 hours.",count:Number(b.review_over_24h||0),statusFilter:"Sent for Procurement Review",section:"All Procurement Records"},
