@@ -166,7 +166,7 @@ const need=(s,m,l)=>{if(!s.includes(m))throw new Error(`Approver executive patch
       </article>;
     })}
   </div>;`;
- need(s,old,"section notice actions");s=s.replace(old,neu);need(s,'"Approved Requests"',"Approved Requests notification target");need(s,"procureflow:open-approver-request","Open request notification");write(p,s);
+ if(!s.includes("procureflow:open-approver-request")){need(s,old,"section notice actions");s=s.replace(old,neu);}need(s,'"Approved Requests"',"Approved Requests notification target");need(s,"procureflow:open-approver-request","Open request notification");write(p,s);
 }
 {
  const p="app/local-preview-parity.css";let s=read(p);

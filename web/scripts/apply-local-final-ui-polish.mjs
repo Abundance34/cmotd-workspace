@@ -46,9 +46,14 @@ function replaceRequired(source, search, replacement, label) {
   }
 
   if (!source.includes("sidebarCollapsed")) {
-    const marker = 'const [section,setSection]=useState(nav.sections[0]);const standardNotifications=standardizeNotifications(user.role,parityData.notifications);';
+    const markers = [
+      'const [section,setSection]=useState(nav.sections[0]);const [adminRecordStatus,setAdminRecordStatus]=useState<string|undefined>(undefined);const standardNotifications=standardizeNotifications(user.role,parityData.notifications);',
+      'const [section,setSection]=useState(nav.sections[0]);const standardNotifications=standardizeNotifications(user.role,parityData.notifications);',
+    ];
+    const marker = markers.find((candidate) => source.includes(candidate));
+    if (!marker) throw new Error("Final UI polish could not find sidebar collapse state anchor.");
     const replacement = `${marker}\n  const [sidebarCollapsed,setSidebarCollapsed]=useState(false);\n  useEffect(()=>{try{setSidebarCollapsed(localStorage.getItem("procureflow-sidebar-collapsed")==="1")}catch{}},[]);\n  function toggleSidebar(){setSidebarCollapsed(current=>{const next=!current;try{localStorage.setItem("procureflow-sidebar-collapsed",next?"1":"0")}catch{}return next})}`;
-    source = replaceRequired(source, marker, replacement, "sidebar collapse state anchor");
+    source = source.replace(marker, replacement);
   }
 
   const oldBrand = '<div className="sidebar-brand sidebar-brand-cmotd" aria-label="CMOTD ProcureFlow"><Image src="/branding/cmotd_logo_full_dark.svg" alt="CMOTD" width={220} height={46} className="sidebar-brand-wordmark sidebar-brand-wordmark-light" priority/><Image src="/branding/cmotd_logo_full_light.svg" alt="" aria-hidden="true" width={220} height={46} className="sidebar-brand-wordmark sidebar-brand-wordmark-dark" priority/></div>';
