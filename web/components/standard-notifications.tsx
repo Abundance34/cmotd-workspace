@@ -170,13 +170,13 @@ function importanceRank(value: unknown) {
   return 1;
 }
 
-async function markRead(notificationId: number) {
-  if (!notificationId) return;
-  await fetch("/api/parity/action", {
+async function markRead(notificationId?: number) {
+  const response=await fetch("/api/parity/action", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "notification-read", payload: { notificationId } }),
+    body: JSON.stringify({ action: "notification-read", payload: notificationId ? { notificationId } : {} }),
   });
+  if(!response.ok)throw new Error("Unable to mark notification as read.");
 }
 
 export function StandardNotificationBanner({
@@ -249,7 +249,7 @@ export function StandardSectionNotice({
   async function dismissAll() {
     const ids=relevant.map((notification)=>Number(notification.id));
     setDismissed(current=>{const next=new Set(current);ids.forEach(id=>next.add(id));return next;});
-    try{await markRead(0);router.refresh();}
+    try{await markRead();router.refresh();}
     catch{setDismissed(current=>{const next=new Set(current);ids.forEach(id=>next.delete(id));return next;});}
   }
   async function open(notification:any) {
