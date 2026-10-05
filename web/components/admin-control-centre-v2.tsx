@@ -91,7 +91,7 @@ function RoleActivityChart({ data }: { data: AdminDashboardData }) {
 }
 
 export function AdminOperationsDashboardV2({ data, onNavigate, onOpenRecords }: { data: AdminDashboardData; onNavigate: (section: string) => void; onOpenRecords: (status?: string) => void }) {
-  const activeSessions = useMemo(() => data.evidence.sessions.filter((s) => String(s.status || "") === "Active" && (!s.expiresAt || new Date(s.expiresAt).getTime() > Date.now())), [data.evidence.sessions]);
+  const activeSessions = useMemo(() => data.evidence.sessions.filter((s) => String(s.status || "") === "Active"), [data.evidence.sessions]);
   const recentActivity = data.evidence.activities.slice(0, 10);
   const cards = [
     ["Active Users Now", activeSessions.length, "Live authenticated sessions"],
@@ -103,7 +103,7 @@ export function AdminOperationsDashboardV2({ data, onNavigate, onOpenRecords }: 
   ] as const;
 
   return <div className="admin-v2-dashboard">
-    <div className="admin-v2-live-strip"><div><Activity size={16}/><strong>Live operational overview</strong><span>Dashboard refreshes from Neon every 30 seconds while this page is open.</span></div><b>{dateTime(new Date().toISOString())}</b></div>
+    <div className="admin-v2-live-strip"><div><Activity size={16}/><strong>Live operational overview</strong><span>Dashboard refreshes from Neon every 30 seconds while this page is open.</span></div><b>Auto-refresh: 30s</b></div>
     <div className="admin-v2-metric-grid">{cards.map(([title, value, caption]) => <article key={title}><span>{title}</span><strong>{Number(value).toLocaleString("en-NG")}</strong><small>{caption}</small></article>)}</div>
 
     <div className="admin-v2-dashboard-grid">
