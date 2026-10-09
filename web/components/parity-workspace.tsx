@@ -10,7 +10,7 @@ function money(value:unknown,currency="NGN"){try{return new Intl.NumberFormat("e
 function dateText(value:unknown){if(!value)return "—";const d=new Date(String(value));return Number.isNaN(d.getTime())?String(value):d.toLocaleDateString("en-NG",{day:"2-digit",month:"short",year:"numeric"});}
 function dateTime(value:unknown){if(!value)return "—";const d=new Date(String(value));return Number.isNaN(d.getTime())?String(value):d.toLocaleString("en-NG");}
 function gatewayRoleLabel(value:unknown){return String(value||"")==="Logistics Officer"?"Logistics Manager":String(value||"—");}
-function wholeQty(value:unknown){const n=Number(value);return Number.isFinite(n)?Math.max(0,Math.round(n)):value;}
+function wholeQty(value:unknown):string|number{const n=Number(value);return Number.isFinite(n)?Math.max(0,Math.round(n)):(value==null?"—":String(value));}
 function Empty({text}:{text:string}){return <div className="empty-state">{text}</div>}
 function Status({children}:{children:any}){return <span className="status-chip">{children||"—"}</span>}
 
