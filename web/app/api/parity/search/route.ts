@@ -9,8 +9,38 @@ export async function GET(request:Request){
   const q=(new URL(request.url).searchParams.get("q")||"").trim(); if(q.length<2)return NextResponse.json({results:[]});
   const like=`%${q.slice(0,120)}%`; const sql=db(); const results:any[]=[];
   if(user.role==="Facility Manager"){
-    const req=await sql<any[]>`SELECT id,request_no,department_project,status FROM purchase_requests WHERE (facility_manager_user_id=${user.id} OR requested_by=${user.id}) AND (request_no ILIKE ${like} OR department_project ILIKE ${like} OR category ILIKE ${like} OR justification ILIKE ${like}) ORDER BY COALESCE(updated_at,created_at) DESC LIMIT 12`;
-    results.push(...req.map(r=>({type:"Purchase Request",id:Number(r.id),title:r.request_no,subtitle:`${r.department_project||""} · ${r.status||""}`,section:"My Activity History"})));
+    const req=await sql<any[]>`
+      SELECT pr.id,pr.request_no,pr.department_project,pr.category,pr.status,pr.estimated_amount,
+             COALESCE(NULLIF(string_agg(DISTINCT CASE WHEN pri.item_name ILIKE ${like} OR pri.description ILIKE ${like} OR pri.category ILIKE ${like} OR pri.suggested_vendor ILIKE ${like} THEN pri.item_name END, ', '),''),'') matched_items
+      FROM purchase_requests pr
+      LEFT JOIN purchase_request_items pri ON pri.request_id=pr.id
+      WHERE (pr.facility_manager_user_id=${user.id} OR pr.requested_by=${user.id})
+        AND (
+          pr.request_no ILIKE ${like}
+          OR pr.department_project ILIKE ${like}
+          OR pr.category ILIKE ${like}
+          OR pr.justification ILIKE ${like}
+          OR pr.notes ILIKE ${like}
+          OR pr.vendor_preference ILIKE ${like}
+          OR EXISTS (
+            SELECT 1 FROM purchase_request_items x
+            WHERE x.request_id=pr.id
+              AND (x.item_name ILIKE ${like} OR x.description ILIKE ${like} OR x.category ILIKE ${like} OR x.suggested_vendor ILIKE ${like})
+          )
+        )
+      GROUP BY pr.id,pr.request_no,pr.department_project,pr.category,pr.status,pr.estimated_amount,pr.updated_at,pr.created_at
+      ORDER BY COALESCE(pr.updated_at,pr.created_at) DESC
+      LIMIT 24`;
+    results.push(...req.map(r=>({
+      type:"Purchase Request",
+      id:Number(r.id),
+      title:r.request_no,
+      subtitle:[r.category||r.department_project,r.matched_items,r.status].filter(Boolean).join(" · "),
+      section:"My Activity History",
+      query:q,
+      category:r.category||null,
+      amount:Number(r.estimated_amount||0)
+    })));
     const gp=await sql<any[]>`SELECT id,pass_number,purpose,status FROM gateway_passes WHERE facility_manager_user_id=${user.id} AND (pass_number ILIKE ${like} OR purpose ILIKE ${like} OR destination ILIKE ${like}) ORDER BY created_at DESC LIMIT 8`;
     results.push(...gp.map(r=>({type:"Gateway Pass",id:Number(r.id),title:r.pass_number,subtitle:`${r.purpose||""} · ${r.status||""}`,section:"Gateway Pass"})));
   } else {
