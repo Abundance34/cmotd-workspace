@@ -177,6 +177,7 @@ function FacilityRequestArchive({data}:{data:ParityData}){
     function openTarget(target:any){
       const id=Number(target?.id||0);
       if(!id)return;
+      try{window.sessionStorage.removeItem("procureflow:facility-request-archive-target")}catch{}
       setTab("requests");
       setSelectedId(id);
       if(String(target?.query||"").trim())setQuery(String(target.query).trim());
