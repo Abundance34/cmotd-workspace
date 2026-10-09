@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, CheckCircle2, Download, FilePlus2, FileText, MessageSquare, Pencil, Plus, Printer, RefreshCw, Send, ShieldCheck, Truck, Upload, UserRoundCheck, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Download, FilePlus2, FileText, History, MessageSquare, Pencil, Plus, Printer, RefreshCw, Search, Send, ShieldCheck, Truck, Upload, UserRoundCheck, XCircle } from "lucide-react";
 import type { ProcureFlowRole } from "@/lib/procureflow/roles";
 import type { ParityData } from "@/lib/procureflow/parity-data";
 
@@ -10,7 +10,7 @@ function money(value:unknown,currency="NGN"){try{return new Intl.NumberFormat("e
 function dateText(value:unknown){if(!value)return "—";const d=new Date(String(value));return Number.isNaN(d.getTime())?String(value):d.toLocaleDateString("en-NG",{day:"2-digit",month:"short",year:"numeric"});}
 function dateTime(value:unknown){if(!value)return "—";const d=new Date(String(value));return Number.isNaN(d.getTime())?String(value):d.toLocaleString("en-NG");}
 function gatewayRoleLabel(value:unknown){return String(value||"")==="Logistics Officer"?"Logistics Manager":String(value||"—");}
-function wholeQty(value:unknown){const n=Number(value);return Number.isFinite(n)?Math.max(0,Math.round(n)):value;}
+function wholeQty(value:unknown):string|number{const n=Number(value);return Number.isFinite(n)?Math.max(0,Math.round(n)):(value==null?"—":String(value));}
 function Empty({text}:{text:string}){return <div className="empty-state">{text}</div>}
 function Status({children}:{children:any}){return <span className="status-chip">{children||"—"}</span>}
 
@@ -151,6 +151,136 @@ function Reports({role}:{role:ProcureFlowRole}){const kinds=role==="Finance"?["p
 
 function Activity({data}:{data:ParityData}){return <div className="parity-stack"><div className="parity-section-head"><div><h3>Activity & History</h3><p>Marking notifications as read never deletes this evidence.</p></div><ExportButtons kind="activity"/></div>{data.activities.length?<div className="table-wrap"><table className="data-table"><thead><tr><th>Time</th><th>Role</th><th>Action</th><th>Entity</th><th>Summary</th><th>Visibility</th></tr></thead><tbody>{data.activities.map((a:any)=><tr key={a.id}><td>{dateTime(a.created_at)}</td><td>{a.role||"—"}</td><td><strong>{a.action}</strong></td><td>{a.entity_type||"—"} {a.entity_id?`#${a.entity_id}`:""}</td><td>{a.public_summary||"—"}</td><td>{a.visibility_scope||"—"}</td></tr>)}</tbody></table></div>:<Empty text="No activity history is available."/>}</div>}
 
+function FacilityRequestArchive({data}:{data:ParityData}){
+  const [tab,setTab]=useState<"requests"|"activity">("requests");
+  const [query,setQuery]=useState("");
+  const [category,setCategory]=useState("All");
+  const [status,setStatus]=useState("All");
+  const [dateRange,setDateRange]=useState("all");
+  const [selectedId,setSelectedId]=useState<number|null>(null);
+
+  const itemsByRequest=useMemo(()=>{
+    const map=new Map<number,any[]>();
+    for(const item of data.requestItems||[]){
+      const id=Number(item.request_id);
+      const rows=map.get(id)||[];
+      rows.push(item);
+      map.set(id,rows);
+    }
+    return map;
+  },[data.requestItems]);
+
+  const categories=useMemo(()=>Array.from(new Set(data.requests.map((r:any)=>String(r.category||"").trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b)),[data.requests]);
+  const statuses=useMemo(()=>Array.from(new Set(data.requests.map((r:any)=>String(r.status||"").trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b)),[data.requests]);
+
+  useEffect(()=>{
+    function openTarget(target:any){
+      const id=Number(target?.id||0);
+      if(!id)return;
+      try{window.sessionStorage.removeItem("procureflow:facility-request-archive-target")}catch{}
+      setTab("requests");
+      setSelectedId(id);
+      if(String(target?.query||"").trim())setQuery(String(target.query).trim());
+      window.setTimeout(()=>document.getElementById(`facility-request-${id}`)?.scrollIntoView({behavior:"smooth",block:"center"}),80);
+    }
+    try{
+      const raw=window.sessionStorage.getItem("procureflow:facility-request-archive-target");
+      if(raw){window.sessionStorage.removeItem("procureflow:facility-request-archive-target");openTarget(JSON.parse(raw));}
+    }catch{}
+    const listener=(event:Event)=>openTarget((event as CustomEvent).detail);
+    window.addEventListener("procureflow:open-facility-request",listener);
+    return()=>window.removeEventListener("procureflow:open-facility-request",listener);
+  },[]);
+
+  const filtered=useMemo(()=>{
+    const needle=query.trim().toLowerCase();
+    let cutoff=0;
+    if(dateRange!=="all"){
+      const days=dateRange==="30"?30:dateRange==="90"?90:365;
+      cutoff=Date.now()-days*86400000;
+    }
+    return data.requests.filter((request:any)=>{
+      if(category!=="All"&&String(request.category||"")!==category)return false;
+      if(status!=="All"&&String(request.status||"")!==status)return false;
+      if(cutoff){
+        const raw=request.request_date||request.created_at;
+        const time=raw?new Date(String(raw)).getTime():0;
+        if(!time||time<cutoff)return false;
+      }
+      if(!needle)return true;
+      const itemText=(itemsByRequest.get(Number(request.id))||[]).flatMap((item:any)=>[item.item_name,item.description,item.category,item.suggested_vendor]).filter(Boolean).join(" ");
+      const requestText=[
+        request.request_no,request.department_project,request.category,request.justification,request.notes,request.vendor_preference,
+        request.selected_vendor_name,request.requester_name,itemText
+      ].filter(Boolean).join(" ").toLowerCase();
+      return requestText.includes(needle);
+    });
+  },[data.requests,itemsByRequest,query,category,status,dateRange]);
+
+  const selected=data.requests.find((request:any)=>Number(request.id)===Number(selectedId))||null;
+
+  function itemSummary(requestId:number){
+    const items=itemsByRequest.get(requestId)||[];
+    if(!items.length)return "No item lines recorded";
+    const names=items.slice(0,3).map((item:any)=>item.item_name).filter(Boolean);
+    return names.join(", ")+(items.length>3?` +${items.length-3} more`:"");
+  }
+
+  function requestDetails(request:any){
+    const items=itemsByRequest.get(Number(request.id))||[];
+    const activity=data.activities.filter((row:any)=>{
+      const entityId=Number(row.entity_id||0);
+      const entity=String(row.entity_type||"").toLowerCase();
+      const summary=String(row.public_summary||"").toLowerCase();
+      return (entityId===Number(request.id)&&entity.includes("request"))||summary.includes(String(request.request_no||"").toLowerCase());
+    }).slice(0,20);
+    return <div className="facility-request-detail">
+      <div className="facility-request-detail-head"><div><span>Purchase Request</span><h3>{request.request_no}</h3><p>{request.category||"Uncategorised"} · {request.department_project||"No department/project"}</p></div><Status>{request.status}</Status></div>
+      <div className="facility-request-facts">
+        <div><span>Requested</span><strong>{dateText(request.request_date||request.created_at)}</strong></div>
+        <div><span>Estimated amount</span><strong>{money(request.estimated_amount)}</strong></div>
+        <div><span>Priority</span><strong>{request.priority||"Normal"}</strong></div>
+        <div><span>Current owner</span><strong>{gatewayRoleLabel(request.next_role)}</strong></div>
+        <div><span>Payment</span><strong>{request.payment_status||"Not Ready"}</strong></div>
+        <div><span>Procurement Manager</span><strong>{request.procurement_manager_name||"—"}</strong></div>
+        <div><span>Selected vendor</span><strong>{request.selected_vendor_name||"Not selected"}</strong></div>
+        <div><span>Last updated</span><strong>{dateText(request.updated_at||request.created_at)}</strong></div>
+      </div>
+      <section className="facility-request-detail-section"><h4>What this request is about</h4><div className="facility-request-copy-grid"><div><span>Business justification</span><p>{request.justification||"No business justification recorded."}</p></div><div><span>Notes</span><p>{request.notes||"No additional notes recorded."}</p></div><div><span>Vendor preference</span><p>{request.vendor_preference||"No vendor preference recorded."}</p></div><div><span>Required date</span><p>{dateText(request.required_date)}</p></div></div></section>
+      <section className="facility-request-detail-section"><h4>Requested items ({items.length})</h4>{items.length?<div className="table-wrap"><table className="data-table"><thead><tr><th>Item</th><th>Description</th><th>Category</th><th>Qty</th><th>Unit price</th><th>Total</th><th>Suggested vendor</th></tr></thead><tbody>{items.map((item:any)=><tr key={item.id}><td><strong>{item.item_name}</strong></td><td>{item.description||"—"}</td><td>{item.category||"—"}</td><td>{wholeQty(item.quantity)}</td><td>{money(item.unit_price)}</td><td>{money(item.total)}</td><td>{item.suggested_vendor||"—"}</td></tr>)}</tbody></table></div>:<Empty text="No item lines are recorded for this request."/>}</section>
+      <section className="facility-request-detail-section"><h4>Request activity</h4>{activity.length?<div className="facility-request-timeline">{activity.map((row:any)=><div key={row.id}><span>{dateTime(row.created_at)}</span><strong>{row.action}</strong><p>{row.public_summary||row.entity_type||"Workflow activity"}</p><small>{gatewayRoleLabel(row.role)}</small></div>)}</div>:<Empty text="No request-specific activity entries are available."/>}</section>
+    </div>;
+  }
+
+  return <div className="parity-stack facility-history-archive">
+    <div className="facility-history-tabs"><button className={tab==="requests"?"active":""} onClick={()=>setTab("requests")}><Search size={15}/>My Requests</button><button className={tab==="activity"?"active":""} onClick={()=>setTab("activity")}><History size={15}/>Activity Log</button></div>
+    {tab==="activity"?<Activity data={data}/>:<>
+      <section className="facility-request-archive-intro"><div><h3>My Request Archive</h3><p>Search your procurement history by category, item name, description, justification, vendor or request number. Open any result to see exactly what was requested.</p></div><ExportButtons kind="activity"/></section>
+      <section className="facility-request-filters">
+        <label className="facility-request-search"><span>Search my requests</span><div><Search size={15}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Try toiletries, diesel, laptop, stationery…"/></div></label>
+        <label><span>Category</span><select value={category} onChange={e=>setCategory(e.target.value)}><option>All</option>{categories.map(value=><option key={value}>{value}</option>)}</select></label>
+        <label><span>Status</span><select value={status} onChange={e=>setStatus(e.target.value)}><option>All</option>{statuses.map(value=><option key={value}>{value}</option>)}</select></label>
+        <label><span>Date</span><select value={dateRange} onChange={e=>setDateRange(e.target.value)}><option value="all">All time</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option><option value="365">Last 12 months</option></select></label>
+      </section>
+      <div className="facility-request-result-summary"><strong>{filtered.length} request{filtered.length===1?"":"s"}{query.trim()?` found for “${query.trim()}”`:""}</strong><span>Click a request to expand the full details directly underneath.</span></div>
+      {filtered.length?<div className="facility-request-list">{filtered.map((request:any)=>{
+        const open=Number(selectedId)===Number(request.id);
+        return <div className={open?"facility-request-record open":"facility-request-record"} id={`facility-request-${request.id}`} key={request.id}>
+          <button className="facility-request-row" type="button" onClick={()=>setSelectedId(current=>Number(current)===Number(request.id)?null:Number(request.id))} aria-expanded={open}>
+            <div className="facility-request-primary"><strong>{request.request_no}</strong><span>{itemSummary(Number(request.id))}</span></div>
+            <div><span>Category</span><strong>{request.category||"—"}</strong></div>
+            <div><span>Amount</span><strong>{money(request.estimated_amount)}</strong></div>
+            <div><span>Status</span><Status>{request.status}</Status></div>
+            <div><span>Date</span><strong>{dateText(request.request_date||request.created_at)}</strong></div>
+            {open?<ChevronDown size={18}/>:<ChevronRight size={18}/>}
+          </button>
+          {open&&selected?requestDetails(request):null}
+        </div>;
+      })}</div>:<Empty text="No purchase requests match these search/filter choices."/>}
+    </>}
+  </div>;
+}
+
 function AuditorView({section,data}:{section:string;data:ParityData}){
   if(section==="Expense Review")return <ExpenseReadOnly data={data}/>;
   if(section==="Document Archive & Download Audit")return <Documents data={data} context="all" role="Auditor" title="Document archive"/>;
@@ -185,7 +315,8 @@ export function ParityWorkspace({section,role,data}:{section:string;role:Procure
   if(section==="Reconciliation")return <Reconciliation data={data}/>;
   if(section==="Financial Reports")return <Reports role={role}/>;
   if(section==="Logistics Documents")return <Documents data={data} context="logistics" role={role} title="Logistics Documents"/>;
-  if(section==="My Activity History"||section==="Activity & History Logs")return <Activity data={data}/>;
+  if(section==="My Activity History")return role==="Facility Manager"?<FacilityRequestArchive data={data}/>:<Activity data={data}/>;
+  if(section==="Activity & History Logs")return <Activity data={data}/>;
   if(section==="Backup / Export")return <div className="parity-stack"><div className="parity-info"><ShieldCheck size={17}/><div><strong>GCP-free recovery export</strong><span>Generates a business-data JSON recovery package from Neon. Password hashes, session tokens and decrypted payee secrets are not exported.</span></div></div><div className="parity-row"><a className="parity-primary link" href="/api/parity/export?kind=backup&format=json"><Download size={15}/>Download Recovery Package</a></div><Reports role="Admin"/></div>;
   if(role==="Auditor")return <AuditorView section={section} data={data}/>;
   return <div className="parity-stack"><div className="parity-info"><RefreshCw size={17}/><div><strong>{section}</strong><span>This section is connected to the shared ProcureFlow evidence layer. Use the activity, document and export controls below.</span></div></div><Activity data={data}/></div>;
