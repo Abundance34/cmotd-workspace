@@ -36,6 +36,7 @@ export type ParityData = {
   availability: any[];
   reconciliation: any[];
   requests: any[];
+  requestItems: any[];
   receipts: any[];
 };
 
@@ -45,12 +46,28 @@ export async function getParityData(user: CurrentUser): Promise<ParityData> {
   const policyLimit = numberValue(policyRows[0]?.amount || 100000);
 
   const requests = user.role === "Facility Manager"
-    ? await sql<any[]>`SELECT pr.*, u.full_name requester_name, pm.full_name procurement_manager_name FROM purchase_requests pr LEFT JOIN users u ON u.id=pr.requested_by LEFT JOIN users pm ON pm.id=pr.assigned_procurement_manager_id WHERE pr.facility_manager_user_id=${user.id} OR pr.requested_by=${user.id} ORDER BY COALESCE(pr.updated_at,pr.created_at) DESC LIMIT 300`
+    ? await sql<any[]>`
+      SELECT pr.*,u.full_name requester_name,pm.full_name procurement_manager_name,sv.name selected_vendor_name
+      FROM purchase_requests pr
+      LEFT JOIN users u ON u.id=pr.requested_by
+      LEFT JOIN users pm ON pm.id=pr.assigned_procurement_manager_id
+      LEFT JOIN vendors sv ON sv.id=pr.selected_vendor_id
+      WHERE pr.facility_manager_user_id=${user.id} OR pr.requested_by=${user.id}
+      ORDER BY COALESCE(pr.updated_at,pr.created_at) DESC LIMIT 300`
     : user.role === "Procurement Manager"
       ? await sql<any[]>`SELECT pr.*, u.full_name requester_name, fm.full_name facility_manager_name FROM purchase_requests pr LEFT JOIN users u ON u.id=pr.requested_by LEFT JOIN users fm ON fm.id=pr.facility_manager_user_id WHERE pr.assigned_procurement_manager_id=${user.id} OR pr.next_role='procurement_manager' OR pr.requested_by=${user.id} ORDER BY COALESCE(pr.updated_at,pr.created_at) DESC LIMIT 500`
       : await sql<any[]>`SELECT pr.*, u.full_name requester_name, fm.full_name facility_manager_name, pm.full_name procurement_manager_name FROM purchase_requests pr LEFT JOIN users u ON u.id=pr.requested_by LEFT JOIN users fm ON fm.id=pr.facility_manager_user_id LEFT JOIN users pm ON pm.id=pr.assigned_procurement_manager_id ORDER BY COALESCE(pr.updated_at,pr.created_at) DESC LIMIT 500`;
 
-  const lowValueQueue = user.role === "Procurement Manager" || user.role === "Admin"
+  const requestIds=requests.map((row:any)=>Number(row.id)).filter(Boolean);
+  const requestItems=requestIds.length
+    ? await sql<any[]>`
+      SELECT id,request_id,item_name,description,quantity,unit_price,total,category,suggested_vendor,created_at
+      FROM purchase_request_items
+      WHERE request_id IN ${sql(requestIds)}
+      ORDER BY request_id,id`
+    : [];
+
+    const lowValueQueue = user.role === "Procurement Manager" || user.role === "Admin"
     ? await sql<any[]>`
       SELECT pr.*, u.full_name requester_name, u.role requester_role
       FROM purchase_requests pr JOIN users u ON u.id=pr.requested_by
@@ -320,6 +337,6 @@ export async function getParityData(user: CurrentUser): Promise<ParityData> {
     cashAdvances: cashAdvances.map((r:any)=>({...r,id:Number(r.id),amount_collected:numberValue(r.amount_collected),spent_amount:numberValue(r.spent_amount)})), advanceExpenses: advanceExpenses.map((r:any)=>({...r,id:Number(r.id),amount:numberValue(r.amount)})),
     documents: documents.map((r:any)=>({...r,id:Number(r.id),entity_id:r.entity_id==null?null:Number(r.entity_id)})),
     activities: activities.map((r:any)=>({...r,id:Number(r.id),entity_id:r.entity_id==null?null:Number(r.entity_id)})), notifications: notifications.map((r:any)=>({...r,id:Number(r.id)})), availability: availability.map((r:any)=>({...r,id:Number(r.id)})),
-    reconciliation: reconciliation.map((r:any)=>({...r,id:Number(r.id),amount:numberValue(r.amount),invoice_total:numberValue(r.invoice_total)})), requests: requests.map(mapRequest), receipts: receipts.map((r:any)=>({...r,id:Number(r.id),amount:numberValue(r.amount)})),
+    reconciliation: reconciliation.map((r:any)=>({...r,id:Number(r.id),amount:numberValue(r.amount),invoice_total:numberValue(r.invoice_total)})), requests: requests.map(mapRequest), requestItems: requestItems.map((r:any)=>({...r,id:Number(r.id),request_id:Number(r.request_id),quantity:numberValue(r.quantity),unit_price:numberValue(r.unit_price),total:numberValue(r.total)})), receipts: receipts.map((r:any)=>({...r,id:Number(r.id),amount:numberValue(r.amount)})),
   };
 }
