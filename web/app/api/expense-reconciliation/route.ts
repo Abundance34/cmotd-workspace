@@ -40,7 +40,7 @@ export async function GET(){
  const refunds=ids.length?await sql<any[]>`SELECT id,reconciliation_id,submitted_by,amount,transfer_reference,transfer_date,evidence_name,status,verified_by,verified_at,finance_note,created_at FROM expense_reconciliation_refunds WHERE reconciliation_id IN ${sql(ids)} ORDER BY id`:[];
  const requestIds=requests.map(r=>Number(r.id));
  const requestItems=requestIds.length?await sql<any[]>`SELECT id,request_id,item_name,quantity,unit_price,total,description FROM purchase_request_items WHERE request_id IN ${sql(requestIds)} ORDER BY id`:[];
- return NextResponse.json({requests,requestItems,records,items,refunds});
+ return NextResponse.json({userId:user.id,requests,requestItems,records,items,refunds});
  }catch(e){return NextResponse.json({error:e instanceof Error?e.message:"Unable to load reconciliations."},{status:500});}
 }
 export async function POST(request:Request){
