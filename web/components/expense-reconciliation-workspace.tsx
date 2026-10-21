@@ -6,7 +6,7 @@ import { AlertTriangle, ArrowRightLeft, CheckCircle2, ChevronDown, CircleDollarS
 
 type Role = string;
 type Row=any;
-type Line={id:number;item_name:string;budget_quantity:number;budget_unit_price:number;budget_total:number;actual_quantity:number;actual_unit_price:number;actual_total:number;note:string|null};
+type Line={id:number;item_name:string;item_description?:string|null;budget_quantity:number;budget_unit_price:number;budget_total:number;actual_quantity:number;actual_unit_price:number;actual_total:number;note:string|null};
 type Data={records:Row[];items:Line[];refunds:Row[];evidence:Row[];events:Row[];candidates:Row[];role:Role};
 const EMPLOYEE=new Set(["Facility Manager","ICT","Logistics Officer","Procurement Manager"]);
 const EDITABLE=new Set(["Draft","Returned for Correction"]);
@@ -38,7 +38,7 @@ export function ExpenseReconciliationWorkspace({role}:{role:Role}){
  const [error,setError]=useState("");
  const [success,setSuccess]=useState("");
  const [busy,setBusy]=useState("");
- const [tab,setTab]=useState("Mine");
+ const [tab,setTab]=useState(role==="Finance"?"Finance":role==="Admin"||role==="Auditor"?"All":role==="Approver"?"Review":"Mine");
  const [selectedId,setSelectedId]=useState<number|null>(null);
  const [newRequestId,setNewRequestId]=useState("");
  const [draftLines,setDraftLines]=useState<Line[]>([]);
@@ -81,7 +81,6 @@ export function ExpenseReconciliationWorkspace({role}:{role:Role}){
  const queue=rows.filter(r=>r.status==="Submitted"&&r.reviewer_role===role&&r.creator_id!==Number((data as any)?.currentUserId));
  const financeQueue=rows.filter(r=>r.status==="Funding Verification Pending"||r.status==="Refund Submitted"||r.status==="Partially Refunded"||r.status==="Refund Pending");
  const filtered=rows.filter(r=>{
-   if(tab==="Mine"&&employee&&!r._mine&&false)return false;
    if(tab==="Review"&&!(r.status==="Submitted"&&r.reviewer_role===role))return false;
    if(tab==="Finance"&&!financeQueue.some(f=>f.id===r.id))return false;
    if(filter&&!String([r.reconciliation_no,r.request_no,r.creator_name,r.status,r.department_project,r.request_category].join(" ")).toLowerCase().includes(filter.toLowerCase()))return false;
