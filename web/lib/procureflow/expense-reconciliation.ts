@@ -87,7 +87,8 @@ export async function getExpenseReconciliationData(user:CurrentUser){
  FROM purchase_requests pr
  WHERE pr.requested_by=${user.id}
  AND (pr.approved_at IS NOT NULL OR pr.status IN ${sql(APPROVED_REQUEST)})
- AND COALESCE(pr.status,'') NOT IN ('Draft','Rejected','Cancelled','Deleted Draft','Returned for Correction')
+ AND pr.approval_rescinded_at IS NULL
+ AND COALESCE(pr.status,'') NOT IN ('Draft','Rejected','Cancelled','Deleted Draft','Returned for Correction','Sent for Procurement Review','Submitted for Approval','Pending Approval','Pending Approver/MD Approval')
  AND NOT EXISTS(SELECT 1 FROM expense_reconciliations er WHERE er.request_id=pr.id)
  AND EXISTS(SELECT 1 FROM purchase_request_items pi WHERE pi.request_id=pr.id)
  ORDER BY COALESCE(pr.approved_at,pr.updated_at,pr.created_at) DESC LIMIT 200`:[];
@@ -117,7 +118,7 @@ export async function runExpenseReconciliationAction(user:CurrentUser,action:str
    const requestId=id(payload.requestId);
    const prs=await tx<any[]>`SELECT * FROM purchase_requests WHERE id=${requestId} FOR UPDATE`;
    const pr=prs[0];if(!pr||Number(pr.requested_by)!==user.id)throw new Error("Choose a purchase request that you created.");
-   if(!(pr.approved_at||APPROVED_REQUEST.includes(String(pr.status||"")))||["Rejected","Cancelled","Deleted Draft","Draft"].includes(String(pr.status||"")))throw new Error("Only approved purchase requests can be reconciled.");
+   if(pr.approval_rescinded_at||!(pr.approved_at||APPROVED_REQUEST.includes(String(pr.status||"")))||["Rejected","Cancelled","Deleted Draft","Draft","Returned for Correction","Sent for Procurement Review","Submitted for Approval","Pending Approval","Pending Approver/MD Approval"].includes(String(pr.status||"")))throw new Error("Only currently approved purchase requests can be reconciled.");
    const existing=await tx<any[]>`SELECT id FROM expense_reconciliations WHERE request_id=${requestId}`;
    if(existing.length)throw new Error("This request already has an expense reconciliation. Open the existing draft or record.");
    const src=await tx<any[]>`SELECT * FROM purchase_request_items WHERE request_id=${requestId} ORDER BY id`;
@@ -161,6 +162,8 @@ export async function runExpenseReconciliationAction(user:CurrentUser,action:str
   }
   if(action==="submit"){
    if(Number(r.creator_id)!==user.id||!EDITABLE.includes(r.status))throw new Error("Only your draft or returned reconciliation can be submitted.");
+   const originals=await tx<any[]>`SELECT status,approval_rescinded_at FROM purchase_requests WHERE id=${r.request_id}`;
+   if(!originals[0]||originals[0].approval_rescinded_at||["Rejected","Cancelled","Deleted Draft","Draft","Returned for Correction","Sent for Procurement Review","Submitted for Approval","Pending Approval","Pending Approver/MD Approval"].includes(String(originals[0].status||"")))throw new Error("The linked request no longer has a valid approval and cannot be reconciled.");
    const actual=await totals(tx,r);
    if(actual>Number(r.original_approved_amount)+0.001)throw new Error("Actual spending is above the approved request amount. Contact Procurement for exceptional approval first.");
    const receipts=await tx<any[]>`SELECT COUNT(*)::int count FROM expense_reconciliation_evidence WHERE reconciliation_id=${r.id} AND kind='Expense Receipt'`;
@@ -197,6 +200,7 @@ export async function runExpenseReconciliationAction(user:CurrentUser,action:str
    const released=type==="Employee Advance"?amount(payload.releasedAmount,"confirmed employee advance"):0;
    if(type==="Employee Advance"&&(released<=0||reference.length<5))throw new Error("Finance must confirm the advance amount and enter the disbursement reference.");
    if(type==="Employee Advance"&&released<Number(r.actual_total))throw new Error("Confirmed advance is less than reported expenses. Resolve the shortfall before confirming.");
+   if(type==="Employee Advance"&&released>Number(r.original_approved_amount)+0.001)throw new Error("Employee advances higher than the approved request require separate exception approval.");
    const due=amount(released-Number(r.actual_total));
    const next=type==="Budget Only"?"Savings Recorded":due>0?"Refund Pending":"Completed";
    await tx`UPDATE expense_reconciliations SET funding_type=${type},funding_reference=${reference||null},funding_note=${note||null},released_amount=${released},funding_verified_at=NOW(),finance_verified_by=${user.id},status=${next},completed_at=${CLOSED.includes(next)?new Date().toISOString():null},updated_at=NOW() WHERE id=${r.id}`;
