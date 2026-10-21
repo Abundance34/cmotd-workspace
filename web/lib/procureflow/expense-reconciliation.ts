@@ -97,7 +97,7 @@ export async function getExpenseReconciliationData(user:CurrentUser){
    evidence:evidence.map(r=>({...r,id:Number(r.id),reconciliation_id:Number(r.reconciliation_id)})),
    events:events.map(r=>({...r,id:Number(r.id),reconciliation_id:Number(r.reconciliation_id)})),
    candidates:candidates.map(r=>({...r,id:Number(r.id),estimated_amount:Number(r.estimated_amount)})),
-   role:user.role};
+   role:user.role,userId:user.id};
 }
 
 export async function getExpenseEvidence(user:CurrentUser,evidenceId:number){
