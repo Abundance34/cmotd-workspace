@@ -44,6 +44,7 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
   "Procurement Manager": {
     title: "Procurement Navigation",
     sections: [
+      "Expense Reconciliation & Refunds",
       "Operations Dashboard", "Create Request Draft", "My Draft Requests", "Purchase Requests", "Reimbursement Request", "Low-Value Approvals",
       "Utility Head / Facility Head Inbox", "Import Center", "Sourcing & Quotations", "Vendor Recommendations",
       "Commercial PO Management", "Vendor Directory", "Gateway Pass Review", "Return Pass Register", "Post-Payment Closure", "Availability / Away Notice",
@@ -53,6 +54,7 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
   "Facility Manager": {
     title: "Utility / Facility Navigation",
     sections: [
+      "Expense Reconciliation & Refunds",
       "Utility / Facility Dashboard", "Create Request Draft", "My Draft Requests", "Submit to Procurement Manager", "Reimbursement Request",
       "Vendor Directory", "Suggest Vendor", "My Vendor Suggestions", "Import Documents", "Gateway Pass", "Return Pass", "Shared Thread with Procurement Manager", "Returned Requests",
       "Approved / Accepted Requests", "Income", "My Activity History", "Settings",
@@ -61,6 +63,7 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
   "Logistics Officer": {
     title: "Logistics Manager Navigation",
     sections: [
+      "Expense Reconciliation & Refunds",
       "Logistics Dashboard", "Reimbursement Request", "PO Delivery Handover", "Delivery Tracking", "Receiving Slips",
       "Delivery Exceptions & Returns", "Gateway Pass Review & Approval", "Return Pass Review", "Gateway Pass Coordination", "Logistics Documents",
       "My Activity History", "Settings",
