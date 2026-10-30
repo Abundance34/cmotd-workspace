@@ -89,6 +89,13 @@ function makePortable(source) {
   return output;
 }
 
+function applyAdminWorkspaceMirror() {
+  const script=path.join(root,"scripts","apply-admin-workspace-mirror.mjs");
+  if(!fs.existsSync(script))throw new Error("Missing Admin workspace mirror overlay.");
+  const run=spawnSync(process.execPath,[script],{cwd:root,env:{...process.env,PROCUREFLOW_ROOT:rootPosix},stdio:"inherit"});
+  if(run.error)throw run.error;
+  if(run.status!==0)throw new Error("Admin workspace mirror overlay failed.");
+}
 function applyExpenseReconciliation() {
   const script=path.join(root,"scripts","apply-expense-reconciliation.mjs");
   if(!fs.existsSync(script))throw new Error("Missing expense reconciliation build overlay.");
@@ -98,7 +105,8 @@ function applyExpenseReconciliation() {
 }
 if (alreadyMaterialized()) {
   applyExpenseReconciliation();
-  console.log("ProcureFlow production parity is already materialized; expense reconciliation applied.");
+  applyAdminWorkspaceMirror();
+  console.log("ProcureFlow production parity is already materialized; expense reconciliation and Admin mirror applied.");
   process.exit(0);
 }
 
@@ -124,6 +132,7 @@ for (const scriptName of scripts) {
 }
 
 applyExpenseReconciliation();
+applyAdminWorkspaceMirror();
 
 if (!alreadyMaterialized()) throw new Error("ProcureFlow parity scripts completed but the final UI markers were not materialized.");
 
