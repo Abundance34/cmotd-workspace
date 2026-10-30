@@ -34,7 +34,7 @@ export const ROLE_SECTIONS: Record<ProcureFlowRole, { title: string; sections: s
   Admin: {
     title: "Admin Navigation",
     sections: [
-      "Admin Dashboard", "Reimbursement Request", "Action & Exception Centre", "Workflow Intervention Centre", "User Management",
+      "Admin Dashboard", "Reimbursement Request", "Action & Exception Centre", "Workflow Intervention Centre", "User Management", "Workspace Inspector",
       "Roles & Permissions", "Security & Access Management", "Budget Tracker", "Income",
       "Approval Configuration", "Import Center", "All Procurement Records", "Notifications Monitor",
       "Availability & Delegation Requests", "Gateway Pass Management", "Activity & History Logs",

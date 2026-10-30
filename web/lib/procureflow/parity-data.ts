@@ -45,7 +45,7 @@ export async function getParityData(user: CurrentUser): Promise<ParityData> {
   const policyRows = await sql<{amount:string|number}[]>`SELECT amount FROM approval_policy_settings WHERE policy_key='procurement_manager_approval_limit' LIMIT 1`;
   const policyLimit = numberValue(policyRows[0]?.amount || 100000);
 
-  const requests = user.role === "Facility Manager"
+  const requests = (user.role === "Facility Manager" || user.role === "ICT")
     ? await sql<any[]>`
       SELECT pr.*,u.full_name requester_name,pm.full_name procurement_manager_name,sv.name selected_vendor_name
       FROM purchase_requests pr
