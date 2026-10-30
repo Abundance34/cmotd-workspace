@@ -37,7 +37,7 @@ function Empty({ text }: { text: string }) { return <div className="empty-state"
 const ADMIN_GROUPS = [
   { name: "Overview", sections: ["Admin Dashboard"] },
   { name: "Operations", sections: ["Reimbursement Request", "All Procurement Records", "Gateway Pass Management", "Budget Tracker", "Income"] },
-  { name: "People & Workflow", sections: ["Action & Exception Centre", "Workflow Intervention Centre", "User Management", "Availability & Delegation Requests"] },
+  { name: "People & Workflow", sections: ["Action & Exception Centre", "Workflow Intervention Centre", "User Management", "Workspace Inspector", "Availability & Delegation Requests"] },
   { name: "Governance", sections: ["Roles & Permissions", "Security & Access Management", "Approval Configuration"] },
   { name: "Evidence & System", sections: ["Import Center", "Notifications Monitor", "Activity & History Logs", "Audit Logs", "Database Viewer", "Backup / Export", "Settings"] },
 ];
