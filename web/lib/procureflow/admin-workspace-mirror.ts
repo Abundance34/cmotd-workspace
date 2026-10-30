@@ -42,7 +42,7 @@ export async function startMirrorInspection(admin:CurrentUser,targetUserId:unkno
       reasonOrComment:reason,severity:"Normal",source:"nextjs"
     });
     await tx`INSERT INTO activity_logs(user_id,role,action,entity_type,entity_id,public_summary,private_details,visibility_scope,related_user_id,created_at)
-      VALUES(${admin.id},'Admin','Admin Workspace Mirror Opened','User',${targetId},'Admin read-only workspace inspection',${reason},'admin',${targetId},NOW())`;
+      VALUES(${admin.id},'Admin','Admin Workspace Mirror Opened','User',${targetId},'Admin read-only workspace inspection',${reason},'admin',NULL,NOW())`;
     return target;
   });
   return {viewId:makeMirrorToken(admin.id,Number(result.id)),targetName:String(result.full_name),role:String(result.role)};
